@@ -11,7 +11,7 @@ Deploy loop (current): edit `plugin.js` → `node --check` → `git commit` → 
 banner → drive `window.__plexusCanvas.test.*`. Switch to git→Plugins-Manager reinstall once plugin.js
 passes ~150–200 KB (currently ~65 KB). NOTE (2026-06-16): a FORKED worker can't spawn a push agent (Agent tool errors 'fork inside a forked worker'); deploy via direct MCP `update_plugin_code` instead — it echoes the 62KB code back, but the harness REDIRECTS that oversized result to a tool-result file (harmless to context, ~200 tokens), and the push STILL LANDS. Verify live via chrome-devtools (version banner + test hooks); never trust the echo. git is the canonical source; the live deploy is a reconstructed inline emit of the same edits.
 
-## DONE + verified live (v0.13.0)
+## DONE + verified live (v0.14.1)
 
 - **Phase 0** — global AppPlugin, custom panel (`registerCustomPanelType` + `createPanel` +
   `navigateToCustomType`), command palette, window-singleton dispose. Banner fires once.
@@ -75,6 +75,16 @@ passes ~150–200 KB (currently ~65 KB). NOTE (2026-06-16): a FORKED worker can'
   of the elements array = top of paint order), `Cmd/Ctrl+[` send-to-back (move to front of array).
   Arrow keys nudge the selection by 1px (Shift = 10px), updating points + arrow bindings. Verified live:
   frontOk/backOk/wasLast; nudge dx=1/dy=10; full regression sweep (copy/undo/bind/image/group) all green.
+- **FLIP-A-CARD** (v0.14.0/0.14.1) — ANY note ⇄ drawing (the "back of the card"). **Storage UNIFIED onto a
+  `file` LINE ITEM** (`plexus-scene.json`) on the record — works on every record, no `Scene` collection
+  property needed. `findSceneLine`/`loadSceneFromLine`; `saveScene` reuses a view-cached line (no dup) and
+  retries `createLineItem` 5× for fresh-record write-lag (rule 18). Command **"Plexus: Flip to drawing"**
+  flips the active editor record (blank canvas if no scene yet); in-canvas **"↩ Note"** button opens the
+  source note editor side-by-side (rule 16). Banner = PNG preview = the card's drawing face. Legacy
+  `Scene`-property records still read as fallback. **VERIFIED LIVE 2026-06-16:** `flipTest` roundTripOk=true;
+  `flipRecordTest` on a real Captures note (no Scene prop) → scene saved as line item, reloadEls=2, startedBlank;
+  `reopenTest` → fresh panel loads 2 els from the line; **MCP `get_line_items` confirms the note carries a
+  `type:file` `plexus-scene.json` line (filesize 733, blob_guid).** All 4 test records trashed after.
 
 ## KEY CORRECTIONS to the roadmap (verified live — supersede the doc)
 
@@ -114,17 +124,13 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 ## USER-REQUESTED (2026-06-16, high priority — added to goal)
 
-- **FLIP-A-CARD: any note → visual note.** Like Obsidian-Excalidraw, ANY Thymer record should become a
-  drawing by a toggle, and back — the "back of the card" duality. Command **"Plexus: Flip to drawing"**
-  on the active editor record. STORAGE DECISION needed: the current Plexus Drawings store the scene in a
-  `Scene` FILE PROPERTY, but arbitrary notes' collections don't have that property and an AppPlugin
-  CAN'T add stored props (rule 60). So for "ANY note," store the scene as a **file LINE ITEM** on the
-  record (`record.createLineItem(...,'file',...)` + `lineItem.setBlob`/`getBlob` — universal, works on
-  every record; mark it e.g. filename `plexus-scene.json`, find it on reopen by scanning line items).
-  Note's text line items stay the searchable "back"; one file line holds the scene; banner = preview.
-  (Unify: migrate Plexus Drawings to the same line-item storage so there's ONE path. Clean slate — no
-  real drawings exist yet.)
-- **IMAGE part-references (block-ref an image AND a REGION of it).** (a) Reference/embed an image element
+- **FLIP-A-CARD: any note → visual note. ✅ DONE + verified live (v0.14.1, 2026-06-16).** Shipped exactly
+  the unified-storage design below: scene = a `file` LINE ITEM (`plexus-scene.json`) on the record, so
+  ANY record can flip (no `Scene` prop needed). `record.createLineItem(null,null,'file',null,null)` +
+  `lineItem.setBlob(blob)`/`getBlob()` (SDK-verified); reopen scans `getLineItems()` for the blob named
+  `plexus-scene.json`. Both Plexus Drawings AND flipped notes use this ONE path; legacy `Scene`-property
+  read kept as fallback. See the DONE list above for the verification record.
+- **IMAGE part-references (block-ref an image AND a REGION of it).** ⏳ NEXT (this session). (a) Reference/embed an image element
   from a note via a `ref` segment to the element (needs line-level element identity — store an anchor in
   customData + navigate at action time, rules 13/26/54). (b) **Crop / region ref:** an image element gets
   a `crop` rect (Excalidraw's `crop` field); a "reference this region" action creates a crop element
