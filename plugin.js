@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.6.0';
+const PLEXUS_VERSION = '0.7.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -25,6 +25,7 @@ const TOOLS = [
   { id: 'rectangle', icon: 'ti-square', title: 'Rectangle (R)' },
   { id: 'ellipse', icon: 'ti-circle', title: 'Ellipse (O)' },
   { id: 'diamond', icon: 'ti-diamond', title: 'Diamond (D)' },
+  { id: 'arrow', icon: 'ti-arrow-right', title: 'Arrow (A)' },
   { id: 'pen', icon: 'ti-pencil', title: 'Pen (P)' },
   { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
@@ -136,15 +137,34 @@ function drawText(ctx, el) {
   for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
   ctx.restore();
 }
+function drawArrowhead(ctx, fromX, fromY, toX, toY, size) {
+  const ang = Math.atan2(toY - fromY, toX - fromX), len = size || 14, spread = 0.45;
+  ctx.beginPath();
+  ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang - spread), toY - len * Math.sin(ang - spread));
+  ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang + spread), toY - len * Math.sin(ang + spread));
+  ctx.stroke();
+}
+function drawLinear(ctx, el) {
+  const pts = el.points; if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
+  const rng = mulberry32((el.seed | 0) || 1);
+  ctx.save(); applyStroke(ctx, { stroke: el.strokeColor, strokeWidth: el.strokeWidth, opacity: el.opacity });
+  const rgh = (el.roughness == null ? 1 : el.roughness) * 1.1;
+  for (let i = 0; i < pts.length - 1; i++) roughSeg(ctx, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rng, rgh);
+  const ah = (el.strokeWidth || 2) * 5 + 6;
+  if (el.endArrowhead) { const a = pts[pts.length - 2], b = pts[pts.length - 1]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
+  if (el.startArrowhead) { const a = pts[1], b = pts[0]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
+  ctx.restore();
+}
 function drawElement(ctx, el) {
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
-  const rotated = !!el.angle;
+  const rotated = !!el.angle && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'freedraw';
   if (rotated) { ctx.save(); const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
   if (el.type === 'rectangle') roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'freedraw') drawFreedraw(ctx, el);
   else if (el.type === 'text') drawText(ctx, el);
+  else if (el.type === 'arrow' || el.type === 'line') drawLinear(ctx, el);
   if (rotated) ctx.restore();
 }
 
@@ -181,6 +201,24 @@ function makeText(wx, wy, style) {
     strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+function makeLinear(wx, wy, type, style) {
+  return {
+    id: newId(), type, x: wx, y: wy, width: 0, height: 0, angle: 0, points: [[wx, wy], [wx, wy]], // ABSOLUTE
+    startBinding: null, endBinding: null, startArrowhead: null, endArrowhead: type === 'arrow' ? 'arrow' : null,
+    strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+    strokeWidth: style.strokeWidth || 2, roughness: 1, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+function linearBBox(el) {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const [px, py] of el.points) { if (px < minx) minx = px; if (py < miny) miny = py; if (px > maxx) maxx = px; if (py > maxy) maxy = py; }
+  if (isFinite(minx)) { el.x = minx; el.y = miny; el.width = maxx - minx; el.height = maxy - miny; }
+}
+function distToSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy; return Math.hypot(px - cx, py - cy);
+}
 function newScene() {
   return {
     type: 'plexus-canvas', schema: SCENE_SCHEMA,
@@ -208,6 +246,11 @@ function sceneBounds(scene) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 function hitElement(el, wx, wy, tol) {
+  if (el.type === 'arrow' || el.type === 'line') {
+    const pts = el.points || []; const t = tol + (el.strokeWidth || 2);
+    for (let i = 0; i < pts.length - 1; i++) if (distToSeg(wx, wy, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) <= t) return true;
+    return false;
+  }
   if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2, c = Math.cos(-el.angle), s = Math.sin(-el.angle), dx = wx - cx, dy = wy - cy; wx = cx + dx * c - dy * s; wy = cy + dx * s + dy * c; }
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
@@ -364,7 +407,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && sel.type !== 'freedraw') {
+        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -373,7 +416,7 @@ class CanvasView {
         const hit = this._hitTopAt(down.x, down.y);
         if (hit) {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); this.selected.add(hit.id); }
-          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y, pts0: el.type === 'freedraw' ? el.points.map((p) => [p[0], p[1]]) : null }));
+          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null }));
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
       } else if (this.tool === 'pen') {
         mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
@@ -383,6 +426,8 @@ class CanvasView {
         const el = makeText(down.x, down.y, { stroke: this.strokeColor, fontSize: 24 });
         this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
         this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
+      } else if (this.tool === 'arrow' || this.tool === 'line') {
+        mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -394,6 +439,7 @@ class CanvasView {
       const w = this._worldAt(e);
       if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
+      if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
       if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
       if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this.dirty = true; return; }
@@ -406,6 +452,12 @@ class CanvasView {
         if (created.width < 4 && created.height < 4) created.isDeleted = true;
         else { if (created.width < 2) created.width = 8; if (created.height < 2) created.height = 8; this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
         created = null;
+      } else if (mode === 'linear' && created) {
+        linearBBox(created);
+        const dx = created.points[1][0] - created.points[0][0], dy = created.points[1][1] - created.points[0][1];
+        if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
+        else { this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
+        created = null;
       } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
@@ -416,7 +468,7 @@ class CanvasView {
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', p: 'pen', t: 'text', e: 'eraser' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -498,7 +550,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && single.type !== 'freedraw') {
+    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -591,6 +643,14 @@ class Plugin extends AppPlugin {
         el.text = 'Hello Plexus\nfrom scratch'; measureText(el);
         v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
         return { type: el.type, text: el.text, w: Math.round(el.width), h: Math.round(el.height), saved };
+      },
+      addArrow: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = makeLinear(420, 320, 'arrow', { stroke: '#7c5cff', strokeWidth: 3 });
+        el.points = [[420, 320], [560, 420]]; linearBBox(el);
+        v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
+        const tol = 6; const onLine = hitElement(el, 490, 370, tol), offLine = hitElement(el, 420, 420, tol);
+        return { type: el.type, endArrowhead: el.endArrowhead, bbox: { x: Math.round(el.x), y: Math.round(el.y), w: Math.round(el.width), h: Math.round(el.height) }, hitTest: { onLine, offLine }, saved };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
