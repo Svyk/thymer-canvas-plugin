@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.10.0';
+const PLEXUS_VERSION = '0.11.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -418,6 +418,15 @@ class CanvasView {
       if (changed) linearBBox(el);
     }
   }
+  _cloneEl(el, dx, dy) {
+    const c = JSON.parse(JSON.stringify(el)); c.id = newId(); c.x = (c.x || 0) + dx; c.y = (c.y || 0) + dy; c.seed = newSeed();
+    if (c.points) c.points = c.points.map(([px, py]) => [px + dx, py + dy]);
+    c.startBinding = null; c.endBinding = null; return c; // image fileId is shared on purpose
+  }
+  _copy() { this.plugin._clipboard = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => JSON.parse(JSON.stringify(el))); }
+  _paste() { const cb = this.plugin._clipboard; if (!cb || !cb.length) return; this.selected.clear(); for (const el of cb) { const c = this._cloneEl(el, 24, 24); this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
+  _duplicate() { if (!this.selected.size) return; const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean); this.selected.clear(); for (const el of els) { const c = this._cloneEl(el, 24, 24); this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
+  _selectAll() { this.selected = new Set(this.scene.elements.filter((x) => !x.isDeleted).map((x) => x.id)); this.dirty = true; }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
   _handles(el) {
@@ -511,6 +520,13 @@ class CanvasView {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this.redo(); else this.undo(); return; }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); e.stopPropagation(); this.redo(); return; }
+      if (e.metaKey || e.ctrlKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'c') { e.preventDefault(); e.stopPropagation(); this._copy(); return; }
+        if (k === 'v') { e.preventDefault(); e.stopPropagation(); this._paste(); return; }
+        if (k === 'd') { e.preventDefault(); e.stopPropagation(); this._duplicate(); return; }
+        if (k === 'a') { e.preventDefault(); e.stopPropagation(); this._selectAll(); return; }
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
@@ -778,6 +794,16 @@ class Plugin extends AppPlugin {
         const cached = v._imgCache && v._imgCache.get(fileId);
         const saved = await v.saveNow();
         return { type: 'image', fileId, hasDataURL: !!v.scene.files[fileId].dataURL, imgReady: !!(cached && cached.ready), saved };
+      },
+      copyTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = v.scene.elements.find((e) => !e.isDeleted); if (!el) return { error: 'no element' };
+        v.selected.clear(); v.selected.add(el.id);
+        const before = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v._duplicate(); const afterDup = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v._copy(); v.selected.clear(); v._paste(); const afterPaste = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v._selectAll(); const allSel = v.selected.size;
+        return { before, afterDup, afterPaste, dupOk: afterDup === before + 1, pasteOk: afterPaste === afterDup + 1, selectAllOk: allSel === afterPaste };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
