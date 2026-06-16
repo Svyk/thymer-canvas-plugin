@@ -32,6 +32,12 @@ passes ~150–200 KB (currently ~30 KB).
 - **Phase 4** (v0.5.0) — freehand PEN (smoothed quadratic polyline, ABSOLUTE world points, bbox via
   freedrawBBox; move shifts both points + bbox) + ERASER (drag-tombstone hit elements). Toolbar now 6
   tools (added ti-pencil/ti-eraser); P/E shortcuts. freedraw shows a dashed select box (no resize handles yet).
+- **Phase 5** (v0.6.0) — TEXT element: text tool (ti-cursor-text) → click places + opens a `<textarea>`
+  overlay (our DOM, rule 29) positioned/scaled to the camera; type (multiline) → commits on blur/Esc/
+  Cmd-Enter; empty text auto-deletes; double-click a text element (or empty canvas) to edit; canvas
+  hides the element while its overlay is open. Render via `ctx.fillText` per line; `measureText` keeps
+  bbox in sync. ALSO: time-windowed pending-context (see Known issue) — restored panels no longer steal
+  a fresh open's record.
 
 ## KEY CORRECTIONS to the roadmap (verified live — supersede the doc)
 
@@ -54,10 +60,12 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 ## KNOWN ISSUE to fix (found Phase 4, 2026-06-15)
 
-- **Pending-context FIFO queue mis-pairs with RESTORED panels.** When Thymer restores saved Plexus
-  custom panels on reload, each fires `_mountPanel` with an empty queue → renders the blank ("New
-  Drawing") state and can consume a guid meant for a freshly-opened panel. Data is SAFE (in the
-  record); only the panel doesn't auto-reopen its drawing. Repro: open several drawings, reload.
+- **PARTIALLY FIXED (v0.6.0):** the mis-pairing (a restored panel STEALING a fresh open's record) is
+  fixed via a time-windowed pending queue — `_mountPanel` only consumes a guid queued in the last ~4s.
+- **STILL OPEN:** a RESTORED Plexus panel (saved in the layout, reopened on reload) renders the blank
+  "New Drawing" state instead of reopening its drawing — because the record guid isn't persisted in the
+  panel's nav state. Data is SAFE (in the record); the user just re-opens the drawing. The proper fix
+  below makes restored panels reopen automatically.
 - **Fix (SDK lead, verified in types.d.ts):** stop using `panel.navigateToCustomType(id)` +
   a queue. Instead persist the record guid in the panel's nav state: `panel.navigateTo({type:"custom",
   subId:"<panelId>:<recordGuid>" (or state:{recordGuid}), rootId:null, workspaceGuid:this.getWorkspaceGuid()})`
@@ -69,7 +77,6 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 ## NEXT (roadmap §9, not yet built)
 
-- **Phase 5** — text element (our own `<textarea>` overlay — rule 29) + bound text.
 - **Phase 6** — arrows + binding (focus+gap, boundElements reverse index).
 - **Phase 7** — undo/redo (invertible deltas + shouldCreateEntry), groups/frames, images (per-image
   blobs), full property panel, in-panel Settings modal, copy/paste, IndexedDB cache, concurrency rev-check.
