@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.7.0';
+const PLEXUS_VERSION = '0.8.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -328,6 +328,7 @@ class CanvasView {
     this.dirty = true; this.destroyed = false; this._saveTimer = null; this._localDisposers = [];
     this.tool = 'select'; this.selected = new Set();
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
+    this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
   }
   mount() {
     try { this.panel.setTitle('Plexus'); } catch (_e) {}
@@ -461,12 +462,15 @@ class CanvasView {
       } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
+      else if (mode === 'pan' && moved) { this._saveCamera(); }
       this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
       mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
     };
-    const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this.scheduleSave(); };
+    const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this._saveCamera(); };
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this.redo(); else this.undo(); return; }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); e.stopPropagation(); this.redo(); return; }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
@@ -532,8 +536,18 @@ class CanvasView {
     if (this.rec) { let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {} if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } } }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
+    this._committed = JSON.stringify(this.scene);
     this.dirty = true; if (fresh && this.rec) this.saveNow();
   }
+  _snapshot() { return JSON.stringify(this.scene); }
+  _restore(json) {
+    try { this.scene = JSON.parse(json); } catch (_e) { return; }
+    this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
+    this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera).then((r) => { this._lastSave = r; });
+  }
+  undo() { if (!this._undo.length) return; this._redo.push(this._snapshot()); this._restore(this._undo.pop()); }
+  redo() { if (!this._redo.length) return; this._undo.push(this._snapshot()); this._restore(this._redo.pop()); }
+  _saveCamera() { this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom; if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   render() {
     if (this.destroyed || !this.staticCv) return;
     const z = this.camera.zoom, d = this.dpr;
@@ -564,7 +578,12 @@ class CanvasView {
       ictx.setLineDash([]);
     }
   }
-  scheduleSave() { if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
+  scheduleSave() {
+    // edit save: record an undo step (push the prior committed state, snapshot the new one)
+    if (this._committed !== undefined) { this._undo.push(this._committed); if (this._undo.length > 80) this._undo.shift(); this._redo = []; }
+    this._committed = this._snapshot();
+    if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
+  }
   async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera); this._lastSave = res; return res; }
   destroy() { this.destroyed = true; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
@@ -651,6 +670,16 @@ class Plugin extends AppPlugin {
         v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
         const tol = 6; const onLine = hitElement(el, 490, 370, tol), offLine = hitElement(el, 420, 420, tol);
         return { type: el.type, endArrowhead: el.endArrowhead, bbox: { x: Math.round(el.x), y: Math.round(el.y), w: Math.round(el.width), h: Math.round(el.height) }, hitTest: { onLine, offLine }, saved };
+      },
+      undoTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        v._committed = v._snapshot(); v._undo = []; v._redo = []; // clean baseline (test hooks bypass scheduleSave)
+        const before = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v.scene.elements.push(makeRect(500, 600, 80, 80, { stroke: '#ef4444' })); v.scheduleSave();
+        const afterAdd = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v.undo(); const afterUndo = v.scene.elements.filter((e) => !e.isDeleted).length;
+        v.redo(); const afterRedo = v.scene.elements.filter((e) => !e.isDeleted).length;
+        return { before, afterAdd, afterUndo, afterRedo, undoOk: afterUndo === before, redoOk: afterRedo === afterAdd };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
