@@ -25,6 +25,13 @@ passes ~150–200 KB (currently ~30 KB).
 - **Phase 2** — floating toolbar (select/rectangle/ellipse/diamond + 6 color swatches), create-on-drag,
   click-select, shift-multiselect, drag-move, Delete/Backspace, V/R/O/D/Esc shortcuts (scoped to a
   focusable canvas), selection box on the interactive layer, autosave on mutation.
+- **Phase 3** (v0.4.0) — transform: 8 resize handles + rotate handle; OBB resize in the element's LOCAL
+  frame (correct for rotated elements, opposite handle stays fixed — `_applyResize`); rotation rendering
+  (rotate about center in drawElement) + rotated hit-testing (un-rotate the point); 15° rotate snap (Shift).
+  Verified live: drag SE +40/+30 → w 220→260, h 140→170; rotate 30°; 9 handles render.
+- **Phase 4** (v0.5.0) — freehand PEN (smoothed quadratic polyline, ABSOLUTE world points, bbox via
+  freedrawBBox; move shifts both points + bbox) + ERASER (drag-tombstone hit elements). Toolbar now 6
+  tools (added ti-pencil/ti-eraser); P/E shortcuts. freedraw shows a dashed select box (no resize handles yet).
 
 ## KEY CORRECTIONS to the roadmap (verified live — supersede the doc)
 
@@ -47,8 +54,6 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 ## NEXT (roadmap §9, not yet built)
 
-- **Phase 3** — transform: resize handles (8) + rotate handle, OBB math, modifier keys, snapping guides.
-- **Phase 4** — freehand pen (vendored perfect-freehand) + eraser + pen presets.
 - **Phase 5** — text element (our own `<textarea>` overlay — rule 29) + bound text.
 - **Phase 6** — arrows + binding (focus+gap, boundElements reverse index).
 - **Phase 7** — undo/redo (invertible deltas + shouldCreateEntry), groups/frames, images (per-image
