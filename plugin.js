@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.14.1';
+const PLEXUS_VERSION = '0.15.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -30,6 +30,7 @@ const TOOLS = [
   { id: 'pen', icon: 'ti-pencil', title: 'Pen (P)' },
   { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
+  { id: 'crop', icon: 'ti-crop', title: 'Reference a region of an image (C) — drag a box over an image' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -222,6 +223,8 @@ function makeImage(x, y, w, h, fileId, style) {
     id: newId(), type: 'image', x, y, width: w, height: h, angle: 0, fileId,
     strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 1,
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [], scale: [1, 1],
+    crop: (style && style.crop) || null,      // {x,y,w,h} in NATURAL image pixels — renders just that region
+    cropOf: (style && style.cropOf) || null,  // provenance: element id this region was referenced from
   };
 }
 function distToSeg(px, py, ax, ay, bx, by) {
@@ -524,6 +527,8 @@ class CanvasView {
         this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
       } else if (this.tool === 'arrow' || this.tool === 'line') {
         mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
+      } else if (this.tool === 'crop') {
+        mode = 'crop'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; this.selected.clear();
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -537,6 +542,7 @@ class CanvasView {
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
       if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
+      if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this._updateBindings(); this.dirty = true; return; }
@@ -563,6 +569,10 @@ class CanvasView {
         }
         created = null;
       } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
+      else if (mode === 'crop') {
+        const rect = this._cropRect; this._cropRect = null;
+        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._referenceRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
+      }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
       else if (mode === 'pan' && moved) { this._saveCamera(); }
@@ -586,7 +596,7 @@ class CanvasView {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -663,7 +673,13 @@ class CanvasView {
     const img = this._imgFor(el.fileId);
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
-    if (img) { try { ctx.drawImage(img, el.x, el.y, el.width, el.height); } catch (_e) {} }
+    if (img) {
+      try {
+        const c = el.crop;
+        if (c && c.w > 0 && c.h > 0) ctx.drawImage(img, c.x, c.y, c.w, c.h, el.x, el.y, el.width, el.height);
+        else ctx.drawImage(img, el.x, el.y, el.width, el.height);
+      } catch (_e) {}
+    }
     else { const z = this.camera.zoom; ctx.fillStyle = 'rgba(124,92,255,0.08)'; ctx.fillRect(el.x, el.y, el.width, el.height); ctx.strokeStyle = '#7c5cff'; ctx.lineWidth = 1 / z; ctx.setLineDash([5 / z, 4 / z]); ctx.strokeRect(el.x, el.y, el.width, el.height); ctx.setLineDash([]); }
     ctx.restore();
   }
@@ -675,6 +691,37 @@ class CanvasView {
     const fileId = newFileId(); if (!this.scene.files) this.scene.files = {};
     this.scene.files[fileId] = { dataURL, mimeType: file.type || 'image/png', w: dims.w, h: dims.h };
     const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  // Topmost image element whose box overlaps the given world rect (for the crop marquee).
+  _topImageIn(rect) {
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) {
+      const el = this.scene.elements[i]; if (el.isDeleted || el.type !== 'image') continue;
+      const ex0 = Math.min(el.x, el.x + el.width), ex1 = Math.max(el.x, el.x + el.width);
+      const ey0 = Math.min(el.y, el.y + el.height), ey1 = Math.max(el.y, el.y + el.height);
+      if (rect.x + rect.w > ex0 && rect.x < ex1 && rect.y + rect.h > ey0 && rect.y < ey1) return el;
+    }
+    return null;
+  }
+  // "Reference PART of an image": create a NEW image element showing just the world-rect region of
+  // imgEl. Shares the same fileId (no data copy) + carries a `crop` in natural pixels. Handles
+  // crop-of-crop (referencing a region of an already-cropped element).
+  _referenceRegion(imgEl, rect) {
+    if (!imgEl || imgEl.type !== 'image' || !imgEl.width || !imgEl.height) return null;
+    const file = this.scene.files && this.scene.files[imgEl.fileId];
+    const natW = (file && file.w) || Math.abs(imgEl.width), natH = (file && file.h) || Math.abs(imgEl.height);
+    const baseX = imgEl.crop ? imgEl.crop.x : 0, baseY = imgEl.crop ? imgEl.crop.y : 0;
+    const baseW = imgEl.crop ? imgEl.crop.w : natW, baseH = imgEl.crop ? imgEl.crop.h : natH;
+    const ex0 = Math.min(imgEl.x, imgEl.x + imgEl.width), ex1 = Math.max(imgEl.x, imgEl.x + imgEl.width);
+    const ey0 = Math.min(imgEl.y, imgEl.y + imgEl.height), ey1 = Math.max(imgEl.y, imgEl.y + imgEl.height);
+    const ix0 = Math.max(rect.x, ex0), iy0 = Math.max(rect.y, ey0);
+    const ix1 = Math.min(rect.x + rect.w, ex1), iy1 = Math.min(rect.y + rect.h, ey1);
+    if (ix1 - ix0 < 2 || iy1 - iy0 < 2) return null;
+    const sx = baseW / Math.abs(imgEl.width), sy = baseH / Math.abs(imgEl.height);
+    const crop = { x: baseX + (ix0 - ex0) * sx, y: baseY + (iy0 - ey0) * sy, w: (ix1 - ix0) * sx, h: (iy1 - iy0) * sy };
+    const nw = ix1 - ix0, nh = iy1 - iy0;
+    const el = makeImage(ex1 + 24, ey0, nw, nh, imgEl.fileId, { crop, cropOf: imgEl.id });
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
@@ -721,6 +768,14 @@ class CanvasView {
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
+    if (this._cropRect) {
+      const r = this._cropRect;
+      ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      ictx.fillStyle = 'rgba(245,158,11,0.12)'; ictx.fillRect(r.x, r.y, r.w, r.h);
+      ictx.strokeStyle = '#f59e0b'; ictx.lineWidth = 1.4 / z; ictx.setLineDash([6 / z, 4 / z]);
+      ictx.strokeRect(r.x, r.y, r.w, r.h); ictx.setLineDash([]);
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
@@ -954,6 +1009,27 @@ class Plugin extends AppPlugin {
         v.dirty = true; const saved = await v.saveNow();
         const line = await findSceneLine(rec); const reloaded = line ? await loadSceneFromLine(line, 10) : null;
         return { guid, hadSceneBefore: !!existing, startedBlank: !existing, saved: !!(saved && saved.ok), reason: saved ? saved.reason : 'no save', sceneLineGuid: line ? line.guid : null, reloadEls: reloaded ? reloaded.elements.filter((e) => !e.isDeleted).length : -1 };
+      },
+      // crop / image part-reference: a 200x100 image (left purple, right green); reference the RIGHT
+      // half in world coords -> a new element sharing the fileId with crop {x:100,w:100,h:100}.
+      cropTest: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const c = document.createElement('canvas'); c.width = 200; c.height = 100; const cx = c.getContext('2d');
+        cx.fillStyle = '#7c5cff'; cx.fillRect(0, 0, 100, 100); cx.fillStyle = '#10b981'; cx.fillRect(100, 0, 100, 100);
+        const dataURL = c.toDataURL('image/png'); const fileId = 'fcrop' + v.scene.elements.length;
+        if (!v.scene.files) v.scene.files = {}; v.scene.files[fileId] = { dataURL, mimeType: 'image/png', w: 200, h: 100 };
+        const src = makeImage(0, 0, 200, 100, fileId); v.scene.elements.push(src);
+        const cropEl = v._referenceRegion(src, { x: 100, y: 0, w: 100, h: 100 }); // world right half
+        const cropOfCrop = cropEl ? v._referenceRegion(cropEl, { x: cropEl.x, y: cropEl.y, w: cropEl.width / 2, h: cropEl.height }) : null;
+        v.dirty = true; await v.saveNow();
+        return {
+          srcId: src.id, cropId: cropEl ? cropEl.id : null, crop: cropEl ? cropEl.crop : null,
+          sharesFile: cropEl ? cropEl.fileId === src.fileId : false, cropOf: cropEl ? cropEl.cropOf : null,
+          cropOk: !!(cropEl && Math.round(cropEl.crop.x) === 100 && Math.round(cropEl.crop.w) === 100 && Math.round(cropEl.crop.h) === 100),
+          // crop-of-crop: left half of the green region -> natural x 100..150
+          cropOfCropX: cropOfCrop ? Math.round(cropOfCrop.crop.x) : null, cropOfCropW: cropOfCrop ? Math.round(cropOfCrop.crop.w) : null,
+          cropOfCropOk: !!(cropOfCrop && Math.round(cropOfCrop.crop.x) === 100 && Math.round(cropOfCrop.crop.w) === 50),
+        };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
