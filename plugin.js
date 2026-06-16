@@ -1,22 +1,31 @@
 'use strict';
 /*
  * Plexus Canvas — native Thymer infinite-canvas whiteboard (from scratch, no @excalidraw).
- * Hand-written single-file plugin.js during early phases; deploys via MCP update_plugin_code
- * while small, then git -> Plugins-Manager once vendored libs push it past the MCP-push ceiling.
+ * Single-file plugin.js (esbuild monorepo comes when vendored libs push it past the MCP ceiling).
+ * Build order: ~/plexus/CANVAS-ROADMAP.md.
  *
- * Build order follows ~/plexus/CANVAS-ROADMAP.md. Implemented so far:
- *   Phase 0  — skeleton + custom panel + command + hot-reload-safe singleton dispose.
- *   Phase 1a — Thymer-envelope SPIKE: verify the 4 SDK blockers + blob ceiling LIVE via
- *              window.__plexusCanvas.spike.* (driven from chrome-devtools). Removed once signed off.
+ *   Phase 0   skeleton + custom panel + command + hot-reload-safe dispose.
+ *   Phase 1a  envelope spike — VERIFIED (see SPIKE-RESULTS.md): createNewRecord=null on global
+ *             plugin -> collection.createRecord (guid string); pending-context map survives the
+ *             mount; getActiveRecord null in custom panel; blobs fast to 20MB (no gzip needed).
+ *   Phase 1b  THIS: camera (pan/zoom), hand-drawn rough rect, dual-canvas renderer + 1 disposable
+ *             RAF, scene<->blob persistence (Scene = FILE property, setFileFromBlob/fileBlob;
+ *             text-GUID from the roadmap was wrong — no getBlob(guid) exists), banner PNG preview.
  *
- * Rules honored (thymer-plugin-dev/SKILL.md): 45, 53, 21/27, 29, 1 (no invented panel-context channel).
+ * Rules: 45 (custom panel) · 53 (2-class bg, core tokens) · 21/27 (singleton dispose) ·
+ *        1 (pending-map, not panel prop) · 6 (window H-scroll guard) · 18/48 (gate on
+ *        uploadBlob/setFileFromBlob returning, never a renderer read-back).
  */
 
-const PLEXUS_VERSION = '0.1.0';
+const PLEXUS_VERSION = '0.2.0';
 const PANEL_ID = 'plexus-canvas';
-const SPIKE_PANEL_ID = 'plexus-spike';
-const SPIKE_ENABLED = true; // Phase 1a only
+const DRAWINGS_COLLECTION = 'Plexus Drawings';
+const SCENE_SCHEMA = 1;
+const TEST_HOOKS = true;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ───────────────────────── hot-reload singleton ───────────────────────── */
 function freshRegistry() {
   return {
     disposers: [],
@@ -25,189 +34,425 @@ function freshRegistry() {
   };
 }
 
+/* ─────────────────────────── rough (hand-drawn) ───────────────────────────
+ * Minimal deterministic roughjs-style renderer (rect + ellipse + line). Vendored
+ * full roughjs lands with the shape system in Phase 2; this proves the look + the
+ * seed-determinism contract (same seed -> same jitter across renders).
+ */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function roughSeg(ctx, x1, y1, x2, y2, rng, r) {
+  for (let p = 0; p < 2; p++) {
+    const o = () => (rng() * 2 - 1) * r;
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    ctx.beginPath();
+    ctx.moveTo(x1 + o(), y1 + o());
+    ctx.quadraticCurveTo(mx + o(), my + o(), x2 + o(), y2 + o());
+    ctx.stroke();
+  }
+}
+function hachure(ctx, x, y, w, h, color, sw, rng) {
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.6, sw * 0.5);
+  const gap = 8;
+  for (let d = -h; d < w + h; d += gap) {
+    const j = (rng() * 2 - 1) * 1.5;
+    ctx.beginPath(); ctx.moveTo(x + d + j, y); ctx.lineTo(x + d - h + j, y + h); ctx.stroke();
+  }
+  ctx.restore();
+}
+function applyStroke(ctx, opts) {
+  ctx.lineWidth = opts.strokeWidth || 2;
+  ctx.strokeStyle = opts.stroke || '#1e1e1e';
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.globalAlpha = opts.opacity == null ? 1 : opts.opacity;
+}
+function roughRect(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1);
+  const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
+  ctx.save(); applyStroke(ctx, opts);
+  if (opts.fill && opts.fill !== 'transparent') {
+    if (opts.fillStyle === 'solid') { ctx.save(); ctx.globalAlpha = (opts.opacity == null ? 1 : opts.opacity); ctx.fillStyle = opts.fill; ctx.fillRect(x, y, w, h); ctx.restore(); }
+    else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng);
+  }
+  roughSeg(ctx, x, y, x + w, y, rng, r);
+  roughSeg(ctx, x + w, y, x + w, y + h, rng, r);
+  roughSeg(ctx, x + w, y + h, x, y + h, rng, r);
+  roughSeg(ctx, x, y + h, x, y, rng, r);
+  ctx.restore();
+}
+function roughEllipse(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1);
+  const r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
+  const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
+  ctx.save(); applyStroke(ctx, opts);
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  const N = 18; let prev = null;
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r;
+    const py = cy + Math.sin(a) * ry + (rng() * 2 - 1) * r;
+    if (prev == null) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    prev = [px, py];
+  }
+  ctx.stroke(); ctx.restore();
+}
+function roughDiamond(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1);
+  const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
+  const mx = x + w / 2, my = y + h / 2;
+  ctx.save(); applyStroke(ctx, opts);
+  roughSeg(ctx, mx, y, x + w, my, rng, r);
+  roughSeg(ctx, x + w, my, mx, y + h, rng, r);
+  roughSeg(ctx, mx, y + h, x, my, rng, r);
+  roughSeg(ctx, x, my, mx, y, rng, r);
+  ctx.restore();
+}
+function drawElement(ctx, el) {
+  const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
+  switch (el.type) {
+    case 'rectangle': return roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+    case 'ellipse': return roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+    case 'diamond': return roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+    default: return;
+  }
+}
+
+/* ─────────────────────────────── scene model ─────────────────────────────── */
+let _idCounter = 0;
+function newId() { return 'el' + Date.now().toString(36) + (_idCounter++).toString(36); }
+function newSeed() { return (Math.random() * 1e9) | 0; }
+function makeRect(x, y, w, h, style) {
+  return {
+    id: newId(), type: style.type || 'rectangle', x, y, width: w, height: h, angle: 0,
+    strokeColor: style.stroke || '#1e1e1e', backgroundColor: style.fill || 'transparent',
+    fillStyle: style.fillStyle || 'hachure', strokeWidth: style.strokeWidth || 2,
+    roughness: 1, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+function newScene() {
+  return {
+    type: 'plexus-canvas', schema: SCENE_SCHEMA,
+    appState: { viewBackgroundColor: '#ffffff', gridModeEnabled: false, gridSize: 20, theme: 'light', scroll: { x: -60, y: -50 }, zoom: 1 },
+    elements: [
+      makeRect(40, 40, 220, 140, { stroke: '#7c5cff', fill: '#efeaff', fillStyle: 'hachure' }),
+      makeRect(300, 110, 150, 110, { type: 'ellipse', stroke: '#0ea5e9', fill: '#e0f2fe' }),
+    ],
+    files: {},
+  };
+}
+function sceneBounds(scene) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const el of scene.elements) {
+    if (el.isDeleted) continue;
+    minX = Math.min(minX, el.x); minY = Math.min(minY, el.y);
+    maxX = Math.max(maxX, el.x + el.width); maxY = Math.max(maxY, el.y + el.height);
+  }
+  if (!isFinite(minX)) return { x: 0, y: 0, w: 100, h: 100 };
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/* ───────────────────────────────── camera ───────────────────────────────── */
+class Camera {
+  constructor(x = 0, y = 0, zoom = 1) { this.x = x; this.y = y; this.zoom = zoom; }
+  screenToWorld(sx, sy) { return { x: sx / this.zoom + this.x, y: sy / this.zoom + this.y }; }
+  zoomAt(sx, sy, factor) {
+    const nz = Math.min(30, Math.max(0.05, this.zoom * factor));
+    const wx = sx / this.zoom + this.x, wy = sy / this.zoom + this.y;
+    this.x = wx - sx / nz; this.y = wy - sy / nz; this.zoom = nz;
+  }
+}
+
+/* ───────────────────────── persistence (Scene = FILE prop) ───────────────────────── */
+async function getRecordPoll(plugin, guid, tries = 25) {
+  for (let i = 0; i < tries; i++) {
+    try { const r = await plugin.data.getRecord(guid); if (r) return r; } catch (_e) {}
+    await sleep(60);
+  }
+  return null;
+}
+async function loadScene(rec) {
+  try {
+    const blob = await rec.prop('Scene').fileBlob();
+    if (!blob) return null;
+    const ab = await blob.download();
+    if (!ab) return null;
+    return JSON.parse(new TextDecoder().decode(ab));
+  } catch (_e) { return null; }
+}
+function exportPng(scene, maxPx = 1024) {
+  return new Promise((resolve) => {
+    try {
+      const b = sceneBounds(scene); const pad = 24;
+      const w = b.w + pad * 2, h = b.h + pad * 2;
+      const scale = Math.min(2, maxPx / Math.max(w, h, 1));
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
+      for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el);
+      cv.toBlob((blob) => resolve(blob), 'image/png');
+    } catch (_e) { resolve(null); }
+  });
+}
+async function saveScene(plugin, rec, scene, camera) {
+  // Runtime trust = uploadBlob non-null + setFileFromBlob true; NEVER a renderer read-back (Major #4).
+  scene.appState.scroll = { x: camera.x, y: camera.y };
+  scene.appState.zoom = camera.zoom;
+  const file = new File([JSON.stringify(scene)], 'scene.json', { type: 'application/json' });
+  const blob = await plugin.data.uploadBlob(file);
+  if (!blob) return { ok: false, reason: 'uploadBlob null' };
+  let ok = false;
+  try { ok = rec.prop('Scene').setFileFromBlob(blob); } catch (e) { return { ok: false, reason: String(e) }; }
+  try {
+    const cur = rec.prop('Scene Rev').number() || 0;
+    rec.prop('Scene Rev').set(cur + 1);
+    rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA);
+  } catch (_e) {}
+  try {
+    const png = await exportPng(scene);
+    if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); }
+  } catch (_e) {}
+  return { ok, blobGuid: blob.guid };
+}
+
+/* ──────────────────────────────── canvas view ───────────────────────────────
+ * One per open drawing panel. Holds camera + scene + record; owns its <canvas>
+ * DOM inside the panel host. All views share ONE plugin-level RAF (rule: one loop).
+ */
+class CanvasView {
+  constructor(plugin, panel, recordGuid) {
+    this.plugin = plugin; this.panel = panel; this.recordGuid = recordGuid;
+    this.host = panel.getElement(); this.rec = null;
+    this.scene = newScene(); this.camera = new Camera();
+    this.dpr = Math.max(1, window.devicePixelRatio || 1);
+    this.dirty = true; this.destroyed = false; this._saveTimer = null; this._localDisposers = [];
+  }
+  mount() {
+    try { this.panel.setTitle('Plexus'); } catch (_e) {}
+    const host = this.host; host.innerHTML = ''; host.classList.add('pxc-host');
+    const wrap = document.createElement('div'); wrap.className = 'pxc-root';
+    this.staticCv = document.createElement('canvas'); this.staticCv.className = 'pxc-layer pxc-static';
+    this.iCv = document.createElement('canvas'); this.iCv.className = 'pxc-layer pxc-interactive';
+    wrap.appendChild(this.staticCv); wrap.appendChild(this.iCv);
+    const hint = document.createElement('div'); hint.className = 'pxc-hint';
+    hint.textContent = 'drag = pan · scroll = zoom';
+    wrap.appendChild(hint); host.appendChild(wrap);
+    this.wrap = wrap;
+    this._resize();
+    const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
+    ro.observe(wrap); this._localDisposers.push(() => ro.disconnect());
+    this._wirePointer();
+    this.loadOrInit();
+  }
+  _resize() {
+    const w = this.wrap.clientWidth || 600, h = this.wrap.clientHeight || 400;
+    for (const cv of [this.staticCv, this.iCv]) {
+      cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr);
+      cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    }
+    this.cssW = w; this.cssH = h;
+  }
+  _wirePointer() {
+    const host = this.iCv;
+    let panning = false, sx = 0, sy = 0, cx0 = 0, cy0 = 0;
+    const down = (e) => {
+      if (e.button !== 0 && e.button !== 1) return;
+      panning = true; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y;
+      try { host.setPointerCapture(e.pointerId); } catch (_e) {}
+      this.wrap.classList.add('pxc-panning');
+    };
+    const move = (e) => {
+      if (!panning) return;
+      this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom;
+      this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom;
+      this.dirty = true;
+    };
+    const up = (e) => { if (!panning) return; panning = false; this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {} this.scheduleSave(); };
+    const wheel = (e) => {
+      e.preventDefault();
+      const rect = this.wrap.getBoundingClientRect();
+      this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012));
+      this.dirty = true; this.scheduleSave();
+    };
+    host.addEventListener('pointerdown', down);
+    host.addEventListener('pointermove', move);
+    host.addEventListener('pointerup', up);
+    host.addEventListener('wheel', wheel, { passive: false });
+    this._localDisposers.push(() => {
+      host.removeEventListener('pointerdown', down); host.removeEventListener('pointermove', move);
+      host.removeEventListener('pointerup', up); host.removeEventListener('wheel', wheel);
+    });
+  }
+  async loadOrInit() {
+    this.rec = await getRecordPoll(this.plugin, this.recordGuid);
+    if (this.destroyed) return;
+    let fresh = false;
+    const loaded = this.rec ? await loadScene(this.rec) : null;
+    if (loaded && loaded.elements) this.scene = loaded; else fresh = true;
+    const a = this.scene.appState || {};
+    this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
+    this.dirty = true;
+    if (fresh && this.rec) this.saveNow();
+  }
+  render() {
+    if (this.destroyed || !this.staticCv) return;
+    const ctx = this.staticCv.getContext('2d');
+    const cw = this.staticCv.width, ch = this.staticCv.height, z = this.camera.zoom, d = this.dpr;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+    for (const el of this.scene.elements) if (!el.isDeleted) drawElement(ctx, el);
+  }
+  scheduleSave() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => this.saveNow(), 900);
+  }
+  async saveNow() {
+    if (!this.rec || this.destroyed) return null;
+    const res = await saveScene(this.plugin, this.rec, this.scene, this.camera);
+    this._lastSave = res; return res;
+  }
+  destroy() {
+    this.destroyed = true;
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} }
+  }
+}
+
+/* ─────────────────────────────────── plugin ─────────────────────────────────── */
 class Plugin extends AppPlugin {
   onLoad() {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
+    const reg = freshRegistry(); this._reg = reg;
+    this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null;
 
-    const reg = freshRegistry();
-    this._reg = reg;
-    // Plugin-instance pending-context map (Blocker #2 — NOT a property on the panel object, rule 1).
-    this._pending = new Map();
-    this._spikeMount = null;
-
-    window.__plexusCanvas = {
-      version: PLEXUS_VERSION,
-      dispose: () => reg.dispose(),
-    };
-
-    console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded',
-      'color:#7c5cff;font-weight:bold');
+    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
+    console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
 
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
 
-    this.ui.addCommandPaletteCommand({
-      label: 'Plexus: Open Canvas',
-      icon: 'ti-pencil',
-      onSelected: () => this._openCanvasPanel(),
-    });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
 
-    if (SPIKE_ENABLED) this._installSpike();
+    // One shared RAF loop for all views (rule: a single disposable loop).
+    let raf = 0;
+    const tick = () => {
+      for (const v of this._views) {
+        if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; }
+        if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    reg.add(() => cancelAnimationFrame(raf));
+
+    // H-scroll guard (rule 6): wide content must never shift the sidebar off-screen.
+    const onScroll = () => { if (window.scrollX !== 0) window.scrollTo({ left: 0, top: window.scrollY, behavior: 'instant' }); };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    reg.add(() => window.removeEventListener('scroll', onScroll));
+
+    if (TEST_HOOKS) this._installTestHooks();
   }
 
-  onUnload() {
-    try { this._reg && this._reg.dispose(); } catch (_e) {}
-    window.__plexusCanvas = undefined;
+  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
+  onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
+
+  async _drawingsCollection() {
+    if (this._drawingsCol) return this._drawingsCol;
+    const cols = await this.data.getAllCollections();
+    this._drawingsCol = (cols || []).find((c) => c.getName && c.getName() === DRAWINGS_COLLECTION) || null;
+    return this._drawingsCol;
   }
 
-  async _openCanvasPanel() {
+  async _newDrawing() {
+    const col = await this._drawingsCollection();
+    if (!col) { try { this.ui.showToaster && this.ui.showToaster({ message: 'Plexus Drawings collection not found' }); } catch (_e) {} return null; }
+    let guid = null;
+    try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
+    if (typeof guid !== 'string') return null;
+    await this._openPanelFor(guid);
+    return guid;
+  }
+
+  async _openPanelFor(recordGuid) {
+    this._pendingQueue.push(recordGuid); // FIFO: paired with the next mount (Blocker #2 channel)
     const here = this.ui.getActivePanel();
     const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
-    if (panel) panel.navigateToCustomType(PANEL_ID);
+    if (!panel) { this._pendingQueue.pop(); return null; }
+    panel.navigateToCustomType(PANEL_ID);
+    return panel;
   }
 
   _mountPanel(panel) {
-    panel.setTitle('Plexus');
-    const host = panel.getElement();
-    host.innerHTML = '';
-    host.classList.add('pxc-host');
-    const root = document.createElement('div');
-    root.className = 'pxc-root';
-    const msg = document.createElement('div');
-    msg.className = 'pxc-empty';
-    msg.innerHTML = 'Plexus Canvas<br><small>v' + PLEXUS_VERSION + ' — skeleton</small>';
-    root.appendChild(msg);
-    host.appendChild(root);
+    const recordGuid = this._pendingQueue.length ? this._pendingQueue.shift() : null;
+    if (!recordGuid) { // blank panel (no drawing context) — show a starter
+      panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = '';
+      host.classList.add('pxc-host');
+      const r = document.createElement('div'); r.className = 'pxc-root';
+      r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”</small></div>';
+      host.appendChild(r); return;
+    }
+    const view = new CanvasView(this, panel, recordGuid);
+    this._views.add(view);
+    view.mount();
   }
 
-  /* ───────────────────────────── PHASE 1a SPIKE ─────────────────────────────
-   * Ground-truth verification of the adversarial-review blockers, run live from
-   * chrome-devtools: window.__plexusCanvas.spike.{createRecord,panelContext,blob}().
-   */
-  _installSpike() {
-    // A separate spike panel type whose mount reads the pending-context map (Blocker #2/#3).
-    this.ui.registerCustomPanelType(SPIKE_PANEL_ID, (panel) => {
-      const token = this._pendingToken;
-      const dequeued = token != null ? this._pending.get(token) : undefined;
-      let getActiveRecordInPanel = 'unsupported';
-      try {
-        const r = panel.getActiveRecord && panel.getActiveRecord();
-        getActiveRecordInPanel = r ? (r.guid || 'has-record-no-guid') : null;
-      } catch (e) { getActiveRecordInPanel = 'threw:' + e; }
-      this._spikeMount = {
-        tokenPresent: token != null,
-        dequeuedGuid: dequeued === undefined ? null : dequeued,
-        tokenStillInMap: token != null ? this._pending.has(token) : false,
-        getActiveRecordInPanel,
-        panelHasElement: !!(panel.getElement && panel.getElement()),
-      };
-      if (token != null) this._pending.delete(token);
-      try {
-        panel.setTitle('Plexus spike');
-        panel.getElement().innerHTML =
-          '<div style="padding:18px;background:var(--color-bg-900);color:var(--color-text-400)">spike mount ok</div>';
-      } catch (_e) {}
-    });
-
-    const spike = {
-      // Blocker #1: createNewRecord is null on a global AppPlugin; collection.createRecord works.
-      createRecord: async () => {
-        const out = {};
-        try {
-          const r = await this.data.createNewRecord('Plexus spike (delete me)');
-          out.createNewRecord_returned = r === null ? 'null' : (r && r.guid) ? 'record:' + r.guid : typeof r;
-        } catch (e) { out.createNewRecord_threw = String(e); }
-        out.createNewRecord_isNullAsRoadmapClaims = out.createNewRecord_returned === 'null';
-        let cols = [];
-        try { cols = await this.data.getAllCollections(); } catch (e) { out.getAllCollections_threw = String(e); }
-        out.collectionCount = Array.isArray(cols) ? cols.length : typeof cols;
-        let target = null;
-        try { target = (cols || []).find((c) => c.getName && c.getName() === 'Examples') || (cols || [])[0]; } catch (_e) {}
-        out.targetCollection = target && target.getName ? target.getName() : null;
-        let guid = null;
-        try { guid = target.createRecord('Plexus spike (delete me)'); } catch (e) { out.createRecord_threw = String(e); }
-        out.createRecord_returnedType = typeof guid;
-        out.createRecord_guid = typeof guid === 'string' ? guid : (guid === null ? 'null' : JSON.stringify(guid));
-        if (typeof guid === 'string') {
-          try {
-            const rec = await this.data.getRecord(guid);
-            out.getRecord_ok = !!rec;
-            out.getRecord_name = rec && rec.getName ? rec.getName() : null;
-          } catch (e) { out.getRecord_threw = String(e); }
-        }
-        return out;
-      },
-
-      // Blocker #2/#3: pending-context map survives the mount; getActiveRecord is null in a custom panel.
-      panelContext: async () => {
-        const out = {};
-        const token = 't' + Date.now().toString(36) + Math.floor(performance.now()).toString(36);
-        let editorGuid = null;
-        try {
-          const active = this.ui.getActivePanel();
-          const r = active && active.getActiveRecord && active.getActiveRecord();
-          editorGuid = r ? (r.guid || 'has-record-no-guid') : null;
-        } catch (e) { out.activePanel_threw = String(e); }
-        out.editorActiveRecordGuid = editorGuid;
-        this._pending.set(token, editorGuid || 'NO_EDITOR_RECORD');
-        this._pendingToken = token;
-        this._spikeMount = null;
-        let panel = null;
-        try {
-          const here = this.ui.getActivePanel();
-          panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
-        } catch (e) { out.createPanel_threw = String(e); }
-        out.panelCreated = !!panel;
-        if (panel) { try { panel.navigateToCustomType(SPIKE_PANEL_ID); } catch (e) { out.navigate_threw = String(e); } }
-        for (let i = 0; i < 30 && this._spikeMount == null; i++) await new Promise((r) => setTimeout(r, 50));
-        out.mount = this._spikeMount;
-        out.pendingMapSurvived = !!(this._spikeMount && this._spikeMount.dequeuedGuid !== null);
-        out.getActiveRecordNullInPanel = !!(this._spikeMount && this._spikeMount.getActiveRecordInPanel === null);
-        if (panel) { try { this.ui.closePanel(panel); } catch (_e) {} }
-        return out;
-      },
-
-      // Blob ceiling: upload + download round-trip timing for a given size (MB).
-      blob: async (mb) => {
-        const bytes = Math.round(mb * 1024 * 1024);
-        const buf = new Uint8Array(bytes);
-        for (let i = 0; i < bytes; i += 1024) buf[i] = i & 255;
-        const file = new File([buf], 'plexus-spike-' + mb + 'mb.bin', { type: 'application/octet-stream' });
-        const out = { mb };
-        const t0 = performance.now();
-        let blob = null;
-        try { blob = await this.data.uploadBlob(file); } catch (e) { out.upload_threw = String(e); }
-        out.uploadMs = Math.round(performance.now() - t0);
-        out.uploaded = !!blob;
-        out.blobGuid = blob && blob.guid;
-        out.reportedSize = blob && blob.fileSize;
-        if (blob) {
-          const t1 = performance.now();
-          let ab = null;
-          try { ab = await blob.download(); } catch (e) { out.download_threw = String(e); }
-          out.downloadMs = Math.round(performance.now() - t1);
-          out.downloadedBytes = ab ? ab.byteLength : null;
-          out.roundTripOk = ab ? ab.byteLength === bytes : false;
-        }
-        return out;
+  _installTestHooks() {
+    window.__plexusCanvas.test = {
+      newDrawing: () => this._newDrawing(),
+      views: () => [...this._views].map((v) => ({ record: v.recordGuid, elements: v.scene.elements.length, zoom: +v.camera.zoom.toFixed(3), lastSave: v._lastSave || null, mounted: !!v.staticCv })),
+      saveActive: async () => { const v = [...this._views].pop(); return v ? await v.saveNow() : null; },
+      // round-trip: create a drawing record, save a scene, reload it from the blob, compare.
+      roundTrip: async () => {
+        const col = await this._drawingsCollection(); if (!col) return { error: 'no collection' };
+        const guid = col.createRecord('RT test (delete me)'); if (typeof guid !== 'string') return { error: 'createRecord', guid };
+        const rec = await getRecordPoll(this, guid); if (!rec) return { error: 'getRecord poll failed', guid };
+        const scene = newScene(); scene.__marker = 'rt-' + Date.now();
+        const cam = new Camera(-12, -34, 1.5);
+        const saved = await saveScene(this, rec, scene, cam);
+        const loaded = await loadScene(rec);
+        return {
+          guid, saved,
+          loadedOk: !!loaded,
+          markerMatch: loaded && loaded.__marker === scene.__marker,
+          elementsMatch: loaded && loaded.elements && loaded.elements.length === scene.elements.length,
+          cameraRestored: loaded && loaded.appState && loaded.appState.zoom === 1.5 && loaded.appState.scroll && loaded.appState.scroll.x === -12,
+        };
       },
     };
-
-    window.__plexusCanvas.spike = spike;
-    console.log('[Plexus Canvas] spike installed: window.__plexusCanvas.spike.{createRecord,panelContext,blob}');
   }
 }
 
 const BASE_CSS = `
 .pxc-host { position: relative; }
 .pxc-host .pxc-root {
-  position: absolute; inset: 0;
-  background: var(--color-bg-900);
-  color: var(--color-text-400);
+  position: absolute; inset: 0; overflow: hidden;
+  background: var(--color-bg-900); color: var(--color-text-400);
   font-family: var(--font-family, system-ui, sans-serif);
-  display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
 }
-.pxc-host .pxc-empty { text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
+.pxc-host .pxc-root .pxc-layer { position: absolute; inset: 0; display: block; }
+.pxc-host .pxc-root .pxc-static { z-index: 1; }
+.pxc-host .pxc-root .pxc-interactive { z-index: 2; touch-action: none; cursor: grab; }
+.pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
+.pxc-host .pxc-root .pxc-hint {
+  position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none;
+  font-size: 11px; opacity: .45; color: var(--color-text-400);
+}
+.pxc-host .pxc-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; opacity: .65; font-size: 14px; line-height: 1.6;
+}
 .pxc-host .pxc-empty small { opacity: .7; }
 `;
