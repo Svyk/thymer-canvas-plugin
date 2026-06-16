@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.8.0';
+const PLEXUS_VERSION = '0.9.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -219,6 +219,15 @@ function distToSeg(px, py, ax, ay, bx, by) {
   let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
   const cx = ax + t * dx, cy = ay + t * dy; return Math.hypot(px - cx, py - cy);
 }
+// Point on a shape's bbox edge in the direction of (fx,fy), with a small gap — where a bound arrow attaches.
+function bindPoint(shape, fx, fy) {
+  const cx = shape.x + shape.width / 2, cy = shape.y + shape.height / 2;
+  const hw = Math.abs(shape.width) / 2 + 5, hh = Math.abs(shape.height) / 2 + 5;
+  const dx = fx - cx, dy = fy - cy;
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return { x: cx, y: cy - hh };
+  const s = Math.min(hw / (Math.abs(dx) || 1e-6), hh / (Math.abs(dy) || 1e-6));
+  return { x: cx + dx * s, y: cy + dy * s };
+}
 function newScene() {
   return {
     type: 'plexus-canvas', schema: SCENE_SCHEMA,
@@ -386,6 +395,20 @@ class CanvasView {
     for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (!el.isDeleted && hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
+  _bindableAt(wx, wy, excludeId) {
+    const tol = 8 / this.camera.zoom;
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted || el.id === excludeId) continue; if ((el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') && hitElement(el, wx, wy, tol)) return el; }
+    return null;
+  }
+  _updateBindings() {
+    for (const el of this.scene.elements) {
+      if (el.isDeleted || (el.type !== 'arrow' && el.type !== 'line') || !el.points || el.points.length < 2) continue;
+      let changed = false;
+      if (el.startBinding) { const s = this._byId(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(s, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; }
+      if (el.endBinding) { const s = this._byId(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(s, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
+      if (changed) linearBBox(el);
+    }
+  }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
   _handles(el) {
@@ -442,9 +465,9 @@ class CanvasView {
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
       if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
-      if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this.dirty = true; return; }
-      if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this.dirty = true; return; }
-      if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this.dirty = true; return; }
+      if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this._updateBindings(); this.dirty = true; return; }
     };
     const onUp = (e) => {
       if (!mode) return;
@@ -457,7 +480,15 @@ class CanvasView {
         linearBBox(created);
         const dx = created.points[1][0] - created.points[0][0], dy = created.points[1][1] - created.points[0][1];
         if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
-        else { this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
+        else {
+          const lp = created.points[created.points.length - 1];
+          const s0 = this._bindableAt(created.points[0][0], created.points[0][1], created.id);
+          const s1 = this._bindableAt(lp[0], lp[1], created.id);
+          if (s0) created.startBinding = { elementId: s0.id };
+          if (s1) created.endBinding = { elementId: s1.id };
+          this._updateBindings();
+          this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
+        }
         created = null;
       } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
@@ -680,6 +711,17 @@ class Plugin extends AppPlugin {
         v.undo(); const afterUndo = v.scene.elements.filter((e) => !e.isDeleted).length;
         v.redo(); const afterRedo = v.scene.elements.filter((e) => !e.isDeleted).length;
         return { before, afterAdd, afterUndo, afterRedo, undoOk: afterUndo === before, redoOk: afterRedo === afterAdd };
+      },
+      bindTest: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const rect = makeRect(700, 300, 100, 80, { stroke: '#10b981', fill: FILLS['#10b981'] }); v.scene.elements.push(rect);
+        const arr = makeLinear(500, 340, 'arrow', { stroke: '#7c5cff', strokeWidth: 3 }); arr.points = [[500, 340], [740, 340]]; v.scene.elements.push(arr);
+        arr.endBinding = { elementId: rect.id }; v._updateBindings();
+        const endBefore = arr.points[1].map((n) => Math.round(n));
+        rect.x += 120; v._updateBindings();
+        const endAfter = arr.points[1].map((n) => Math.round(n));
+        v.dirty = true; const saved = await v.saveNow();
+        return { endBefore, endAfter, followed: endAfter[0] > endBefore[0], saved };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
