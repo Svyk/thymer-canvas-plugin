@@ -9,9 +9,9 @@ small). Roadmap: `~/plexus/CANVAS-ROADMAP.md`. Rules: `~/.claude/skills/thymer-p
 Deploy loop (current): edit `plugin.js` → `node --check` → `git commit` → MCP `update_plugin_code`
 (plugin guid above) → chrome-devtools `navigate_page(reload)` → verify ONE `[Plexus Canvas] vX loaded`
 banner → drive `window.__plexusCanvas.test.*`. Switch to git→Plugins-Manager reinstall once plugin.js
-passes ~150–200 KB (currently ~30 KB).
+passes ~150–200 KB (currently ~65 KB). NOTE (2026-06-16): a FORKED worker can't spawn a push agent (Agent tool errors 'fork inside a forked worker'); deploy via direct MCP `update_plugin_code` instead — it echoes the 62KB code back, but the harness REDIRECTS that oversized result to a tool-result file (harmless to context, ~200 tokens), and the push STILL LANDS. Verify live via chrome-devtools (version banner + test hooks); never trust the echo. git is the canonical source; the live deploy is a reconstructed inline emit of the same edits.
 
-## DONE + verified live (v0.3.0)
+## DONE + verified live (v0.13.0)
 
 - **Phase 0** — global AppPlugin, custom panel (`registerCustomPanelType` + `createPanel` +
   `navigateToCustomType`), command palette, window-singleton dispose. Banner fires once.
@@ -66,6 +66,16 @@ passes ~150–200 KB (currently ~30 KB).
   bbox in sync. ALSO: time-windowed pending-context (see Known issue) — restored panels no longer steal
   a fresh open's record.
 
+- **Phase 7b-groups** (v0.12.0) — GROUP/UNGROUP: `Cmd/Ctrl+G` groups the selection (shared `groupIds`
+  push; needs >=2), `Cmd/Ctrl+Shift+G` ungroups (pop top gid). Click-select on a grouped element expands
+  to the whole top group (`_topGroup`/`_groupMembers`). Paste/duplicate remap group ids per-batch
+  (`_cloneBatch`) so a duplicated group is its OWN coherent group, not merged with the originals.
+  Verified live: grouped / expandOk(2 members) / ungrouped all true; copy/undo/transform regressions green.
+- **Phase 7b-zorder** (v0.13.0) — Z-ORDER + NUDGE: `Cmd/Ctrl+]` bring-to-front (move selected to the END
+  of the elements array = top of paint order), `Cmd/Ctrl+[` send-to-back (move to front of array).
+  Arrow keys nudge the selection by 1px (Shift = 10px), updating points + arrow bindings. Verified live:
+  frontOk/backOk/wasLast; nudge dx=1/dy=10; full regression sweep (copy/undo/bind/image/group) all green.
+
 ## KEY CORRECTIONS to the roadmap (verified live — supersede the doc)
 
 1. **Scene storage = a FILE property, not a text-GUID.** There is NO `data.getBlob(guid)`. Save with
@@ -101,6 +111,25 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
   In `_mountPanel`, read `panel.getNavigation()` (2694) → parse the record guid → mount the CanvasView.
   This makes restored panels reopen their drawing AND removes the order-dependent queue. VERIFY the
   custom-panel route + subId/state round-trip live (probe) before relying on it.
+
+## USER-REQUESTED (2026-06-16, high priority — added to goal)
+
+- **FLIP-A-CARD: any note → visual note.** Like Obsidian-Excalidraw, ANY Thymer record should become a
+  drawing by a toggle, and back — the "back of the card" duality. Command **"Plexus: Flip to drawing"**
+  on the active editor record. STORAGE DECISION needed: the current Plexus Drawings store the scene in a
+  `Scene` FILE PROPERTY, but arbitrary notes' collections don't have that property and an AppPlugin
+  CAN'T add stored props (rule 60). So for "ANY note," store the scene as a **file LINE ITEM** on the
+  record (`record.createLineItem(...,'file',...)` + `lineItem.setBlob`/`getBlob` — universal, works on
+  every record; mark it e.g. filename `plexus-scene.json`, find it on reopen by scanning line items).
+  Note's text line items stay the searchable "back"; one file line holds the scene; banner = preview.
+  (Unify: migrate Plexus Drawings to the same line-item storage so there's ONE path. Clean slate — no
+  real drawings exist yet.)
+- **IMAGE part-references (block-ref an image AND a REGION of it).** (a) Reference/embed an image element
+  from a note via a `ref` segment to the element (needs line-level element identity — store an anchor in
+  customData + navigate at action time, rules 13/26/54). (b) **Crop / region ref:** an image element gets
+  a `crop` rect (Excalidraw's `crop` field); a "reference this region" action creates a crop element
+  showing just that part + a ref. Render = drawImage with source-rect (sx,sy,sw,sh from crop). This is
+  Excalidraw's `#^area=`/crop grammar reimagined on Thymer refs.
 
 ## NEXT (roadmap §9, not yet built)
 
