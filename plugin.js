@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.15.0';
+const PLEXUS_VERSION = '0.16.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -30,7 +30,7 @@ const TOOLS = [
   { id: 'pen', icon: 'ti-pencil', title: 'Pen (P)' },
   { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
-  { id: 'crop', icon: 'ti-crop', title: 'Reference a region of an image (C) — drag a box over an image' },
+  { id: 'crop', icon: 'ti-scissors', title: 'Reference a region of an image (C) — drag a box over an image' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -423,6 +423,10 @@ class CanvasView {
     note.innerHTML = '<span class="ti ti-arrow-back-up"></span>'; note.appendChild(document.createTextNode(' Note'));
     note.addEventListener('click', () => this._flipToNote());
     bar.appendChild(note);
+    const cite = document.createElement('button'); cite.className = 'pxc-tool pxc-flipnote'; cite.title = 'Copy the selected image as a block reference, to paste into a note';
+    cite.innerHTML = '<span class="ti ti-link"></span>'; cite.appendChild(document.createTextNode(' Cite'));
+    cite.addEventListener('click', () => this._copyImageRefToClip());
+    bar.appendChild(cite);
     setTimeout(() => this._syncToolbar(), 0); return bar;
   }
   // Flip back: open this drawing's source record as a normal note editor, side-by-side (rule 16).
@@ -725,6 +729,31 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
+  _snapshotElement(el) {
+    return new Promise((resolve) => {
+      if (!el || el.type !== 'image') return resolve(null);
+      const W = Math.max(1, Math.round(Math.abs(el.width))), H = Math.max(1, Math.round(Math.abs(el.height)));
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
+      const draw = (im) => { try { const c = el.crop; if (c && c.w > 0 && c.h > 0) ctx.drawImage(im, c.x, c.y, c.w, c.h, 0, 0, W, H); else ctx.drawImage(im, 0, 0, W, H); } catch (_e) {} cv.toBlob((b) => resolve(b), 'image/png'); };
+      const cached = this._imgFor(el.fileId);
+      if (cached) return draw(cached);
+      const file = this.scene.files && this.scene.files[el.fileId];
+      if (file && file.dataURL) { const im = new Image(); im.onload = () => draw(im); im.onerror = () => resolve(null); im.src = file.dataURL; }
+      else resolve(null);
+    });
+  }
+  // Copy the selected image (or a given element) onto the plugin's image-ref clipboard, so it can be
+  // pasted as a block reference into any note. Stores a PNG snapshot + the source record + element id.
+  async _copyImageRefToClip(el) {
+    el = el || this._singleSel();
+    if (!el || el.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image (or a cropped region) first.', dismissible: true }); } catch (_e) {} return false; }
+    const png = await this._snapshotElement(el);
+    if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image (still loading?).', dismissible: true }); } catch (_e) {} return false; }
+    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)) };
+    try { this.plugin.ui.addToaster({ title: 'Image reference copied — run “Plexus: Paste image reference” inside a note.', dismissible: true }); } catch (_e) {}
+    return true;
+  }
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
@@ -809,13 +838,14 @@ class Plugin extends AppPlugin {
   onLoad() {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
     const reg = freshRegistry(); this._reg = reg;
-    this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null;
+    this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
     window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     let raf = 0;
     const tick = () => {
@@ -849,6 +879,23 @@ class Plugin extends AppPlugin {
     let existing = null; try { existing = await findSceneLine(rec); } catch (_e) {}
     await this._openPanelFor(rec.guid, { blank: !existing });
     return rec.guid;
+  }
+  // Paste a copied image reference (from a canvas "Cite") into a note: an `image` line item carrying a
+  // PNG snapshot (the visual — possibly a cropped region) + a `ref` line back to the source drawing.
+  async _pasteImageRef(targetGuid) {
+    const clip = this._imgRefClip;
+    if (!clip) { try { this.ui.addToaster({ title: 'Plexus: no image reference copied yet — use “Cite” in a drawing first.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'no clip' }; }
+    let rec = null;
+    if (targetGuid) rec = await getRecordPoll(this, targetGuid);
+    else { const panel = this.ui.getActivePanel(); try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {} }
+    if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note (editor panel) first, then paste.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'no record' }; }
+    let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], 'plexus-image-ref.png', { type: 'image/png' })); } catch (_e) {}
+    let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
+    if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
+    const label = clip.crop ? '↗ region of drawing' : '↗ source drawing';
+    let refLine = null; try { refLine = await rec.createLineItem(null, imgLine, 'ulist', [{ type: 'text', text: label + ' ' }, { type: 'ref', text: { guid: clip.sourceRecordGuid } }], null); } catch (_e) {}
+    try { this.ui.addToaster({ title: 'Image reference pasted into the note.', dismissible: true }); } catch (_e) {}
+    return { ok: !!(imgLine && refLine), imgLineGuid: imgLine ? imgLine.guid : null, refLineGuid: refLine ? refLine.guid : null, recordGuid: rec.guid };
   }
   async _openPanelFor(recordGuid, opts) {
     if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now(), blank: !!(opts && opts.blank) });
@@ -1030,6 +1077,18 @@ class Plugin extends AppPlugin {
           cropOfCropX: cropOfCrop ? Math.round(cropOfCrop.crop.x) : null, cropOfCropW: cropOfCrop ? Math.round(cropOfCrop.crop.w) : null,
           cropOfCropOk: !!(cropOfCrop && Math.round(cropOfCrop.crop.x) === 100 && Math.round(cropOfCrop.crop.w) === 50),
         };
+      },
+      // block-reference an image into a note: snapshot a cropped image -> clip -> paste into `noteGuid`.
+      imageRefTest: async (noteGuid) => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        let cropEl = v.scene.elements.filter((e) => e.type === 'image' && e.crop).pop();
+        if (!cropEl) { await window.__plexusCanvas.test.cropTest(); cropEl = v.scene.elements.filter((e) => e.type === 'image' && e.crop).pop(); }
+        if (!cropEl) return { error: 'no cropped image' };
+        v.selected = new Set([cropEl.id]);
+        const copied = await v._copyImageRefToClip(cropEl);
+        const clip = this._imgRefClip;
+        const pasted = await this._pasteImageRef(noteGuid);
+        return { copied, hadClip: !!clip, clipHasCrop: !!(clip && clip.crop), clipPngBytes: clip && clip.png ? clip.png.size : 0, sourceGuid: clip ? clip.sourceRecordGuid : null, pasted };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
