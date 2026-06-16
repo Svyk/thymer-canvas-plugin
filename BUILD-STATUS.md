@@ -52,6 +52,21 @@ passes ~150–200 KB (currently ~30 KB).
 `newDrawing()` · `views()` · `addShapes()` (engine create+save) · `selectFirst()`. Phase-1a spike +
 roundTrip/reopen hooks were removed after verification (history in git + SPIKE-RESULTS.md).
 
+## KNOWN ISSUE to fix (found Phase 4, 2026-06-15)
+
+- **Pending-context FIFO queue mis-pairs with RESTORED panels.** When Thymer restores saved Plexus
+  custom panels on reload, each fires `_mountPanel` with an empty queue → renders the blank ("New
+  Drawing") state and can consume a guid meant for a freshly-opened panel. Data is SAFE (in the
+  record); only the panel doesn't auto-reopen its drawing. Repro: open several drawings, reload.
+- **Fix (SDK lead, verified in types.d.ts):** stop using `panel.navigateToCustomType(id)` +
+  a queue. Instead persist the record guid in the panel's nav state: `panel.navigateTo({type:"custom",
+  subId:"<panelId>:<recordGuid>" (or state:{recordGuid}), rootId:null, workspaceGuid:this.getWorkspaceGuid()})`
+  — `navigateTo` accepts `subId`/`state` (types.d.ts:2736) and the layout persists them
+  (confirmed: the Plugins-Manager panel's saved nav has `type:"custom", subId:"<ws>-<plugin>-<panelid>"`).
+  In `_mountPanel`, read `panel.getNavigation()` (2694) → parse the record guid → mount the CanvasView.
+  This makes restored panels reopen their drawing AND removes the order-dependent queue. VERIFY the
+  custom-panel route + subId/state round-trip live (probe) before relying on it.
+
 ## NEXT (roadmap §9, not yet built)
 
 - **Phase 5** — text element (our own `<textarea>` overlay — rule 29) + bound text.
