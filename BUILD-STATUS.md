@@ -32,6 +32,13 @@ passes ~150–200 KB (currently ~30 KB).
 - **Phase 4** (v0.5.0) — freehand PEN (smoothed quadratic polyline, ABSOLUTE world points, bbox via
   freedrawBBox; move shifts both points + bbox) + ERASER (drag-tombstone hit elements). Toolbar now 6
   tools (added ti-pencil/ti-eraser); P/E shortcuts. freedraw shows a dashed select box (no resize handles yet).
+- **Phase 7a** (v0.8.0) — UNDO/REDO: snapshot history (`_undo`/`_redo` stacks of `JSON.stringify(scene)`,
+  cap 80). EDITS push a step via `scheduleSave()` (pushes the prior `_committed` state, snapshots the new);
+  CAMERA changes (pan/wheel) use `_saveCamera()` which does NOT push history (panning isn't undoable).
+  `Cmd/Ctrl+Z` undo, `Cmd/Ctrl+Shift+Z` or `Cmd/Ctrl+Y` redo (scoped to the focused canvas; preventDefault+
+  stopPropagation so it doesn't hit Thymer's editor). `_restore` re-saves the reverted scene. NOTE: test
+  hooks (addShapes/addText/addArrow) use `saveNow` and bypass history — real user gestures all go through
+  scheduleSave so `_committed` stays current.
 - **Phase 6a** (v0.7.0) — ARROW/LINE linear elements: arrow tool (ti-arrow-right) → click-drag a 2-point
   arrow; ABSOLUTE points (like freedraw); rough segments + a 2-stroke arrowhead at the end (size scales
   with strokeWidth); segment-distance hit-test (`distToSeg`, not bbox); select + move (shifts points);
@@ -85,8 +92,8 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 - **Phase 6b** — arrow BINDING (focus+gap, boundElements reverse index, updateBoundElements on move) — the
   startBinding/endBinding fields already exist on linear elements, unused.
-- **Phase 7** — undo/redo (invertible deltas + shouldCreateEntry), groups/frames, images (per-image
-  blobs), full property panel, in-panel Settings modal, copy/paste, IndexedDB cache, concurrency rev-check.
+- **Phase 7b** — groups/frames, images (per-image blobs via BlobStore), full property panel, in-panel
+  Settings modal, copy/paste, IndexedDB cache, concurrency rev-check. (Undo done in 7a.)
 - **Phase 8** — parity polish (SVG import, elbow arrows, fonts, Mermaid/LaTeX, in-canvas search, presentation).
 - **Phase 9/10** — elevation: live-record cards (E1), query nodes (E2), property encoding (E11),
   outline⇄canvas (E3), drag-to-restructure ontology (E5), Day-View binding (E14), live brain graph (E4).
