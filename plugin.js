@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.9.0';
+const PLEXUS_VERSION = '0.10.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -214,6 +214,15 @@ function linearBBox(el) {
   for (const [px, py] of el.points) { if (px < minx) minx = px; if (py < miny) miny = py; if (px > maxx) maxx = px; if (py > maxy) maxy = py; }
   if (isFinite(minx)) { el.x = minx; el.y = miny; el.width = maxx - minx; el.height = maxy - miny; }
 }
+let _fileIdC = 0;
+function newFileId() { return 'f' + Date.now().toString(36) + (_fileIdC++).toString(36); }
+function makeImage(x, y, w, h, fileId, style) {
+  return {
+    id: newId(), type: 'image', x, y, width: w, height: h, angle: 0, fileId,
+    strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 1,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [], scale: [1, 1],
+  };
+}
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
@@ -264,7 +273,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -515,6 +524,12 @@ class CanvasView {
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick);
     this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); });
+    // images: drag-drop onto the canvas, or paste while the canvas is focused
+    const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
+    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } };
+    const onPaste = (e) => { if (this.destroyed || this.editingId) return; if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return; const items = (e.clipboardData && e.clipboardData.items) || []; for (const it of items) if (it.kind === 'file' && it.type && it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) { e.preventDefault(); const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addImageFromFile(f, c.x, c.y); } } };
+    this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
+    this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
   }
   // OBB resize in the element's local frame — works for rotated elements (keeps the opposite handle fixed).
   _applyResize(el, handle, rs0, ptr) {
@@ -560,6 +575,35 @@ class CanvasView {
     ta.addEventListener('pointerdown', (ev) => ev.stopPropagation());
     ta.addEventListener('wheel', (ev) => ev.stopPropagation());
   }
+  _imgFor(fileId) {
+    if (!this._imgCache) this._imgCache = new Map();
+    const e = this._imgCache.get(fileId);
+    if (e) return e.ready ? e.img : null;
+    const file = this.scene.files && this.scene.files[fileId];
+    if (!file || !file.dataURL) return null;
+    const img = new Image(); const entry = { img, ready: false }; this._imgCache.set(fileId, entry);
+    img.onload = () => { entry.ready = true; this.dirty = true; };
+    img.src = file.dataURL; return null;
+  }
+  _drawImage(ctx, el) {
+    const img = this._imgFor(el.fileId);
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    if (img) { try { ctx.drawImage(img, el.x, el.y, el.width, el.height); } catch (_e) {} }
+    else { const z = this.camera.zoom; ctx.fillStyle = 'rgba(124,92,255,0.08)'; ctx.fillRect(el.x, el.y, el.width, el.height); ctx.strokeStyle = '#7c5cff'; ctx.lineWidth = 1 / z; ctx.setLineDash([5 / z, 4 / z]); ctx.strokeRect(el.x, el.y, el.width, el.height); ctx.setLineDash([]); }
+    ctx.restore();
+  }
+  async _addImageFromFile(file, wx, wy) {
+    const dataURL = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(file); });
+    if (!dataURL) return null;
+    const dims = await new Promise((res) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight }); im.onerror = () => res({ w: 200, h: 150 }); im.src = dataURL; });
+    let w = dims.w || 200, h = dims.h || 150; const max = 480; if (Math.max(w, h) > max) { const s = max / Math.max(w, h); w *= s; h *= s; }
+    const fileId = newFileId(); if (!this.scene.files) this.scene.files = {};
+    this.scene.files[fileId] = { dataURL, mimeType: file.type || 'image/png', w: dims.w, h: dims.h };
+    const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
@@ -587,7 +631,7 @@ class CanvasView {
     sctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-    for (const el of this.scene.elements) if (!el.isDeleted && el.id !== this.editingId) drawElement(sctx, el);
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else drawElement(sctx, el); }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -722,6 +766,18 @@ class Plugin extends AppPlugin {
         const endAfter = arr.points[1].map((n) => Math.round(n));
         v.dirty = true; const saved = await v.saveNow();
         return { endBefore, endAfter, followed: endAfter[0] > endBefore[0], saved };
+      },
+      addImage: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const c = document.createElement('canvas'); c.width = 120; c.height = 80; const cx = c.getContext('2d');
+        cx.fillStyle = '#7c5cff'; cx.fillRect(0, 0, 120, 80); cx.fillStyle = '#fff'; cx.font = '18px sans-serif'; cx.fillText('IMG', 40, 47);
+        const dataURL = c.toDataURL('image/png'); const fileId = 'ftest';
+        if (!v.scene.files) v.scene.files = {}; v.scene.files[fileId] = { dataURL, mimeType: 'image/png', w: 120, h: 80 };
+        v.scene.elements.push(makeImage(150, 760, 120, 80, fileId)); v.dirty = true;
+        await new Promise((r) => setTimeout(r, 350));
+        const cached = v._imgCache && v._imgCache.get(fileId);
+        const saved = await v.saveNow();
+        return { type: 'image', fileId, hasDataURL: !!v.scene.files[fileId].dataURL, imgReady: !!(cached && cached.ready), saved };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
