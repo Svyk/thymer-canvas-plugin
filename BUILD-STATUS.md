@@ -39,6 +39,13 @@ passes ~150–200 KB (currently ~30 KB).
   stopPropagation so it doesn't hit Thymer's editor). `_restore` re-saves the reverted scene. NOTE: test
   hooks (addShapes/addText/addArrow) use `saveNow` and bypass history — real user gestures all go through
   scheduleSave so `_committed` stays current.
+- **Phase 7b-images** (v0.10.0) — IMAGE element: drag-drop an image onto the canvas, or paste while the
+  canvas is focused → `_addImageFromFile` reads it as a dataURL, sizes it (cap 480px), stores it INLINE
+  in `scene.files[fileId]={dataURL,mimeType,w,h}`, adds an `image` element. Async-loads into `_imgCache`
+  (HTMLImage) + repaints; placeholder box until loaded. **Correction:** images are inlined as dataURLs
+  (NOT separate per-image blobs as the roadmap said) — because there is no `getBlob(guid)`, separate
+  blobs can't be downloaded back on reopen. (Possible later optimization: `data.getBlobFromPropertyFileValue({guid})`
+  may download an arbitrary blob — unverified; would let scenes stay small.)
 - **Phase 6a** (v0.7.0) — ARROW/LINE linear elements: arrow tool (ti-arrow-right) → click-drag a 2-point
   arrow; ABSOLUTE points (like freedraw); rough segments + a 2-stroke arrowhead at the end (size scales
   with strokeWidth); segment-distance hit-test (`distToSeg`, not bbox); select + move (shifts points);
@@ -94,7 +101,7 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 - **Phase 7c** — (later) Excalidraw-grade focus+gap binding + multi-point arrow editing.
   startBinding/endBinding fields already exist on linear elements, unused.
-- **Phase 7b** — groups/frames, images (per-image blobs via BlobStore), full property panel, in-panel
+- **Phase 7b-rest** — groups/frames, copy/paste, full property panel, in-panel Settings modal, IndexedDB cache, concurrency rev-check. (undo done 7a; images done 7b-images.)
   Settings modal, copy/paste, IndexedDB cache, concurrency rev-check. (Undo done in 7a.)
 - **Phase 8** — parity polish (SVG import, elbow arrows, fonts, Mermaid/LaTeX, in-canvas search, presentation).
 - **Phase 9/10** — elevation: live-record cards (E1), query nodes (E2), property encoding (E11),
