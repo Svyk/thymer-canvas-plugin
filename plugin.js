@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.5.0';
+const PLEXUS_VERSION = '0.6.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -26,6 +26,7 @@ const TOOLS = [
   { id: 'ellipse', icon: 'ti-circle', title: 'Ellipse (O)' },
   { id: 'diamond', icon: 'ti-diamond', title: 'Diamond (D)' },
   { id: 'pen', icon: 'ti-pencil', title: 'Pen (P)' },
+  { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -118,6 +119,23 @@ function drawFreedraw(ctx, el) {
   const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]);
   ctx.stroke(); ctx.restore();
 }
+function textFont(el) { return (el.fontSize || 24) + 'px ' + (el.fontFamily || 'system-ui, sans-serif'); }
+function measureText(el) { // updates el.width/height from el.text; uses a shared offscreen ctx
+  if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
+  const ctx = measureText._c; ctx.font = textFont(el);
+  const lines = String(el.text || '').split('\n'); let w = 0;
+  for (const ln of lines) w = Math.max(w, ctx.measureText(ln || ' ').width);
+  el.width = Math.max(w, 8); el.height = Math.max(lines.length, 1) * (el.fontSize || 24) * 1.25;
+}
+function drawText(ctx, el) {
+  if (el.text == null || el.text === '') return;
+  ctx.save();
+  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  const fs = el.fontSize || 24, lh = fs * 1.25, lines = String(el.text).split('\n');
+  for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
+  ctx.restore();
+}
 function drawElement(ctx, el) {
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
   const rotated = !!el.angle;
@@ -126,6 +144,7 @@ function drawElement(ctx, el) {
   else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'freedraw') drawFreedraw(ctx, el);
+  else if (el.type === 'text') drawText(ctx, el);
   if (rotated) ctx.restore();
 }
 
@@ -153,6 +172,14 @@ function freedrawBBox(el) {
   let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
   for (const [px, py] of el.points) { if (px < minx) minx = px; if (py < miny) miny = py; if (px > maxx) maxx = px; if (py > maxy) maxy = py; }
   if (isFinite(minx)) { el.x = minx; el.y = miny; el.width = maxx - minx; el.height = maxy - miny; }
+}
+function makeText(wx, wy, style) {
+  return {
+    id: newId(), type: 'text', x: wx, y: wy, width: 8, height: (style.fontSize || 24) * 1.25, angle: 0,
+    text: '', fontSize: style.fontSize || 24, fontFamily: 'system-ui, sans-serif', textAlign: 'left',
+    strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+    strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
 }
 function newScene() {
   return {
@@ -185,7 +212,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -352,6 +379,10 @@ class CanvasView {
         mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'eraser') {
         mode = 'erase'; const hit = this._hitTopAt(down.x, down.y); if (hit) { hit.isDeleted = true; this.scheduleSave(); }
+      } else if (this.tool === 'text') {
+        const el = makeText(down.x, down.y, { stroke: this.strokeColor, fontSize: 24 });
+        this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+        this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -383,14 +414,20 @@ class CanvasView {
     };
     const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this.scheduleSave(); };
     const onKey = (e) => {
+      if (this.editingId) return; // a text overlay is open — let it handle keys
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', p: 'pen', e: 'eraser' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', p: 'pen', t: 'text', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
+    const onDblClick = (e) => {
+      const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
+      if (hit && hit.type === 'text') { this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
+      else if (!hit) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
+    };
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey);
-    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); });
+    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick);
+    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); });
   }
   // OBB resize in the element's local frame — works for rotated elements (keeps the opposite handle fixed).
   _applyResize(el, handle, rs0, ptr) {
@@ -409,6 +446,33 @@ class CanvasView {
     const ncy = anchor.y + sgnX * (nw / 2) * uy + sgnY * (nh / 2) * vy;
     el.width = nw; el.height = nh; el.x = ncx - nw / 2; el.y = ncy - nh / 2; el.angle = a;
   }
+  _editText(el) {
+    if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
+    this.editingId = el.id;
+    const ta = document.createElement('textarea'); ta.className = 'pxc-textedit'; this._ta = ta;
+    ta.value = el.text || ''; ta.spellcheck = false;
+    const place = () => {
+      const z = this.camera.zoom, s = this.camera.worldToScreen(el.x, el.y);
+      ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
+      ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = el.strokeColor || '#1e1e1e';
+      ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px';
+    };
+    place(); this.wrap.appendChild(ta);
+    const grow = () => { ta.style.height = '0px'; ta.style.height = ta.scrollHeight + 'px'; };
+    setTimeout(() => { ta.focus(); ta.select(); grow(); }, 0);
+    const onInput = () => { el.text = ta.value; measureText(el); place(); grow(); this.dirty = true; };
+    const commit = () => {
+      el.text = ta.value; measureText(el);
+      if (!String(el.text).trim()) el.isDeleted = true;
+      this.editingId = null; this._ta = null; try { ta.remove(); } catch (_e) {}
+      this.dirty = true; this.scheduleSave();
+    };
+    ta.addEventListener('input', onInput);
+    ta.addEventListener('blur', commit);
+    ta.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Escape') { ev.preventDefault(); ta.blur(); } if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); } });
+    ta.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    ta.addEventListener('wheel', (ev) => ev.stopPropagation());
+  }
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
@@ -426,7 +490,7 @@ class CanvasView {
     sctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-    for (const el of this.scene.elements) if (!el.isDeleted) drawElement(sctx, el);
+    for (const el of this.scene.elements) if (!el.isDeleted && el.id !== this.editingId) drawElement(sctx, el);
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -450,7 +514,7 @@ class CanvasView {
   }
   scheduleSave() { if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera); this._lastSave = res; return res; }
-  destroy() { this.destroyed = true; if (this._saveTimer) clearTimeout(this._saveTimer); for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -489,14 +553,17 @@ class Plugin extends AppPlugin {
     if (typeof guid !== 'string') return null; await this._openPanelFor(guid); return guid;
   }
   async _openPanelFor(recordGuid) {
-    this._pendingQueue.push(recordGuid);
+    if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now() });
     const here = this.ui.getActivePanel();
     const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
     if (!panel) { this._pendingQueue.pop(); return null; }
     panel.navigateToCustomType(PANEL_ID); return panel;
   }
   _mountPanel(panel) {
-    const recordGuid = this._pendingQueue.length ? this._pendingQueue.shift() : null;
+    // Time-windowed pending: consume only a guid queued in the last ~4s, dropping stale entries.
+    // A panel RESTORED on reload (no recent open) gets the blank state and never steals a fresh open.
+    let recordGuid = null;
+    while (this._pendingQueue.length) { const e = this._pendingQueue.shift(); if (Date.now() - e.at < 4000) { recordGuid = e.guid; break; } }
     if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”</small></div>'; host.appendChild(r); return; }
     const view = new CanvasView(this, panel, recordGuid); this._views.add(view); view.mount();
   }
@@ -517,6 +584,13 @@ class Plugin extends AppPlugin {
         for (let i = 1; i <= 40; i++) { const t = i / 40; el.points.push([100 + t * 260, 560 + Math.sin(t * Math.PI * 3) * 40]); }
         freedrawBBox(el); v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
         return { type: el.type, points: el.points.length, bbox: { x: Math.round(el.x), y: Math.round(el.y), w: Math.round(el.width), h: Math.round(el.height) }, saved };
+      },
+      addText: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = makeText(80, 700, { stroke: '#0ea5e9', fontSize: 28 });
+        el.text = 'Hello Plexus\nfrom scratch'; measureText(el);
+        v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
+        return { type: el.type, text: el.text, w: Math.round(el.width), h: Math.round(el.height), saved };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
@@ -550,6 +624,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
+.pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
 .pxc-host .pxc-empty { min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center; text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
 .pxc-host .pxc-empty small { opacity: .7; }
