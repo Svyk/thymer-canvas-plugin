@@ -5,19 +5,17 @@
  * Build order: ~/plexus/CANVAS-ROADMAP.md.
  *
  *   Phase 0   skeleton + custom panel + command + hot-reload-safe dispose.
- *   Phase 1a  envelope spike — VERIFIED (see SPIKE-RESULTS.md): createNewRecord=null on global
- *             plugin -> collection.createRecord (guid string); pending-context map survives the
- *             mount; getActiveRecord null in custom panel; blobs fast to 20MB (no gzip needed).
- *   Phase 1b  THIS: camera (pan/zoom), hand-drawn rough rect, dual-canvas renderer + 1 disposable
- *             RAF, scene<->blob persistence (Scene = FILE property, setFileFromBlob/fileBlob;
- *             text-GUID from the roadmap was wrong — no getBlob(guid) exists), banner PNG preview.
+ *   Phase 1a  envelope spike — VERIFIED (see SPIKE-RESULTS.md).
+ *   Phase 1b  camera (pan/zoom), hand-drawn rough rect/ellipse/diamond, dual-canvas renderer + 1
+ *             disposable RAF, scene<->blob persistence (Scene = FILE property via setFileFromBlob/
+ *             fileBlob — no getBlob(guid) exists), banner PNG preview. Panel height taken from the
+ *             scroller ancestor (host collapses to ~0; rule 2 — never height:100%).
  *
- * Rules: 45 (custom panel) · 53 (2-class bg, core tokens) · 21/27 (singleton dispose) ·
- *        1 (pending-map, not panel prop) · 6 (window H-scroll guard) · 18/48 (gate on
- *        uploadBlob/setFileFromBlob returning, never a renderer read-back).
+ * Rules: 45 · 53 · 21/27 · 1 (pending-map) · 6 (H-scroll guard) · 18/48 (gate on write returning,
+ *        never a renderer read-back) · 2 (measured/vh height, not height:100%).
  */
 
-const PLEXUS_VERSION = '0.2.0';
+const PLEXUS_VERSION = '0.2.1';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -34,11 +32,7 @@ function freshRegistry() {
   };
 }
 
-/* ─────────────────────────── rough (hand-drawn) ───────────────────────────
- * Minimal deterministic roughjs-style renderer (rect + ellipse + line). Vendored
- * full roughjs lands with the shape system in Phase 2; this proves the look + the
- * seed-determinism contract (same seed -> same jitter across renders).
- */
+/* ─────────────────────────── rough (hand-drawn) ─────────────────────────── */
 function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
@@ -94,14 +88,13 @@ function roughEllipse(ctx, x, y, w, h, opts, seed) {
   const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
   ctx.save(); applyStroke(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
-  const N = 18; let prev = null;
+  const N = 18; let started = false;
   ctx.beginPath();
   for (let i = 0; i <= N; i++) {
     const a = (i / N) * Math.PI * 2;
     const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r;
     const py = cy + Math.sin(a) * ry + (rng() * 2 - 1) * r;
-    if (prev == null) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    prev = [px, py];
+    if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
   }
   ctx.stroke(); ctx.restore();
 }
@@ -179,14 +172,19 @@ async function getRecordPoll(plugin, guid, tries = 25) {
   }
   return null;
 }
-async function loadScene(rec) {
-  try {
-    const blob = await rec.prop('Scene').fileBlob();
-    if (!blob) return null;
-    const ab = await blob.download();
-    if (!ab) return null;
-    return JSON.parse(new TextDecoder().decode(ab));
-  } catch (_e) { return null; }
+async function loadScene(rec, tries = 1) {
+  // fileBlob() lags right after a write (rule 18) — poll a few times when we expect a scene.
+  for (let i = 0; i < tries; i++) {
+    try {
+      const blob = await rec.prop('Scene').fileBlob();
+      if (blob) {
+        const ab = await blob.download();
+        if (ab) return JSON.parse(new TextDecoder().decode(ab));
+      }
+    } catch (_e) {}
+    if (i < tries - 1) await sleep(120);
+  }
+  return null;
 }
 function exportPng(scene, maxPx = 1024) {
   return new Promise((resolve) => {
@@ -225,10 +223,7 @@ async function saveScene(plugin, rec, scene, camera) {
   return { ok, blobGuid: blob.guid };
 }
 
-/* ──────────────────────────────── canvas view ───────────────────────────────
- * One per open drawing panel. Holds camera + scene + record; owns its <canvas>
- * DOM inside the panel host. All views share ONE plugin-level RAF (rule: one loop).
- */
+/* ──────────────────────────────── canvas view ──────────────────────────────── */
 class CanvasView {
   constructor(plugin, panel, recordGuid) {
     this.plugin = plugin; this.panel = panel; this.recordGuid = recordGuid;
@@ -249,13 +244,22 @@ class CanvasView {
     wrap.appendChild(hint); host.appendChild(wrap);
     this.wrap = wrap;
     this._resize();
+    // Observe the panel SCROLLER (which has the real height) — the host collapses, so observing
+    // the wrap would never catch panel/window resizes (GUARDRAILS: scroller doesn't propagate height).
     const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
-    ro.observe(wrap); this._localDisposers.push(() => ro.disconnect());
+    const scroller = this.host.closest('.panel-scroller-y') || wrap;
+    ro.observe(scroller); this._localDisposers.push(() => ro.disconnect());
     this._wirePointer();
     this.loadOrInit();
   }
   _resize() {
-    const w = this.wrap.clientWidth || 600, h = this.wrap.clientHeight || 400;
+    // The panel content area collapses to ~0 height; take the height from the scroller ancestor
+    // and set it explicitly (rule 2 — measured px, never height:100% which degrades to auto).
+    const scroller = this.host.closest('.panel-scroller-y') || this.host.closest('.panel') || this.host.parentElement;
+    let h = scroller ? scroller.clientHeight : 0;
+    if (!h || h < 80) h = Math.max(320, (window.innerHeight || 800) - 120);
+    this.wrap.style.height = h + 'px';
+    const w = this.wrap.clientWidth || this.host.clientWidth || 600;
     for (const cv of [this.staticCv, this.iCv]) {
       cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr);
       cv.style.width = w + 'px'; cv.style.height = h + 'px';
@@ -296,9 +300,14 @@ class CanvasView {
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
-    let fresh = false;
-    const loaded = this.rec ? await loadScene(this.rec) : null;
-    if (loaded && loaded.elements) this.scene = loaded; else fresh = true;
+    let fresh = true;
+    if (this.rec) {
+      let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {}
+      if (rev > 0) { // existing drawing — poll past the read-lag
+        const loaded = await loadScene(this.rec, 10);
+        if (loaded && loaded.elements) { this.scene = loaded; fresh = false; }
+      }
+    }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
     this.dirty = true;
@@ -397,7 +406,7 @@ class Plugin extends AppPlugin {
 
   _mountPanel(panel) {
     const recordGuid = this._pendingQueue.length ? this._pendingQueue.shift() : null;
-    if (!recordGuid) { // blank panel (no drawing context) — show a starter
+    if (!recordGuid) {
       panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = '';
       host.classList.add('pxc-host');
       const r = document.createElement('div'); r.className = 'pxc-root';
@@ -412,9 +421,8 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
-      views: () => [...this._views].map((v) => ({ record: v.recordGuid, elements: v.scene.elements.length, zoom: +v.camera.zoom.toFixed(3), lastSave: v._lastSave || null, mounted: !!v.staticCv })),
+      views: () => [...this._views].map((v) => ({ record: v.recordGuid, elements: v.scene.elements.length, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null, mounted: !!v.staticCv })),
       saveActive: async () => { const v = [...this._views].pop(); return v ? await v.saveNow() : null; },
-      // round-trip: create a drawing record, save a scene, reload it from the blob, compare.
       roundTrip: async () => {
         const col = await this._drawingsCollection(); if (!col) return { error: 'no collection' };
         const guid = col.createRecord('RT test (delete me)'); if (typeof guid !== 'string') return { error: 'createRecord', guid };
@@ -422,7 +430,7 @@ class Plugin extends AppPlugin {
         const scene = newScene(); scene.__marker = 'rt-' + Date.now();
         const cam = new Camera(-12, -34, 1.5);
         const saved = await saveScene(this, rec, scene, cam);
-        const loaded = await loadScene(rec);
+        const loaded = await loadScene(rec, 12);
         return {
           guid, saved,
           loadedOk: !!loaded,
@@ -438,7 +446,7 @@ class Plugin extends AppPlugin {
 const BASE_CSS = `
 .pxc-host { position: relative; }
 .pxc-host .pxc-root {
-  position: absolute; inset: 0; overflow: hidden;
+  position: relative; width: 100%; overflow: hidden;
   background: var(--color-bg-900); color: var(--color-text-400);
   font-family: var(--font-family, system-ui, sans-serif);
 }
@@ -451,7 +459,7 @@ const BASE_CSS = `
   font-size: 11px; opacity: .45; color: var(--color-text-400);
 }
 .pxc-host .pxc-empty {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center;
   text-align: center; opacity: .65; font-size: 14px; line-height: 1.6;
 }
 .pxc-host .pxc-empty small { opacity: .7; }
