@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.12.0';
+const PLEXUS_VERSION = '0.13.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -432,6 +432,9 @@ class CanvasView {
   _cloneBatch(els, dx, dy) { const gmap = {}; return els.map((el) => { const c = this._cloneEl(el, dx, dy); if (c.groupIds && c.groupIds.length) c.groupIds = c.groupIds.map((g) => (gmap[g] || (gmap[g] = 'g' + newId()))); return c; }); }
   _group() { const ids = [...this.selected]; if (ids.length < 2) return; const gid = 'g' + newId(); for (const id of ids) { const el = this._byId(id); if (el) { if (!el.groupIds) el.groupIds = []; el.groupIds.push(gid); } } this.dirty = true; this.scheduleSave(); }
   _ungroup() { let changed = false; for (const id of this.selected) { const el = this._byId(id); if (el && el.groupIds && el.groupIds.length) { el.groupIds.pop(); changed = true; } } if (changed) { this.dirty = true; this.scheduleSave(); } }
+  _bringToFront() { if (!this.selected.size) return; const sel = this.scene.elements.filter((e) => this.selected.has(e.id)); const rest = this.scene.elements.filter((e) => !this.selected.has(e.id)); this.scene.elements = rest.concat(sel); this.dirty = true; this.scheduleSave(); }
+  _sendToBack() { if (!this.selected.size) return; const sel = this.scene.elements.filter((e) => this.selected.has(e.id)); const rest = this.scene.elements.filter((e) => !this.selected.has(e.id)); this.scene.elements = sel.concat(rest); this.dirty = true; this.scheduleSave(); }
+  _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
   _handles(el) {
@@ -532,8 +535,11 @@ class CanvasView {
         if (k === 'd') { e.preventDefault(); e.stopPropagation(); this._duplicate(); return; }
         if (k === 'a') { e.preventDefault(); e.stopPropagation(); this._selectAll(); return; }
         if (k === 'g') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._ungroup(); else this._group(); return; }
+        if (k === ']') { e.preventDefault(); e.stopPropagation(); this._bringToFront(); return; }
+        if (k === '[') { e.preventDefault(); e.stopPropagation(); this._sendToBack(); return; }
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
+      if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
@@ -823,6 +829,23 @@ class Plugin extends AppPlugin {
         const ungrouped = !v._topGroup(r1) && !v._topGroup(r2);
         v.dirty = true;
         return { grouped, expandOk, memberCount: members.length, ungrouped };
+      },
+      zorderTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const a = makeRect(1100, 300, 60, 60, { stroke: '#10b981' }); const b = makeRect(1130, 320, 60, 60, { stroke: '#ef4444' });
+        v.scene.elements.push(a, b); const lastId = v.scene.elements[v.scene.elements.length - 1].id;
+        v.selected = new Set([a.id]); v._bringToFront();
+        const frontOk = v.scene.elements[v.scene.elements.length - 1].id === a.id;
+        v._sendToBack();
+        const backOk = v.scene.elements[0].id === a.id;
+        return { frontOk, backOk, wasLast: lastId === b.id };
+      },
+      nudgeTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = makeRect(1200, 400, 50, 50, { stroke: '#0ea5e9' }); v.scene.elements.push(el);
+        v.selected = new Set([el.id]); const x0 = el.x, y0 = el.y;
+        v._nudge(1, 0); v._nudge(0, 10);
+        return { dx: el.x - x0, dy: el.y - y0, ok: (el.x - x0 === 1) && (el.y - y0 === 10) };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
