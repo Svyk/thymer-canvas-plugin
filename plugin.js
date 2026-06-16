@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.14.0';
+const PLEXUS_VERSION = '0.14.1';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -356,8 +356,8 @@ async function saveScene(plugin, rec, scene, camera, view) {
   // Reuse the view's cached scene line; else find it; else create it. setBlob REPLACES the file.
   let line = view && view._sceneLine ? view._sceneLine : null;
   if (!line) { try { line = await findSceneLine(rec); } catch (_e) {} }
-  if (!line) { try { line = await rec.createLineItem(null, null, 'file', null, null); } catch (e) { return { ok: false, reason: 'createLineItem ' + e }; } }
-  if (!line) return { ok: false, reason: 'no scene line' };
+  // createLineItem can fail on a record created <1s ago (writes lag creation, rule 18) — retry briefly.
+  if (!line) { let err = null; for (let i = 0; i < 5 && !line; i++) { try { line = await rec.createLineItem(null, null, 'file', null, null); } catch (e) { err = e; } if (!line) await sleep(150); } if (!line) return { ok: false, reason: 'createLineItem ' + err }; }
   if (view) view._sceneLine = line;
   let ok = false;
   try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
@@ -929,10 +929,31 @@ class Plugin extends AppPlugin {
         const line = await findSceneLine(rec);
         const reloaded = line ? await loadSceneFromLine(line, 10) : null;
         return {
-          guid, saved: !!saved.ok, lineGuid: saved.lineGuid || null, cachedLine: !!holder._sceneLine,
+          guid, saved: !!saved.ok, reason: saved.reason || null, lineGuid: saved.lineGuid || null, cachedLine: !!holder._sceneLine,
           foundLineOnRescan: !!line, reloadEls: reloaded ? reloaded.elements.length : -1,
           roundTripOk: !!(saved.ok && line && reloaded && reloaded.elements.length === 2),
         };
+      },
+      // Reopen an existing record in a FRESH canvas panel; report what the new view loaded from the line item.
+      reopenTest: async (guid) => {
+        const before = [...this._views].length;
+        await this._openPanelFor(guid);
+        for (let i = 0; i < 30; i++) { await sleep(150); const v = [...this._views].filter((x) => x.recordGuid === guid).pop(); if (v && v.rec && v._committed !== undefined) break; }
+        const vs = [...this._views].filter((x) => x.recordGuid === guid); const last = vs[vs.length - 1];
+        return { viewsForGuid: vs.length, panelsTotal: [...this._views].length - before + before, loadedEls: last ? last.scene.elements.filter((e) => !e.isDeleted).length : -1, foundLine: !!(last && last._sceneLine), lineGuid: last && last._sceneLine ? last._sceneLine.guid : null };
+      },
+      // Flip an ARBITRARY record guid (proxy for "any note"): open it as a canvas, add a shape, save.
+      // Proves the scene lands as a file line item on a record that is NOT in Plexus Drawings.
+      flipRecordTest: async (guid) => {
+        const rec = await getRecordPoll(this, guid); if (!rec) return { error: 'record not resolvable', guid };
+        const existing = await findSceneLine(rec);
+        await this._openPanelFor(guid, { blank: !existing });
+        let v = null; for (let i = 0; i < 30; i++) { await sleep(150); v = [...this._views].filter((x) => x.recordGuid === guid).pop(); if (v && v.rec) break; }
+        if (!v) return { error: 'no view mounted', guid };
+        v.scene.elements.push(makeRect(40, 40, 90, 60, { stroke: '#7c5cff' }), makeRect(150, 40, 90, 60, { stroke: '#10b981' }));
+        v.dirty = true; const saved = await v.saveNow();
+        const line = await findSceneLine(rec); const reloaded = line ? await loadSceneFromLine(line, 10) : null;
+        return { guid, hadSceneBefore: !!existing, startedBlank: !existing, saved: !!(saved && saved.ok), reason: saved ? saved.reason : 'no save', sceneLineGuid: line ? line.guid : null, reloadEls: reloaded ? reloaded.elements.filter((e) => !e.isDeleted).length : -1 };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
