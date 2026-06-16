@@ -1,21 +1,16 @@
 'use strict';
 /*
  * Plexus Canvas — native Thymer infinite-canvas whiteboard (from scratch, no @excalidraw).
- * Single-file plugin.js. Build order: ~/plexus/CANVAS-ROADMAP.md.
+ * Single-file plugin.js. Build order: ~/plexus/CANVAS-ROADMAP.md. See BUILD-STATUS.md.
  *
- *   Phase 0   skeleton + custom panel + command + hot-reload-safe dispose.
- *   Phase 1a  envelope spike — VERIFIED (SPIKE-RESULTS.md).
- *   Phase 1b  camera/pan/zoom · hand-drawn rough rect/ellipse/diamond · dual-canvas + 1 RAF ·
- *             scene<->blob persistence (Scene = FILE prop) · banner preview · reopen verified.
- *   Phase 2   THIS: toolbar + tools (select / rectangle / ellipse / diamond), create-on-drag,
- *             click-select, drag-move, marquee deselect, Delete, color swatches; selection drawn
- *             on the interactive layer; autosave on every mutation.
+ *   Phase 0/1a/1b/2 — DONE (skeleton · envelope spike · camera+rough+persistence · toolbar+tools).
+ *   Phase 3   THIS: transform — 8 resize handles + rotate handle, OBB resize in the element's local
+ *             frame (works rotated), rotation rendering + rotated hit-testing, 15° rotate snap (Shift).
  *
- * Rules: 45 · 53 · 21/27 · 1 (pending-map) · 6 (H-scroll guard) · 18/48 (gate on write returning) ·
- *        2 (measured height) · 28 (scoped keydown) · icons validated against the bundled set.
+ * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.3.0';
+const PLEXUS_VERSION = '0.4.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -31,6 +26,8 @@ const TOOLS = [
   { id: 'ellipse', icon: 'ti-circle', title: 'Ellipse (O)' },
   { id: 'diamond', icon: 'ti-diamond', title: 'Diamond (D)' },
 ];
+const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
 
 /* ───────────────────────── hot-reload singleton ───────────────────────── */
 function freshRegistry() {
@@ -54,10 +51,8 @@ function roughSeg(ctx, x1, y1, x2, y2, rng, r) {
   for (let p = 0; p < 2; p++) {
     const o = () => (rng() * 2 - 1) * r;
     const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-    ctx.beginPath();
-    ctx.moveTo(x1 + o(), y1 + o());
-    ctx.quadraticCurveTo(mx + o(), my + o(), x2 + o(), y2 + o());
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x1 + o(), y1 + o());
+    ctx.quadraticCurveTo(mx + o(), my + o(), x2 + o(), y2 + o()); ctx.stroke();
   }
 }
 function hachure(ctx, x, y, w, h, color, sw, rng) {
@@ -65,10 +60,7 @@ function hachure(ctx, x, y, w, h, color, sw, rng) {
   ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
   ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.6, sw * 0.5);
   const gap = 8;
-  for (let d = -h; d < w + h; d += gap) {
-    const j = (rng() * 2 - 1) * 1.5;
-    ctx.beginPath(); ctx.moveTo(x + d + j, y); ctx.lineTo(x + d - h + j, y + h); ctx.stroke();
-  }
+  for (let d = -h; d < w + h; d += gap) { const j = (rng() * 2 - 1) * 1.5; ctx.beginPath(); ctx.moveTo(x + d + j, y); ctx.lineTo(x + d - h + j, y + h); ctx.stroke(); }
   ctx.restore();
 }
 function applyStroke(ctx, opts) {
@@ -85,10 +77,8 @@ function roughRect(ctx, x, y, w, h, opts, seed) {
     if (opts.fillStyle === 'solid') { ctx.save(); ctx.globalAlpha = (opts.opacity == null ? 1 : opts.opacity); ctx.fillStyle = opts.fill; ctx.fillRect(x, y, w, h); ctx.restore(); }
     else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng);
   }
-  roughSeg(ctx, x, y, x + w, y, rng, r);
-  roughSeg(ctx, x + w, y, x + w, y + h, rng, r);
-  roughSeg(ctx, x + w, y + h, x, y + h, rng, r);
-  roughSeg(ctx, x, y + h, x, y, rng, r);
+  roughSeg(ctx, x, y, x + w, y, rng, r); roughSeg(ctx, x + w, y, x + w, y + h, rng, r);
+  roughSeg(ctx, x + w, y + h, x, y + h, rng, r); roughSeg(ctx, x, y + h, x, y, rng, r);
   ctx.restore();
 }
 function roughEllipse(ctx, x, y, w, h, opts, seed) {
@@ -97,12 +87,10 @@ function roughEllipse(ctx, x, y, w, h, opts, seed) {
   const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
   ctx.save(); applyStroke(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
-  const N = 18; let started = false;
-  ctx.beginPath();
+  const N = 18; let started = false; ctx.beginPath();
   for (let i = 0; i <= N; i++) {
     const a = (i / N) * Math.PI * 2;
-    const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r;
-    const py = cy + Math.sin(a) * ry + (rng() * 2 - 1) * r;
+    const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * ry + (rng() * 2 - 1) * r;
     if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
   }
   ctx.stroke(); ctx.restore();
@@ -112,24 +100,19 @@ function roughDiamond(ctx, x, y, w, h, opts, seed) {
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const mx = x + w / 2, my = y + h / 2;
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') {
-    ctx.save(); ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(x + w, my); ctx.lineTo(mx, y + h); ctx.lineTo(x, my); ctx.closePath(); ctx.clip();
-    hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore();
-  }
-  roughSeg(ctx, mx, y, x + w, my, rng, r);
-  roughSeg(ctx, x + w, my, mx, y + h, rng, r);
-  roughSeg(ctx, mx, y + h, x, my, rng, r);
-  roughSeg(ctx, x, my, mx, y, rng, r);
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(x + w, my); ctx.lineTo(mx, y + h); ctx.lineTo(x, my); ctx.closePath(); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  roughSeg(ctx, mx, y, x + w, my, rng, r); roughSeg(ctx, x + w, my, mx, y + h, rng, r);
+  roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
   ctx.restore();
 }
 function drawElement(ctx, el) {
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
-  switch (el.type) {
-    case 'rectangle': return roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
-    case 'ellipse': return roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
-    case 'diamond': return roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
-    default: return;
-  }
+  const rotated = !!el.angle;
+  if (rotated) { ctx.save(); const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+  if (el.type === 'rectangle') roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  if (rotated) ctx.restore();
 }
 
 /* ─────────────────────────────── scene model ─────────────────────────────── */
@@ -160,34 +143,37 @@ function sceneBounds(scene) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const el of scene.elements) {
     if (el.isDeleted) continue;
-    minX = Math.min(minX, el.x, el.x + el.width); minY = Math.min(minY, el.y, el.y + el.height);
-    maxX = Math.max(maxX, el.x, el.x + el.width); maxY = Math.max(maxY, el.y, el.y + el.height);
+    // approximate rotated bbox via the 4 rotated corners
+    const cx = el.x + el.width / 2, cy = el.y + el.height / 2, a = el.angle || 0, c = Math.cos(a), s = Math.sin(a);
+    for (const [lx, ly] of [[el.x, el.y], [el.x + el.width, el.y], [el.x + el.width, el.y + el.height], [el.x, el.y + el.height]]) {
+      const dx = lx - cx, dy = ly - cy; const wx = cx + dx * c - dy * s, wy = cy + dx * s + dy * c;
+      minX = Math.min(minX, wx); minY = Math.min(minY, wy); maxX = Math.max(maxX, wx); maxY = Math.max(maxY, wy);
+    }
   }
   if (!isFinite(minX)) return { x: 0, y: 0, w: 100, h: 100 };
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 function hitElement(el, wx, wy, tol) {
+  if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2, c = Math.cos(-el.angle), s = Math.sin(-el.angle), dx = wx - cx, dy = wy - cy; wx = cx + dx * c - dy * s; wy = cy + dx * s + dy * c; }
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
-    const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
-    const rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
+    const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
     const v = ((wx - cx) / rx) ** 2 + ((wy - cy) / ry) ** 2;
     if (filled) return v <= 1.04;
     return Math.abs(Math.sqrt(v) - 1) < (tol / Math.min(rx, ry)) + 0.14;
   }
   if (filled) return true;
-  const nearV = Math.abs(wx - minx) < tol || Math.abs(wx - maxx) < tol;
-  const nearH = Math.abs(wy - miny) < tol || Math.abs(wy - maxy) < tol;
-  return nearV || nearH;
+  return Math.abs(wx - minx) < tol || Math.abs(wx - maxx) < tol || Math.abs(wy - miny) < tol || Math.abs(wy - maxy) < tol;
 }
 
 /* ───────────────────────────────── camera ───────────────────────────────── */
 class Camera {
   constructor(x = 0, y = 0, zoom = 1) { this.x = x; this.y = y; this.zoom = zoom; }
   screenToWorld(sx, sy) { return { x: sx / this.zoom + this.x, y: sy / this.zoom + this.y }; }
+  worldToScreen(wx, wy) { return { x: (wx - this.x) * this.zoom, y: (wy - this.y) * this.zoom }; }
   zoomAt(sx, sy, factor) {
     const nz = Math.min(30, Math.max(0.05, this.zoom * factor));
     const wx = sx / this.zoom + this.x, wy = sy / this.zoom + this.y;
@@ -197,18 +183,12 @@ class Camera {
 
 /* ───────────────────────── persistence (Scene = FILE prop) ───────────────────────── */
 async function getRecordPoll(plugin, guid, tries = 25) {
-  for (let i = 0; i < tries; i++) {
-    try { const r = await plugin.data.getRecord(guid); if (r) return r; } catch (_e) {}
-    await sleep(60);
-  }
+  for (let i = 0; i < tries; i++) { try { const r = await plugin.data.getRecord(guid); if (r) return r; } catch (_e) {} await sleep(60); }
   return null;
 }
 async function loadScene(rec, tries = 1) {
   for (let i = 0; i < tries; i++) {
-    try {
-      const blob = await rec.prop('Scene').fileBlob();
-      if (blob) { const ab = await blob.download(); if (ab) return JSON.parse(new TextDecoder().decode(ab)); }
-    } catch (_e) {}
+    try { const blob = await rec.prop('Scene').fileBlob(); if (blob) { const ab = await blob.download(); if (ab) return JSON.parse(new TextDecoder().decode(ab)); } } catch (_e) {}
     if (i < tries - 1) await sleep(120);
   }
   return null;
@@ -217,8 +197,7 @@ function exportPng(scene, maxPx = 1024) {
   return new Promise((resolve) => {
     try {
       const b = sceneBounds(scene); const pad = 24;
-      const w = b.w + pad * 2, h = b.h + pad * 2;
-      const scale = Math.min(2, maxPx / Math.max(w, h, 1));
+      const w = b.w + pad * 2, h = b.h + pad * 2, scale = Math.min(2, maxPx / Math.max(w, h, 1));
       const cv = document.createElement('canvas');
       cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
       const ctx = cv.getContext('2d');
@@ -230,22 +209,14 @@ function exportPng(scene, maxPx = 1024) {
   });
 }
 async function saveScene(plugin, rec, scene, camera) {
-  scene.appState.scroll = { x: camera.x, y: camera.y };
-  scene.appState.zoom = camera.zoom;
+  scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
   const file = new File([JSON.stringify(scene)], 'scene.json', { type: 'application/json' });
   const blob = await plugin.data.uploadBlob(file);
   if (!blob) return { ok: false, reason: 'uploadBlob null' };
   let ok = false;
   try { ok = rec.prop('Scene').setFileFromBlob(blob); } catch (e) { return { ok: false, reason: String(e) }; }
-  try {
-    const cur = rec.prop('Scene Rev').number() || 0;
-    rec.prop('Scene Rev').set(cur + 1);
-    rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA);
-  } catch (_e) {}
-  try {
-    const png = await exportPng(scene);
-    if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); }
-  } catch (_e) {}
+  try { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } catch (_e) {}
+  try { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } catch (_e) {}
   return { ok, blobGuid: blob.guid };
 }
 
@@ -265,45 +236,36 @@ class CanvasView {
     const host = this.host; host.innerHTML = ''; host.classList.add('pxc-host');
     const wrap = document.createElement('div'); wrap.className = 'pxc-root';
     this.staticCv = document.createElement('canvas'); this.staticCv.className = 'pxc-layer pxc-static';
-    this.iCv = document.createElement('canvas'); this.iCv.className = 'pxc-layer pxc-interactive';
-    this.iCv.tabIndex = 0;
+    this.iCv = document.createElement('canvas'); this.iCv.className = 'pxc-layer pxc-interactive'; this.iCv.tabIndex = 0;
     wrap.appendChild(this.staticCv); wrap.appendChild(this.iCv);
     wrap.appendChild(this._buildToolbar());
     const hint = document.createElement('div'); hint.className = 'pxc-hint';
-    hint.textContent = 'V select · R/O/D shapes · drag = pan · scroll = zoom · ⌫ delete';
-    wrap.appendChild(hint); host.appendChild(wrap);
-    this.wrap = wrap;
+    hint.textContent = 'V select · R/O/D shapes · handles resize/rotate · drag = pan · scroll = zoom · ⌫ delete';
+    wrap.appendChild(hint); host.appendChild(wrap); this.wrap = wrap;
     this._resize();
     const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
     ro.observe(this.host.closest('.panel-scroller-y') || wrap); this._localDisposers.push(() => ro.disconnect());
-    this._wirePointer();
-    this.loadOrInit();
+    this._wirePointer(); this.loadOrInit();
   }
   _buildToolbar() {
-    const bar = document.createElement('div'); bar.className = 'pxc-toolbar';
-    this._toolBtns = {};
+    const bar = document.createElement('div'); bar.className = 'pxc-toolbar'; this._toolBtns = {};
     for (const t of TOOLS) {
       const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = t.title;
       b.innerHTML = '<span class="ti ' + t.icon + '"></span>';
       b.addEventListener('click', () => { this.tool = t.id; this._syncToolbar(); this.iCv.focus(); });
       bar.appendChild(b); this._toolBtns[t.id] = b;
     }
-    const sep = document.createElement('div'); sep.className = 'pxc-sep'; bar.appendChild(sep);
-    this._swatches = {};
+    const sep = document.createElement('div'); sep.className = 'pxc-sep'; bar.appendChild(sep); this._swatches = {};
     for (const c of PALETTE) {
-      const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c;
-      s.style.background = c;
+      const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c; s.style.background = c;
       s.addEventListener('click', () => {
-        this.strokeColor = c; this.fillColor = FILLS[c] || 'transparent';
-        // apply to selection if any
-        let changed = false;
+        this.strokeColor = c; this.fillColor = FILLS[c] || 'transparent'; let changed = false;
         for (const id of this.selected) { const el = this._byId(id); if (el) { el.strokeColor = c; el.backgroundColor = FILLS[c] || 'transparent'; changed = true; } }
         this._syncToolbar(); this.dirty = true; if (changed) this.scheduleSave();
       });
       bar.appendChild(s); this._swatches[c] = s;
     }
-    setTimeout(() => this._syncToolbar(), 0);
-    return bar;
+    setTimeout(() => this._syncToolbar(), 0); return bar;
   }
   _syncToolbar() {
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === this.tool);
@@ -315,44 +277,53 @@ class CanvasView {
     if (!h || h < 80) h = Math.max(320, (window.innerHeight || 800) - 120);
     this.wrap.style.height = h + 'px';
     const w = this.wrap.clientWidth || this.host.clientWidth || 600;
-    for (const cv of [this.staticCv, this.iCv]) {
-      cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr);
-      cv.style.width = w + 'px'; cv.style.height = h + 'px';
-    }
+    for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
     this.cssW = w; this.cssH = h;
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
+  _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom;
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) {
-      const el = this.scene.elements[i];
-      if (!el.isDeleted && hitElement(el, wx, wy, tol)) return el;
-    }
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (!el.isDeleted && hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
+  // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
+  _handles(el) {
+    const cx = el.x + el.width / 2, cy = el.y + el.height / 2, a = el.angle || 0, c = Math.cos(a), s = Math.sin(a);
+    const rp = (lx, ly) => { const dx = lx - cx, dy = ly - cy; return { x: cx + dx * c - dy * s, y: cy + dx * s + dy * c }; };
+    const x = el.x, y = el.y, w = el.width, h = el.height;
+    const H = { nw: rp(x, y), n: rp(cx, y), ne: rp(x + w, y), e: rp(x + w, cy), se: rp(x + w, y + h), s: rp(cx, y + h), sw: rp(x, y + h), w: rp(x, cy) };
+    H.rot = rp(cx, y - 26 / this.camera.zoom);
+    return H;
+  }
   _wirePointer() {
     const host = this.iCv;
     let mode = null, sx = 0, sy = 0, cx0 = 0, cy0 = 0, down = null, created = null, moveEls = null, moved = false;
+    let rsEl = null, rsHandle = null, rs0 = null, rotEl = null, rotCenter = null, rotStart = 0, rotPtr0 = 0;
     const onDown = (e) => {
       host.focus();
       if (e.button === 1 || (e.button === 0 && e.altKey)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; }
       if (e.button !== 0) return;
       moved = false; down = this._worldAt(e);
+      const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
+        const sel = this._singleSel();
+        if (sel) {
+          const H = this._handles(sel);
+          const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
+          if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+          for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+        }
         const hit = this._hitTopAt(down.x, down.y);
         if (hit) {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); this.selected.add(hit.id); }
-          mode = 'move';
-          moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y }));
+          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y }));
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
       } else {
-        mode = 'create';
-        created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle });
-        this.scene.elements.push(created); this.selected.clear();
+        mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
-      try { host.setPointerCapture(e.pointerId); } catch (_e) {}
-      this.dirty = true;
+      try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true;
     };
     const onMove = (e) => {
       if (!mode) return; moved = true;
@@ -360,77 +331,85 @@ class CanvasView {
       const w = this._worldAt(e);
       if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
       if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; for (const m of moveEls) { m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this.dirty = true; return; }
+      if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this.dirty = true; return; }
+      if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this.dirty = true; return; }
     };
     const onUp = (e) => {
       if (!mode) return;
       if (mode === 'create' && created) {
         normRect(created);
-        if (created.width < 4 && created.height < 4) { created.isDeleted = true; }
+        if (created.width < 4 && created.height < 4) created.isDeleted = true;
         else { if (created.width < 2) created.width = 8; if (created.height < 2) created.height = 8; this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
         created = null;
-      } else if (mode === 'move' && moveEls) { for (const m of moveEls) normRect(m.el); if (moved) this.scheduleSave(); }
-      this.wrap.classList.remove('pxc-panning');
-      try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; this.dirty = true;
+      } else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
+      else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
+      this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
     };
-    const onWheel = (e) => {
-      e.preventDefault();
-      const rect = this.wrap.getBoundingClientRect();
-      this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012));
-      this.dirty = true; this.scheduleSave();
-    };
+    const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this.scheduleSave(); };
     const onKey = (e) => {
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
-    host.addEventListener('pointerdown', onDown);
-    host.addEventListener('pointermove', onMove);
-    host.addEventListener('pointerup', onUp);
-    host.addEventListener('wheel', onWheel, { passive: false });
-    host.addEventListener('keydown', onKey);
-    this._localDisposers.push(() => {
-      host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove);
-      host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey);
-    });
+    host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
+    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey);
+    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); });
+  }
+  // OBB resize in the element's local frame — works for rotated elements (keeps the opposite handle fixed).
+  _applyResize(el, handle, rs0, ptr) {
+    const a = rs0.a, ux = Math.cos(a), uy = Math.sin(a), vx = -Math.sin(a), vy = Math.cos(a);
+    const cx0 = rs0.x + rs0.w / 2, cy0 = rs0.y + rs0.h / 2, HW = rs0.w / 2, HH = rs0.h / 2;
+    const OFF = { nw: [-HW, -HH], n: [0, -HH], ne: [HW, -HH], e: [HW, 0], se: [HW, HH], s: [0, HH], sw: [-HW, HH], w: [-HW, 0] };
+    const ao = OFF[OPP[handle]];
+    const anchor = { x: cx0 + ao[0] * ux + ao[1] * vx, y: cy0 + ao[0] * uy + ao[1] * vy };
+    const dx = ptr.x - anchor.x, dy = ptr.y - anchor.y;
+    const along = dx * ux + dy * uy, perp = dx * vx + dy * vy;
+    const movesX = handle !== 'n' && handle !== 's', movesY = handle !== 'e' && handle !== 'w';
+    const nw = movesX ? Math.max(6, Math.abs(along)) : rs0.w;
+    const nh = movesY ? Math.max(6, Math.abs(perp)) : rs0.h;
+    const sgnX = movesX ? Math.sign(along) || 1 : 0, sgnY = movesY ? Math.sign(perp) || 1 : 0;
+    const ncx = anchor.x + sgnX * (nw / 2) * ux + sgnY * (nh / 2) * vx;
+    const ncy = anchor.y + sgnX * (nw / 2) * uy + sgnY * (nh / 2) * vy;
+    el.width = nw; el.height = nh; el.x = ncx - nw / 2; el.y = ncy - nh / 2; el.angle = a;
   }
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
     let fresh = true;
-    if (this.rec) {
-      let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {}
-      if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
-    }
+    if (this.rec) { let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {} if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } } }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
-    this.dirty = true;
-    if (fresh && this.rec) this.saveNow();
+    this.dirty = true; if (fresh && this.rec) this.saveNow();
   }
   render() {
     if (this.destroyed || !this.staticCv) return;
     const z = this.camera.zoom, d = this.dpr;
-    // static layer — committed art
     const sctx = this.staticCv.getContext('2d');
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     for (const el of this.scene.elements) if (!el.isDeleted) drawElement(sctx, el);
-    // interactive layer — selection
+    // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
-    ictx.setTransform(1, 0, 0, 1, 0, 0);
-    ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
-    if (this.selected.size) {
-      ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-      ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.2 / z; ictx.setLineDash([6 / z, 4 / z]);
-      const pad = 4 / z;
-      for (const id of this.selected) {
-        const el = this._byId(id); if (!el) continue;
-        const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height);
-        ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2);
-      }
+    ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
+    if (!this.selected.size) return;
+    ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+    ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
+    const single = this._singleSel();
+    if (single) {
+      const H = this._handles(single);
+      ictx.setLineDash([]);
+      ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
+      ictx.beginPath(); ictx.moveTo(H.n.x, H.n.y); ictx.lineTo(H.rot.x, H.rot.y); ictx.stroke();
+      const hs = 8 / z;
+      for (const k of HANDLE_KEYS) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
+      ictx.beginPath(); ictx.arc(H.rot.x, H.rot.y, hs / 1.5, 0, 7); ictx.fill(); ictx.stroke();
+    } else {
+      ictx.setLineDash([6 / z, 4 / z]); const pad = 4 / z;
+      for (const id of this.selected) { const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); }
       ictx.setLineDash([]);
     }
   }
@@ -445,34 +424,24 @@ class Plugin extends AppPlugin {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
     const reg = freshRegistry(); this._reg = reg;
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null;
-
     window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
-
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
-
     let raf = 0;
     const tick = () => {
-      for (const v of this._views) {
-        if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; }
-        if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; }
-      }
+      for (const v of this._views) { if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; } if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; } }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick); reg.add(() => cancelAnimationFrame(raf));
-
     const onScroll = () => { if (window.scrollX !== 0) window.scrollTo({ left: 0, top: window.scrollY, behavior: 'instant' }); };
     window.addEventListener('scroll', onScroll, { passive: true }); reg.add(() => window.removeEventListener('scroll', onScroll));
-
     if (TEST_HOOKS) this._installTestHooks();
   }
-
   _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
-
   async _drawingsCollection() {
     if (this._drawingsCol) return this._drawingsCol;
     const cols = await this.data.getAllCollections();
@@ -480,11 +449,9 @@ class Plugin extends AppPlugin {
     return this._drawingsCol;
   }
   async _newDrawing() {
-    const col = await this._drawingsCollection();
-    if (!col) return null;
+    const col = await this._drawingsCollection(); if (!col) return null;
     let guid = null; try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
-    if (typeof guid !== 'string') return null;
-    await this._openPanelFor(guid); return guid;
+    if (typeof guid !== 'string') return null; await this._openPanelFor(guid); return guid;
   }
   async _openPanelFor(recordGuid) {
     this._pendingQueue.push(recordGuid);
@@ -495,67 +462,53 @@ class Plugin extends AppPlugin {
   }
   _mountPanel(panel) {
     const recordGuid = this._pendingQueue.length ? this._pendingQueue.shift() : null;
-    if (!recordGuid) {
-      panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host');
-      const r = document.createElement('div'); r.className = 'pxc-root';
-      r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”</small></div>';
-      host.appendChild(r); return;
-    }
+    if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”</small></div>'; host.appendChild(r); return; }
     const view = new CanvasView(this, panel, recordGuid); this._views.add(view); view.mount();
   }
-
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
       views: () => [...this._views].map((v) => ({ record: v.recordGuid, tool: v.tool, elements: v.scene.elements.filter((e) => !e.isDeleted).length, selected: v.selected.size, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null })),
-      // simulate: add N shapes to the active view via the engine (proves the create+save+render path)
       addShapes: async () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
         const specs = [['rectangle', 60, 300, 160, 90, '#10b981'], ['ellipse', 260, 300, 120, 120, '#f59e0b'], ['diamond', 60, 430, 140, 100, '#ef4444']];
         for (const [type, x, y, w, h, c] of specs) v.scene.elements.push(makeRect(x, y, w, h, { type, stroke: c, fill: FILLS[c] }));
-        v.dirty = true; const saved = await v.saveNow();
-        return { elements: v.scene.elements.filter((e) => !e.isDeleted).length, saved };
+        v.dirty = true; const saved = await v.saveNow(); return { elements: v.scene.elements.filter((e) => !e.isDeleted).length, saved };
       },
       selectFirst: () => { const v = [...this._views].pop(); if (!v) return null; const el = v.scene.elements.find((e) => !e.isDeleted); if (el) { v.selected.clear(); v.selected.add(el.id); v.dirty = true; } return { selected: v.selected.size }; },
+      // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
+      transform: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = v.scene.elements.find((e) => !e.isDeleted); if (!el) return { error: 'no element' };
+        v.selected.clear(); v.selected.add(el.id);
+        const before = { x: el.x, y: el.y, w: el.width, h: el.height, a: el.angle };
+        const rs0 = { x: el.x, y: el.y, w: el.width, h: el.height, a: el.angle || 0 };
+        v._applyResize(el, 'se', rs0, { x: el.x + el.width + 40, y: el.y + el.height + 30 }); // drag se by (+40,+30)
+        const resized = { w: el.width, h: el.height };
+        el.angle = Math.PI / 6; // 30°
+        v.dirty = true;
+        return { before, resized, expectedW: before.w + 40, expectedH: before.h + 30, angleDeg: Math.round(el.angle * 180 / Math.PI), handles: Object.keys(v._handles(el)) };
+      },
     };
   }
 }
 
 const BASE_CSS = `
 .pxc-host { position: relative; }
-.pxc-host .pxc-root {
-  position: relative; width: 100%; overflow: hidden;
-  background: var(--color-bg-900); color: var(--color-text-400);
-  font-family: var(--font-family, system-ui, sans-serif);
-}
+.pxc-host .pxc-root { position: relative; width: 100%; overflow: hidden; background: var(--color-bg-900); color: var(--color-text-400); font-family: var(--font-family, system-ui, sans-serif); }
 .pxc-host .pxc-root .pxc-layer { position: absolute; inset: 0; display: block; }
 .pxc-host .pxc-root .pxc-static { z-index: 1; }
 .pxc-host .pxc-root .pxc-interactive { z-index: 2; touch-action: none; cursor: crosshair; outline: none; }
 .pxc-host .pxc-root .pxc-interactive:focus { outline: none; }
 .pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
-.pxc-host .pxc-root .pxc-toolbar {
-  position: absolute; left: 50%; transform: translateX(-50%); top: 10px; z-index: 5;
-  display: flex; align-items: center; gap: 4px; padding: 5px 7px;
-  background: var(--cards-bg); border: 1px solid var(--cards-border-color);
-  border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12);
-}
-.pxc-host .pxc-root .pxc-tool {
-  width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
-  border: 1px solid transparent; border-radius: 7px; background: transparent;
-  color: var(--color-text-400); cursor: pointer; font-size: 16px; padding: 0;
-}
+.pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; z-index: 5; display: flex; align-items: center; gap: 4px; padding: 5px 7px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.pxc-host .pxc-root .pxc-tool { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 16px; padding: 0; }
 .pxc-host .pxc-root .pxc-tool:hover { background: var(--sidebar-bg-hover); }
-.pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; }
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
-.pxc-host .pxc-root .pxc-swatch.active { border-color: var(--color-text-400); box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
-.pxc-host .pxc-root .pxc-hint {
-  position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none;
-  font-size: 11px; opacity: .42; color: var(--color-text-400);
-}
-.pxc-host .pxc-empty {
-  min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center;
-  text-align: center; opacity: .65; font-size: 14px; line-height: 1.6;
-}
+.pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
+.pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
+.pxc-host .pxc-empty { min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center; text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
 .pxc-host .pxc-empty small { opacity: .7; }
 `;
