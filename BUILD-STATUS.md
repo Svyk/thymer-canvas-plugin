@@ -43,8 +43,10 @@ passes ~150–200 KB (currently ~30 KB).
   arrow; ABSOLUTE points (like freedraw); rough segments + a 2-stroke arrowhead at the end (size scales
   with strokeWidth); segment-distance hit-test (`distToSeg`, not bbox); select + move (shifts points);
   `a` shortcut. Linear/text/freedraw show a dashed select box (resize handles only for rect/ellipse/diamond).
-  **Phase 6b (binding) deferred** — arrows don't yet auto-track shapes (startBinding/endBinding fields
-  exist but unused; needs boundElements reverse index + updateBoundElements on move).
+- **Phase 6b** (v0.9.0) — arrow BINDING: on create, each endpoint over a bindable shape gets
+  startBinding/endBinding={elementId}; bound arrows FOLLOW when the shape moves/resizes/rotates
+  (`_updateBindings` → `bindPoint` = shape bbox edge toward the other end + 5px gap). Moving a SHAPE
+  updates its arrows; moving an arrow alone stays free. Stale bindings (deleted shape) auto-clear.
 - **Phase 5** (v0.6.0) — TEXT element: text tool (ti-cursor-text) → click places + opens a `<textarea>`
   overlay (our DOM, rule 29) positioned/scaled to the camera; type (multiline) → commits on blur/Esc/
   Cmd-Enter; empty text auto-deletes; double-click a text element (or empty canvas) to edit; canvas
@@ -90,7 +92,7 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
 
 ## NEXT (roadmap §9, not yet built)
 
-- **Phase 6b** — arrow BINDING (focus+gap, boundElements reverse index, updateBoundElements on move) — the
+- **Phase 7c** — (later) Excalidraw-grade focus+gap binding + multi-point arrow editing.
   startBinding/endBinding fields already exist on linear elements, unused.
 - **Phase 7b** — groups/frames, images (per-image blobs via BlobStore), full property panel, in-panel
   Settings modal, copy/paste, IndexedDB cache, concurrency rev-check. (Undo done in 7a.)
