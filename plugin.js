@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.11.0';
+const PLEXUS_VERSION = '0.12.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -424,9 +424,14 @@ class CanvasView {
     c.startBinding = null; c.endBinding = null; return c; // image fileId is shared on purpose
   }
   _copy() { this.plugin._clipboard = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => JSON.parse(JSON.stringify(el))); }
-  _paste() { const cb = this.plugin._clipboard; if (!cb || !cb.length) return; this.selected.clear(); for (const el of cb) { const c = this._cloneEl(el, 24, 24); this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
-  _duplicate() { if (!this.selected.size) return; const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean); this.selected.clear(); for (const el of els) { const c = this._cloneEl(el, 24, 24); this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
+  _paste() { const cb = this.plugin._clipboard; if (!cb || !cb.length) return; this.selected.clear(); for (const c of this._cloneBatch(cb, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
+  _duplicate() { if (!this.selected.size) return; const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean); this.selected.clear(); for (const c of this._cloneBatch(els, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
   _selectAll() { this.selected = new Set(this.scene.elements.filter((x) => !x.isDeleted).map((x) => x.id)); this.dirty = true; }
+  _topGroup(el) { return el.groupIds && el.groupIds.length ? el.groupIds[el.groupIds.length - 1] : null; }
+  _groupMembers(gid) { return gid ? this.scene.elements.filter((e) => !e.isDeleted && e.groupIds && e.groupIds.includes(gid)).map((e) => e.id) : []; }
+  _cloneBatch(els, dx, dy) { const gmap = {}; return els.map((el) => { const c = this._cloneEl(el, dx, dy); if (c.groupIds && c.groupIds.length) c.groupIds = c.groupIds.map((g) => (gmap[g] || (gmap[g] = 'g' + newId()))); return c; }); }
+  _group() { const ids = [...this.selected]; if (ids.length < 2) return; const gid = 'g' + newId(); for (const id of ids) { const el = this._byId(id); if (el) { if (!el.groupIds) el.groupIds = []; el.groupIds.push(gid); } } this.dirty = true; this.scheduleSave(); }
+  _ungroup() { let changed = false; for (const id of this.selected) { const el = this._byId(id); if (el && el.groupIds && el.groupIds.length) { el.groupIds.pop(); changed = true; } } if (changed) { this.dirty = true; this.scheduleSave(); } }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
   _handles(el) {
@@ -457,7 +462,7 @@ class CanvasView {
         }
         const hit = this._hitTopAt(down.x, down.y);
         if (hit) {
-          if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); this.selected.add(hit.id); }
+          if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
           mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null }));
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
       } else if (this.tool === 'pen') {
@@ -526,6 +531,7 @@ class CanvasView {
         if (k === 'v') { e.preventDefault(); e.stopPropagation(); this._paste(); return; }
         if (k === 'd') { e.preventDefault(); e.stopPropagation(); this._duplicate(); return; }
         if (k === 'a') { e.preventDefault(); e.stopPropagation(); this._selectAll(); return; }
+        if (k === 'g') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._ungroup(); else this._group(); return; }
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser' };
@@ -804,6 +810,19 @@ class Plugin extends AppPlugin {
         v._copy(); v.selected.clear(); v._paste(); const afterPaste = v.scene.elements.filter((e) => !e.isDeleted).length;
         v._selectAll(); const allSel = v.selected.size;
         return { before, afterDup, afterPaste, dupOk: afterDup === before + 1, pasteOk: afterPaste === afterDup + 1, selectAllOk: allSel === afterPaste };
+      },
+      groupTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const r1 = makeRect(900, 300, 80, 60, { stroke: '#10b981' }); const r2 = makeRect(1000, 300, 80, 60, { stroke: '#0ea5e9' });
+        v.scene.elements.push(r1, r2); v.selected = new Set([r1.id, r2.id]);
+        v._group(); const gid = v._topGroup(r1);
+        const grouped = !!gid && v._topGroup(r2) === gid;
+        v.selected.clear(); const members = v._groupMembers(gid); for (const id of members) v.selected.add(id);
+        const expandOk = v.selected.size === 2;
+        v.selected = new Set([r1.id, r2.id]); v._ungroup();
+        const ungrouped = !v._topGroup(r1) && !v._topGroup(r2);
+        v.dirty = true;
+        return { grouped, expandOk, memberCount: members.length, ungrouped };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
