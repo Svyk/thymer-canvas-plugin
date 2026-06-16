@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.4.0';
+const PLEXUS_VERSION = '0.5.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -25,6 +25,8 @@ const TOOLS = [
   { id: 'rectangle', icon: 'ti-square', title: 'Rectangle (R)' },
   { id: 'ellipse', icon: 'ti-circle', title: 'Ellipse (O)' },
   { id: 'diamond', icon: 'ti-diamond', title: 'Diamond (D)' },
+  { id: 'pen', icon: 'ti-pencil', title: 'Pen (P)' },
+  { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -105,6 +107,17 @@ function roughDiamond(ctx, x, y, w, h, opts, seed) {
   roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
   ctx.restore();
 }
+function drawFreedraw(ctx, el) {
+  const pts = el.points; if (!pts || !pts.length) return; // points are ABSOLUTE world coords
+  ctx.save();
+  ctx.strokeStyle = el.strokeColor || '#1e1e1e'; ctx.lineWidth = el.strokeWidth || 3;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  if (pts.length === 1) { ctx.beginPath(); ctx.arc(pts[0][0], pts[0][1], (el.strokeWidth || 3) / 2, 0, 7); ctx.fillStyle = el.strokeColor; ctx.fill(); ctx.restore(); return; }
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) { const x0 = pts[i][0], y0 = pts[i][1], x1 = pts[i + 1][0], y1 = pts[i + 1][1]; ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2); }
+  const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]);
+  ctx.stroke(); ctx.restore();
+}
 function drawElement(ctx, el) {
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
   const rotated = !!el.angle;
@@ -112,6 +125,7 @@ function drawElement(ctx, el) {
   if (el.type === 'rectangle') roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'freedraw') drawFreedraw(ctx, el);
   if (rotated) ctx.restore();
 }
 
@@ -126,6 +140,19 @@ function makeRect(x, y, w, h, style) {
     fillStyle: style.fillStyle || 'hachure', strokeWidth: style.strokeWidth || 2,
     roughness: 1, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
+}
+function makeFreedraw(wx, wy, style) {
+  return {
+    id: newId(), type: 'freedraw', x: wx, y: wy, width: 0, height: 0, angle: 0,
+    points: [[wx, wy]], pressures: [], strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent',
+    fillStyle: 'solid', strokeWidth: style.strokeWidth || 3, roughness: 0, opacity: 1, seed: newSeed(),
+    index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+function freedrawBBox(el) {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const [px, py] of el.points) { if (px < minx) minx = px; if (py < miny) miny = py; if (px > maxx) maxx = px; if (py > maxy) maxy = py; }
+  if (isFinite(minx)) { el.x = minx; el.y = miny; el.width = maxx - minx; el.height = maxy - miny; }
 }
 function newScene() {
   return {
@@ -158,6 +185,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
+  if (el.type === 'freedraw') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -309,7 +337,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel) {
+        if (sel && sel.type !== 'freedraw') {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -318,8 +346,12 @@ class CanvasView {
         const hit = this._hitTopAt(down.x, down.y);
         if (hit) {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); this.selected.add(hit.id); }
-          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y }));
+          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y, pts0: el.type === 'freedraw' ? el.points.map((p) => [p[0], p[1]]) : null }));
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
+      } else if (this.tool === 'pen') {
+        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
+      } else if (this.tool === 'eraser') {
+        mode = 'erase'; const hit = this._hitTopAt(down.x, down.y); if (hit) { hit.isDeleted = true; this.scheduleSave(); }
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -329,8 +361,10 @@ class CanvasView {
       if (!mode) return; moved = true;
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this.dirty = true; return; }
       const w = this._worldAt(e);
+      if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
+      if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
-      if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; for (const m of moveEls) { m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this.dirty = true; return; }
+      if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this.dirty = true; return; }
     };
@@ -341,7 +375,8 @@ class CanvasView {
         if (created.width < 4 && created.height < 4) created.isDeleted = true;
         else { if (created.width < 2) created.width = 8; if (created.height < 2) created.height = 8; this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
         created = null;
-      } else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
+      } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
+      else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
       this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
       mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
@@ -349,7 +384,7 @@ class CanvasView {
     const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this.scheduleSave(); };
     const onKey = (e) => {
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', p: 'pen', e: 'eraser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -399,7 +434,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single) {
+    if (single && single.type !== 'freedraw') {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -476,6 +511,13 @@ class Plugin extends AppPlugin {
         v.dirty = true; const saved = await v.saveNow(); return { elements: v.scene.elements.filter((e) => !e.isDeleted).length, saved };
       },
       selectFirst: () => { const v = [...this._views].pop(); if (!v) return null; const el = v.scene.elements.find((e) => !e.isDeleted); if (el) { v.selected.clear(); v.selected.add(el.id); v.dirty = true; } return { selected: v.selected.size }; },
+      drawStroke: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = makeFreedraw(100, 560, { stroke: '#7c5cff', strokeWidth: 4 });
+        for (let i = 1; i <= 40; i++) { const t = i / 40; el.points.push([100 + t * 260, 560 + Math.sin(t * Math.PI * 3) * 40]); }
+        freedrawBBox(el); v.scene.elements.push(el); v.dirty = true; const saved = await v.saveNow();
+        return { type: el.type, points: el.points.length, bbox: { x: Math.round(el.x), y: Math.round(el.y), w: Math.round(el.width), h: Math.round(el.height) }, saved };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
