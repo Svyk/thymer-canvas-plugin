@@ -15,7 +15,7 @@
  *        never a renderer read-back) · 2 (measured/vh height, not height:100%).
  */
 
-const PLEXUS_VERSION = '0.2.1';
+const PLEXUS_VERSION = '0.2.2';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -423,6 +423,13 @@ class Plugin extends AppPlugin {
       newDrawing: () => this._newDrawing(),
       views: () => [...this._views].map((v) => ({ record: v.recordGuid, elements: v.scene.elements.length, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null, mounted: !!v.staticCv })),
       saveActive: async () => { const v = [...this._views].pop(); return v ? await v.saveNow() : null; },
+      reopen: async (guid) => {
+        const rec = await getRecordPoll(this, guid);
+        if (!rec) return { error: 'no record' };
+        let rev = null; try { rev = rec.prop('Scene Rev').number(); } catch (_e) {}
+        const s = await loadScene(rec, 15);
+        return { rev, loaded: !!s, elements: s && s.elements && s.elements.length, zoom: s && s.appState && s.appState.zoom, scrollX: s && s.appState && s.appState.scroll && s.appState.scroll.x };
+      },
       roundTrip: async () => {
         const col = await this._drawingsCollection(); if (!col) return { error: 'no collection' };
         const guid = col.createRecord('RT test (delete me)'); if (typeof guid !== 'string') return { error: 'createRecord', guid };
@@ -430,7 +437,8 @@ class Plugin extends AppPlugin {
         const scene = newScene(); scene.__marker = 'rt-' + Date.now();
         const cam = new Camera(-12, -34, 1.5);
         const saved = await saveScene(this, rec, scene, cam);
-        const loaded = await loadScene(rec, 12);
+        const rec2 = await getRecordPoll(this, guid); // re-fetch: same-object readback is stale (rule 18)
+        const loaded = await loadScene(rec2 || rec, 12);
         return {
           guid, saved,
           loadedOk: !!loaded,
