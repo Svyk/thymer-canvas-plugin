@@ -39,6 +39,11 @@ passes ~150–200 KB (currently ~30 KB).
   stopPropagation so it doesn't hit Thymer's editor). `_restore` re-saves the reverted scene. NOTE: test
   hooks (addShapes/addText/addArrow) use `saveNow` and bypass history — real user gestures all go through
   scheduleSave so `_committed` stays current.
+- **Phase 7b-copy** (v0.11.0) — COPY/PASTE/DUPLICATE: `Cmd/Ctrl+C` copies selected to an internal
+  per-plugin clipboard (`this.plugin._clipboard`, deep JSON clones); `Cmd/Ctrl+V` pastes (new ids + 24px
+  offset, selects them); `Cmd/Ctrl+D` duplicates in place; `Cmd/Ctrl+A` selects all. `_cloneEl` reassigns
+  id+seed, offsets x/y AND points (freedraw/linear), drops bindings, shares image fileId. Verified:
+  dupOk/pasteOk/selectAllOk all true.
 - **Phase 7b-images** (v0.10.0) — IMAGE element: drag-drop an image onto the canvas, or paste while the
   canvas is focused → `_addImageFromFile` reads it as a dataURL, sizes it (cap 480px), stores it INLINE
   in `scene.files[fileId]={dataURL,mimeType,w,h}`, adds an `image` element. Async-loads into `_imgCache`
