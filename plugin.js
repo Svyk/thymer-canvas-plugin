@@ -10,10 +10,11 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.13.0';
+const PLEXUS_VERSION = '0.14.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
+const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
 const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -237,11 +238,11 @@ function bindPoint(shape, fx, fy) {
   const s = Math.min(hw / (Math.abs(dx) || 1e-6), hh / (Math.abs(dy) || 1e-6));
   return { x: cx + dx * s, y: cy + dy * s };
 }
-function newScene() {
+function newScene(blank = false) {
   return {
     type: 'plexus-canvas', schema: SCENE_SCHEMA,
     appState: { viewBackgroundColor: '#ffffff', gridModeEnabled: false, gridSize: 20, theme: 'light', scroll: { x: -60, y: -50 }, zoom: 1 },
-    elements: [makeRect(40, 40, 220, 140, { stroke: '#7c5cff', fill: '#efeaff', fillStyle: 'hachure' })],
+    elements: blank ? [] : [makeRect(40, 40, 220, 140, { stroke: '#7c5cff', fill: '#efeaff', fillStyle: 'hachure' })],
     files: {},
   };
 }
@@ -297,11 +298,34 @@ class Camera {
   }
 }
 
-/* ───────────────────────── persistence (Scene = FILE prop) ───────────────────────── */
+/* ─────────── persistence — scene lives in a `file` LINE ITEM on the record ───────────
+ * Universal storage: works on ANY record (a Plexus Drawings record OR any flipped note),
+ * because it needs no collection-defined `Scene` property — just one `file` line item whose
+ * blob is named SCENE_FILENAME. This is the "back of the card": the record keeps its text
+ * line items (the note) AND carries the drawing scene as an attached file. (Legacy Drawings
+ * records that stored the scene in a `Scene` file-property are still read as a fallback.) */
 async function getRecordPoll(plugin, guid, tries = 25) {
   for (let i = 0; i < tries; i++) { try { const r = await plugin.data.getRecord(guid); if (r) return r; } catch (_e) {} await sleep(60); }
   return null;
 }
+// Find the record's scene-carrying file line item (the one whose blob is named SCENE_FILENAME).
+async function findSceneLine(rec) {
+  let items = null;
+  try { items = await rec.getLineItems(); } catch (_e) { return null; }
+  for (const li of (items || [])) {
+    let b = null; try { b = await li.getBlob(); } catch (_e) {} // text/heading items return null fast
+    if (b && b.fileName === SCENE_FILENAME) return li;
+  }
+  return null;
+}
+async function loadSceneFromLine(line, tries = 1) {
+  for (let i = 0; i < tries; i++) {
+    try { const blob = await line.getBlob(); if (blob) { const ab = await blob.download(); if (ab) return JSON.parse(new TextDecoder().decode(ab)); } } catch (_e) {}
+    if (i < tries - 1) await sleep(120);
+  }
+  return null;
+}
+// Legacy fallback: scene stored in a `Scene` FILE PROPERTY (pre-0.14 Plexus Drawings records).
 async function loadScene(rec, tries = 1) {
   for (let i = 0; i < tries; i++) {
     try { const blob = await rec.prop('Scene').fileBlob(); if (blob) { const ab = await blob.download(); if (ab) return JSON.parse(new TextDecoder().decode(ab)); } } catch (_e) {}
@@ -324,24 +348,33 @@ function exportPng(scene, maxPx = 1024) {
     } catch (_e) { resolve(null); }
   });
 }
-async function saveScene(plugin, rec, scene, camera) {
+async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
-  const file = new File([JSON.stringify(scene)], 'scene.json', { type: 'application/json' });
+  const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
   const blob = await plugin.data.uploadBlob(file);
   if (!blob) return { ok: false, reason: 'uploadBlob null' };
+  // Reuse the view's cached scene line; else find it; else create it. setBlob REPLACES the file.
+  let line = view && view._sceneLine ? view._sceneLine : null;
+  if (!line) { try { line = await findSceneLine(rec); } catch (_e) {} }
+  if (!line) { try { line = await rec.createLineItem(null, null, 'file', null, null); } catch (e) { return { ok: false, reason: 'createLineItem ' + e }; } }
+  if (!line) return { ok: false, reason: 'no scene line' };
+  if (view) view._sceneLine = line;
   let ok = false;
-  try { ok = rec.prop('Scene').setFileFromBlob(blob); } catch (e) { return { ok: false, reason: String(e) }; }
-  try { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } catch (_e) {}
+  try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
+  // Best-effort legacy metadata (only Plexus Drawings records have these props; silently skipped elsewhere).
+  try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
+  // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record).
   try { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } catch (_e) {}
-  return { ok, blobGuid: blob.guid };
+  return { ok, blobGuid: blob.guid, lineGuid: line.guid };
 }
 
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
 class CanvasView {
-  constructor(plugin, panel, recordGuid) {
+  constructor(plugin, panel, recordGuid, opts) {
     this.plugin = plugin; this.panel = panel; this.recordGuid = recordGuid;
-    this.host = panel.getElement(); this.rec = null;
-    this.scene = newScene(); this.camera = new Camera();
+    this.host = panel.getElement(); this.rec = null; this._sceneLine = null;
+    this._blank = !!(opts && opts.blank); // flipped-from-note: start with an empty canvas
+    this.scene = newScene(this._blank); this.camera = new Camera();
     this.dpr = Math.max(1, window.devicePixelRatio || 1);
     this.dirty = true; this.destroyed = false; this._saveTimer = null; this._localDisposers = [];
     this.tool = 'select'; this.selected = new Set();
@@ -382,7 +415,20 @@ class CanvasView {
       });
       bar.appendChild(s); this._swatches[c] = s;
     }
+    const sep2 = document.createElement('div'); sep2.className = 'pxc-sep'; bar.appendChild(sep2);
+    const note = document.createElement('button'); note.className = 'pxc-tool pxc-flipnote'; note.title = 'Flip to the note (open this record’s text)';
+    note.innerHTML = '<span class="ti ti-arrow-back-up"></span>'; note.appendChild(document.createTextNode(' Note'));
+    note.addEventListener('click', () => this._flipToNote());
+    bar.appendChild(note);
     setTimeout(() => this._syncToolbar(), 0); return bar;
+  }
+  // Flip back: open this drawing's source record as a normal note editor, side-by-side (rule 16).
+  async _flipToNote() {
+    const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
+    let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
+    if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
+    if (!panel) return;
+    try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); }
   }
   _syncToolbar() {
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === this.tool);
@@ -636,7 +682,19 @@ class CanvasView {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
     let fresh = true;
-    if (this.rec) { let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {} if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } } }
+    if (this.rec) {
+      // Universal existence check: a scene exists iff the record has a SCENE_FILENAME file line item.
+      const line = await findSceneLine(this.rec);
+      if (line) {
+        this._sceneLine = line;
+        const loaded = await loadSceneFromLine(line, 10);
+        if (loaded && loaded.elements) { this.scene = loaded; fresh = false; }
+      } else {
+        // Legacy fallback: a pre-0.14 Drawings record with the scene in a `Scene` file-property.
+        let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {}
+        if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+      }
+    }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
     this._committed = JSON.stringify(this.scene);
@@ -646,7 +704,7 @@ class CanvasView {
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
-    this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera).then((r) => { this._lastSave = r; });
+    this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
   }
   undo() { if (!this._undo.length) return; this._redo.push(this._snapshot()); this._restore(this._undo.pop()); }
   redo() { if (!this._redo.length) return; this._undo.push(this._snapshot()); this._restore(this._redo.pop()); }
@@ -687,7 +745,7 @@ class CanvasView {
     this._committed = this._snapshot();
     if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
   }
-  async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera); this._lastSave = res; return res; }
+  async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res; }
   destroy() { this.destroyed = true; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
@@ -702,6 +760,7 @@ class Plugin extends AppPlugin {
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     let raf = 0;
     const tick = () => {
@@ -726,8 +785,18 @@ class Plugin extends AppPlugin {
     let guid = null; try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
     if (typeof guid !== 'string') return null; await this._openPanelFor(guid); return guid;
   }
-  async _openPanelFor(recordGuid) {
-    if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now() });
+  // Flip the ACTIVE note (whatever record the focused editor panel shows) into a drawing.
+  // The note's text line items stay its "front"; the scene rides along as a file line item.
+  async _flipActiveRecord() {
+    const panel = this.ui.getActivePanel();
+    let rec = null; try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {}
+    if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then flip it to a drawing.', dismissible: true }); } catch (_e) {} return null; }
+    let existing = null; try { existing = await findSceneLine(rec); } catch (_e) {}
+    await this._openPanelFor(rec.guid, { blank: !existing });
+    return rec.guid;
+  }
+  async _openPanelFor(recordGuid, opts) {
+    if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now(), blank: !!(opts && opts.blank) });
     const here = this.ui.getActivePanel();
     const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
     if (!panel) { this._pendingQueue.pop(); return null; }
@@ -736,10 +805,10 @@ class Plugin extends AppPlugin {
   _mountPanel(panel) {
     // Time-windowed pending: consume only a guid queued in the last ~4s, dropping stale entries.
     // A panel RESTORED on reload (no recent open) gets the blank state and never steals a fresh open.
-    let recordGuid = null;
-    while (this._pendingQueue.length) { const e = this._pendingQueue.shift(); if (Date.now() - e.at < 4000) { recordGuid = e.guid; break; } }
-    if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”</small></div>'; host.appendChild(r); return; }
-    const view = new CanvasView(this, panel, recordGuid); this._views.add(view); view.mount();
+    let recordGuid = null, blank = false;
+    while (this._pendingQueue.length) { const e = this._pendingQueue.shift(); if (Date.now() - e.at < 4000) { recordGuid = e.guid; blank = !!e.blank; break; } }
+    if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”, or “Plexus: Flip to drawing” on a note</small></div>'; host.appendChild(r); return; }
+    const view = new CanvasView(this, panel, recordGuid, { blank }); this._views.add(view); view.mount();
   }
   _installTestHooks() {
     window.__plexusCanvas.test = {
@@ -847,6 +916,24 @@ class Plugin extends AppPlugin {
         v._nudge(1, 0); v._nudge(0, 10);
         return { dx: el.x - x0, dy: el.y - y0, ok: (el.x - x0 === 1) && (el.y - y0 === 10) };
       },
+      // flip-a-card storage: scene saved to a `file` LINE ITEM on a record, reloaded from it.
+      // Proves universal storage that works on ANY record (proxy here = a throwaway Drawings record).
+      flipTest: async () => {
+        const col = await this._drawingsCollection(); if (!col) return { error: 'no collection' };
+        let guid = null; try { guid = col.createRecord('Flip storage test'); } catch (e) { return { error: 'createRecord ' + e }; }
+        if (typeof guid !== 'string') return { error: 'guid not string' };
+        const rec = await getRecordPoll(this, guid); if (!rec) return { error: 'record not resolvable', guid };
+        const scene = newScene(true); scene.elements.push(makeRect(10, 10, 50, 50, { stroke: '#10b981' }), makeRect(80, 10, 40, 40, { stroke: '#ef4444' }));
+        const holder = { _sceneLine: null };
+        const saved = await saveScene(this, rec, scene, new Camera(), holder);
+        const line = await findSceneLine(rec);
+        const reloaded = line ? await loadSceneFromLine(line, 10) : null;
+        return {
+          guid, saved: !!saved.ok, lineGuid: saved.lineGuid || null, cachedLine: !!holder._sceneLine,
+          foundLineOnRescan: !!line, reloadEls: reloaded ? reloaded.elements.length : -1,
+          roundTripOk: !!(saved.ok && line && reloaded && reloaded.elements.length === 2),
+        };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
@@ -877,6 +964,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-tool:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; }
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
+.pxc-host .pxc-root .pxc-flipnote { width: auto; gap: 4px; padding: 0 9px; font-size: 12px; font-weight: 600; }
+.pxc-host .pxc-root .pxc-flipnote:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
