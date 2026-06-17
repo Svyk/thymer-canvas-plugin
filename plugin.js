@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.59.0';
+const PLEXUS_VERSION = '0.60.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -22,6 +22,10 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   bannerPreview: true, darkMode: false, openMode: 'normal',
   // S2 Canvas behavior
   dblClickText: true,
+  // S4 Pen / stylus
+  defaultPenMode: 'mobile', penSingleFingerPan: true, penDoubleTapEraser: true, penCrosshair: false,
+  // S10 Interaction
+  longPressMs: 500, linkOpacity: 100, openInNewPanel: true,
   // S3 Zoom & Pan
   wheelZoom: true, panRightMouse: false, zoomToFitOnOpen: false, zoomMin: 0.1, zoomMax: 30,
   // S5 Grid
@@ -35,8 +39,11 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   // S11 AI
   aiProvider: 'openai', aiModel: '',
   // S9/S14 Advanced
-  pdfScale: 2, cullMargin: 80,
+  pdfScale: 2, cullMargin: 80, allowImageCache: true, imageCacheMax: 120,
 };
+// S10: module-level mirror of settings.linkOpacity (0..1) for free-function renderers (drawText has no `this`).
+let PLEXUS_LINK_ALPHA = 1;
+function _pxcLinkAlpha() { return PLEXUS_LINK_ALPHA; }
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
 function hexToRgba(hex, a) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16); return 'rgba(' + (r || 124) + ',' + (g || 92) + ',' + (b || 255) + ',' + a + ')'; }
@@ -230,7 +237,7 @@ function measureText(el) { // updates el.width/height from el.text; uses a share
 function drawText(ctx, el) {
   if (el.text == null || el.text === '') return;
   ctx.save();
-  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
   ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   const fs = el.fontSize || 24, lh = fs * 1.25, lines = String(el.text).split('\n');
   for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
@@ -857,6 +864,22 @@ class CanvasView {
   _sendToBack() { if (!this.selected.size) return; const sel = this.scene.elements.filter((e) => this.selected.has(e.id)); const rest = this.scene.elements.filter((e) => !this.selected.has(e.id)); this.scene.elements = sel.concat(rest); this.dirty = true; this.scheduleSave(); }
   _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
+  // S4: is pen mode on? Drives whether a pen pointer draws freedraw without picking the Pen tool.
+  _penActive() {
+    const m = (this.plugin._settings && this.plugin._settings.defaultPenMode) || 'mobile';
+    if (m === 'always') return true;
+    if (m === 'never') return false;
+    return (typeof matchMedia === 'function' && (matchMedia('(pointer: coarse)').matches || matchMedia('(any-pointer: coarse)').matches)) || ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
+  }
+  // S4: stateless double-tap detector (timestamp+pos on the view; no setTimeout → nothing to dispose).
+  _penDoubleTap(e) {
+    const now = Date.now();
+    const dt = now - (this._penTapT || 0);
+    const near = Math.hypot(e.clientX - (this._penTapX || 0), e.clientY - (this._penTapY || 0)) < 24;
+    this._penTapT = now; this._penTapX = e.clientX; this._penTapY = e.clientY;
+    if (dt < 320 && dt > 0 && near) { this._penTapT = 0; return true; }
+    return false;
+  }
   // Handle positions in WORLD coords for a single selected element (local bbox corners/edges rotated).
   _handles(el) {
     const cx = el.x + el.width / 2, cy = el.y + el.height / 2, a = el.angle || 0, c = Math.cos(a), s = Math.sin(a);
@@ -870,8 +893,25 @@ class CanvasView {
     const host = this.iCv;
     let mode = null, sx = 0, sy = 0, cx0 = 0, cy0 = 0, down = null, created = null, moveEls = null, moved = false;
     let rsEl = null, rsHandle = null, rs0 = null, rotEl = null, rotCenter = null, rotStart = 0, rotPtr0 = 0;
+    let lpTimer = null; const clearLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }; // S10 long-press
     const onDown = (e) => {
       host.focus();
+      // S4: pen/touch routing — a pen draws freedraw without picking the Pen tool; a single finger pans.
+      if (!this._present && this._penActive() && (e.button === 0 || e.button === -1)) {
+        const stp4 = this.plugin._settings || {};
+        if (e.pointerType === 'pen') {
+          if (stp4.penDoubleTapEraser && this._penDoubleTap(e)) {
+            const dw = this._worldAt(e); const eh = this._hitTopAt(dw.x, dw.y);
+            if (eh) { eh.isDeleted = true; this.selected.clear(); this.dirty = true; this.scheduleSave(); }
+            try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return;
+          }
+          if (this.tool !== 'pen' && this.tool !== 'eraser' && this.tool !== 'laser') { this._penForced = true; this.tool = 'pen'; }
+          if (stp4.penCrosshair) this.wrap.classList.add('pxc-pencursor');
+        } else if (e.pointerType === 'touch' && stp4.penSingleFingerPan) {
+          mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y;
+          try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return;
+        }
+      }
       if (this._present) { if (e.button === 0 && this._slides && this._slides.length) this._gotoSlide((this._slideIdx || 0) + 1); return; } // P0.5: click advances slides
       const stp = this.plugin._settings || {};
       if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 2 && stp.panRightMouse)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; } // S3: right-mouse pan
@@ -894,6 +934,9 @@ class CanvasView {
           // P1.0: moving a frame carries the elements inside it.
           const seen = new Set(this.selected);
           for (const m of [...moveEls]) { if (m.el.type === 'frame') for (const c of this._frameChildren(m.el)) if (!seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } }
+          // S10: press-and-hold a record/board card to open it (cancelled by any drag or release).
+          const lpMs = (this.plugin._settings && this.plugin._settings.longPressMs) || 0;
+          if (lpMs && (hit.type === 'record' || hit.type === 'board')) { const tgt = hit; lpTimer = setTimeout(() => { lpTimer = null; if (!moved && mode === 'move') this._openCard(tgt); }, lpMs); }
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
       } else if (this.tool === 'frame') {
         mode = 'create'; created = makeFrame(down.x, down.y, 0, 0); this.scene.elements.unshift(created); this.selected.clear(); // P1.0: frames render behind (unshift to array front)
@@ -917,7 +960,8 @@ class CanvasView {
       try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true;
     };
     const onMove = (e) => {
-      if (!mode) return; moved = true;
+      if (!mode) return; moved = true; clearLP(); // S10: any drag cancels a pending long-press open
+      if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this.dirty = true; return; }
       const w = this._worldAt(e);
       if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
@@ -931,7 +975,7 @@ class CanvasView {
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
     };
     const onUp = (e) => {
-      if (!mode) return;
+      if (!mode) return; clearLP(); // S10: a quick tap-release never triggers the long-press open
       if (mode === 'create' && created) {
         normRect(created);
         if (created.width < 4 && created.height < 4) created.isDeleted = true;
@@ -959,7 +1003,9 @@ class CanvasView {
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
       else if (mode === 'pan' && moved) { this._saveCamera(); }
-      this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
+      this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
+      if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
+      try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
       mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
     };
     const onWheel = (e) => { e.preventDefault(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
@@ -1000,17 +1046,17 @@ class CanvasView {
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
-      if (hit && hit.type === 'text') { if (hit.refGuid) { this._openRecord(hit.refGuid); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record
-      else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
+      if (hit && hit.type === 'text') { if (hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record (S10: honors openInNewPanel)
+      else if (hit && hit.type === 'record') { this._openCard(hit); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
-      else if (hit && hit.type === 'board') { this.plugin._openPanelFor(hit.recordGuid); }
+      else if (hit && hit.type === 'board') { this._openCard(hit); }
       else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
-    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
+    this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
     const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
@@ -1062,16 +1108,7 @@ class CanvasView {
     ta.addEventListener('pointerdown', (ev) => ev.stopPropagation());
     ta.addEventListener('wheel', (ev) => ev.stopPropagation());
   }
-  _imgFor(fileId) {
-    if (!this._imgCache) this._imgCache = new Map();
-    const e = this._imgCache.get(fileId);
-    if (e) return e.ready ? e.img : null;
-    const file = this.scene.files && this.scene.files[fileId];
-    if (!file || !file.dataURL) return null;
-    const img = new Image(); const entry = { img, ready: false }; this._imgCache.set(fileId, entry);
-    img.onload = () => { entry.ready = true; this.dirty = true; };
-    img.src = file.dataURL; return null;
-  }
+  _imgFor(fileId) { return this.plugin._imgCacheGet(fileId, this.scene.files); } // S9: shared LRU decode cache
   _drawImage(ctx, el) {
     const img = this._imgFor(el.fileId);
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
@@ -1127,7 +1164,8 @@ class CanvasView {
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#7c5cff'; ctx.stroke();
     ctx.save(); ctx.clip();
     const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
-    ctx.fillStyle = (rec && rec.tag) ? tagColor(rec.tag) : (el.strokeColor || '#7c5cff'); ctx.fillRect(x, y, 4, h); // E11: accent encodes a choice property
+    const _la = (this.plugin._settings && this.plugin._settings.linkOpacity != null ? this.plugin._settings.linkOpacity : 100) / 100, _ga = ctx.globalAlpha; ctx.globalAlpha = _ga * _la; // S10: dim the link/accent stripe only
+    ctx.fillStyle = (rec && rec.tag) ? tagColor(rec.tag) : (el.strokeColor || '#7c5cff'); ctx.fillRect(x, y, 4, h); ctx.globalAlpha = _ga; // E11: accent encodes a choice property
     ctx.textBaseline = 'top';
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
@@ -1147,6 +1185,19 @@ class CanvasView {
     if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
     if (!panel) return;
     try { panel.navigateTo({ type: 'edit_panel', rootId: guid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] openRecord', e); }
+  }
+  // S10: single open path for record/board cards (and @@ ref nodes) — honors the openInNewPanel setting.
+  _openCard(el) {
+    const st = this.plugin._settings || {};
+    const newPanel = st.openInNewPanel !== false; // default ON = side panel (today's behavior)
+    const guid = el.recordGuid || el.refGuid;
+    if (!guid) return;
+    if (el.type === 'board') { this.plugin._openPanelFor(guid, { inPlace: !newPanel }); return; }
+    if (newPanel) { this._openRecord(guid); return; }
+    const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
+    const here = this.panel || (this.plugin.ui.getActivePanel && this.plugin.ui.getActivePanel());
+    if (here) { try { here.navigateTo({ type: 'edit_panel', rootId: guid, workspaceGuid: ws }); return; } catch (_e) {} }
+    this._openRecord(guid); // fallback: no active panel → new side panel
   }
   // Phase 9 E2: query-node cache + render. Runs searchByQuery; the plugin invalidates on record events.
   _queryFor(q) {
@@ -1231,10 +1282,12 @@ class CanvasView {
     if (b && b.img) { // cover-fit the preview below the title bar
       try { const aw = w, ah = h - head, ir = b.img.width / b.img.height, br = aw / ah; let dw, dh; if (ir > br) { dh = ah; dw = ah * ir; } else { dw = aw; dh = aw / ir; } ctx.drawImage(b.img, x + (aw - dw) / 2, y + head + (ah - dh) / 2, dw, dh); } catch (_e) {}
     } else { ctx.fillStyle = '#6b7280'; ctx.font = '12px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.fillText(b ? '(no preview yet)' : 'Loading…', x + 10, y + h / 2); }
-    // title bar
+    // title bar (S10: dim the board link chrome — preview image stays full opacity)
+    const _la = (this.plugin._settings && this.plugin._settings.linkOpacity != null ? this.plugin._settings.linkOpacity : 100) / 100, _ga = ctx.globalAlpha; ctx.globalAlpha = _ga * _la;
     ctx.fillStyle = 'rgba(16,185,129,0.16)'; ctx.fillRect(x, y, w, head);
     ctx.fillStyle = '#d1fae5'; ctx.font = '600 12px system-ui, sans-serif'; ctx.textBaseline = 'middle';
     ctx.fillText('▦ ' + this._clipText(ctx, (b && b.title) || 'Drawing', w - 18), x + 8, y + head / 2);
+    ctx.globalAlpha = _ga;
     ctx.restore(); ctx.restore();
   }
   _insertBoardCard(guid, wx, wy) {
@@ -1803,8 +1856,10 @@ class Plugin extends AppPlugin {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
     const reg = freshRegistry(); this._reg = reg;
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
+    this._imgCache = new Map(); // S9: shared bounded LRU decode cache (one Image per fileId across all views)
     this._settings = loadPlexusSettings();
     PLEXUS_DEFAULT_FONT = this._settings.defaultFont || 'system-ui, sans-serif'; // S7
+    PLEXUS_LINK_ALPHA = (this._settings.linkOpacity == null ? 100 : this._settings.linkOpacity) / 100; // S10
     this._secrets = null; // P0.0: decrypted AI key cache (session only)
     this._onPageHide = () => { this._secrets = null; }; // wipe the decrypted key from memory on unload
     try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
@@ -1868,9 +1923,38 @@ class Plugin extends AppPlugin {
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
-  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; }
+  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */ }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
+  // S9: shared bounded LRU image-decode cache. One Image per fileId across every view. Returns the ready
+  // Image or null while async-decoding (callers already handle the placeholder). Map insertion order = LRU.
+  _imgCacheGet(fileId, files) {
+    const st = this._settings || {};
+    const cache = this._imgCache || (this._imgCache = new Map());
+    let e = cache.get(fileId);
+    if (e) {
+      if (e.broken) return null;
+      if (st.allowImageCache !== false) { cache.delete(fileId); cache.set(fileId, e); } // LRU touch: re-insert as most-recent
+      return e.ready ? e.img : null;
+    }
+    const file = files && files[fileId];
+    if (!file || !file.dataURL) return null;
+    const img = new Image(); e = { img, ready: false }; cache.set(fileId, e);
+    img.onload = () => { e.ready = true; for (const v of this._views) v.dirty = true; this._imgCacheEvict(); };
+    img.onerror = () => { e.broken = true; }; // keep a broken-marker so a bad dataURL isn't re-decoded every frame
+    img.src = file.dataURL;
+    if (st.allowImageCache === false) { const drop = () => cache.delete(fileId); img.addEventListener('load', drop, { once: true }); img.addEventListener('error', drop, { once: true }); }
+    else this._imgCacheEvict();
+    return null;
+  }
+  _imgCacheEvict() {
+    const cache = this._imgCache; if (!cache) return;
+    const max = Math.max(1, (this._settings && this._settings.imageCacheMax) || 120);
+    if (cache.size <= max) return;
+    let over = cache.size - max;
+    for (const k of cache.keys()) { cache.delete(k); if (--over <= 0) break; } // front of the Map = least-recently-used
+  }
+  _purgeImageCache() { if (this._imgCache) this._imgCache.clear(); else this._imgCache = new Map(); for (const v of this._views) v.dirty = true; }
   // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
   _getEmbedder() {
     if (this._embedderP) return this._embedderP;
@@ -1962,7 +2046,7 @@ class Plugin extends AppPlugin {
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
   _openSettings() {
     const s = this._settings || (this._settings = loadPlexusSettings());
-    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
+    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; if (key === 'linkOpacity') PLEXUS_LINK_ALPHA = (s.linkOpacity == null ? 100 : s.linkOpacity) / 100; if (key === 'imageCacheMax') this._imgCacheEvict(); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
     const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
     const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-settings-wide';
     const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
@@ -1982,6 +2066,17 @@ class Plugin extends AppPlugin {
 
     const beh = section('Canvas behavior');
     toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');
+
+    const pen = section('Pen / Stylus');
+    select(pen, 'Pen / stylus mode', 'defaultPenMode', 'When a pen draws freedraw without picking the Pen tool. Mobile = only on touch/coarse-pointer devices.', [{ v: 'never', l: 'Never' }, { v: 'mobile', l: 'On touch devices' }, { v: 'always', l: 'Always' }]);
+    toggle(pen, 'One finger pans (pen draws)', 'penSingleFingerPan', 'While pen mode is active, a single finger pans and the pen draws. Off = finger also draws freedraw.');
+    toggle(pen, 'Double-tap pen erases', 'penDoubleTapEraser', 'A quick double-tap with the pen deletes the element under the tip.');
+    toggle(pen, 'Crosshair cursor in pen mode', 'penCrosshair', 'Shows a fine precision crosshair while a pen draws.');
+
+    const itx = section('Interaction');
+    range(itx, 'Long-press to open (ms)', 'longPressMs', 'Press-and-hold a record/board card this long to open it.', 200, 1500, 50);
+    range(itx, 'Link indicator opacity (%)', 'linkOpacity', 'Opacity of @@ ref chips and card accent bars. Lower to de-emphasize links on dense graphs.', 0, 100, 1);
+    toggle(itx, 'Open cards in a new panel', 'openInNewPanel', 'On = a record/board card opens in a side panel. Off = opens in place, replacing this canvas panel.');
 
     const zp = section('Zoom & Pan');
     toggle(zp, 'Mouse wheel zooms', 'wheelZoom', 'On = wheel zooms (Ctrl scrolls). Off = wheel scrolls (Ctrl zooms).');
@@ -2013,6 +2108,9 @@ class Plugin extends AppPlugin {
     const adv = section('Advanced');
     range(adv, 'PDF import scale', 'pdfScale', 'Higher = sharper PDF pages (bigger images).', 1, 4, 0.5);
     range(adv, 'Render cull margin (px)', 'cullMargin', 'Off-screen buffer before culling — lower = faster on huge graphs, higher = less pop-in.', 0, 300, 20);
+    toggle(adv, 'Cache decoded images', 'allowImageCache', 'Keep decoded images in memory so a large drawing doesn’t re-decode every frame. Off = decode on demand, never retain (lowest memory, slowest).');
+    range(adv, 'Max cached images', 'imageCacheMax', 'How many decoded images to keep in memory. Least-recently-seen are dropped first — lower = less memory on huge graphs.', 16, 512, 8);
+    action(adv, 'Image cache', 'Free all decoded images from memory now. Visible images re-decode automatically.', 'Purge image cache', () => { this._purgeImageCache(); try { this.ui.addToaster({ title: 'Plexus: image cache purged.', dismissible: true }); } catch (_e) {} });
 
     const laser = section('Laser pointer');
     color(laser, 'Laser colour', 'laserColor', 'Trail colour for the laser tool (L).');
@@ -2214,7 +2312,7 @@ class Plugin extends AppPlugin {
         if (!v.scene.files) v.scene.files = {}; v.scene.files[fileId] = { dataURL, mimeType: 'image/png', w: 120, h: 80 };
         v.scene.elements.push(makeImage(150, 760, 120, 80, fileId)); v.dirty = true;
         await new Promise((r) => setTimeout(r, 350));
-        const cached = v._imgCache && v._imgCache.get(fileId);
+        const cached = v.plugin._imgCache && v.plugin._imgCache.get(fileId);
         const saved = await v.saveNow();
         return { type: 'image', fileId, hasDataURL: !!v.scene.files[fileId].dataURL, imgReady: !!(cached && cached.ready), saved };
       },
@@ -2487,6 +2585,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-static { z-index: 1; }
 .pxc-host .pxc-root .pxc-interactive { z-index: 2; touch-action: none; cursor: crosshair; outline: none; }
 .pxc-host .pxc-root .pxc-interactive:focus { outline: none; }
+.pxc-host .pxc-root.pxc-pencursor .pxc-interactive { cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><line x1="12" y1="2" x2="12" y2="22" stroke="%237c5cff" stroke-width="1"/><line x1="2" y1="12" x2="22" y2="12" stroke="%237c5cff" stroke-width="1"/></svg>') 12 12, crosshair; }
 .pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
 .pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 8px; right: 8px; top: 10px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; padding: 5px 7px; width: auto; max-width: calc(100% - 16px); margin: 0 auto; box-sizing: border-box; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
 .pxc-host .pxc-root .pxc-tool { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 16px; padding: 0; }
