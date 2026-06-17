@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.31.0';
+const PLEXUS_VERSION = '0.32.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1817,9 +1817,13 @@ class Plugin extends AppPlugin {
 }
 
 const BASE_CSS = `
-.pxc-host { position: relative; }
-/* UX-1: neutralize Thymer's empty-msg-panel box (flex + 20px padding + centering + min-height:100%) so the canvas fills the panel flush at the top and the toolbar doesn't drift on scroll. */
-.empty-msg-panel.pxc-host { display: block; padding: 0; align-items: stretch; justify-content: flex-start; min-height: 0; }
+/* UX-1: Thymer sets an INLINE empty-message box on the custom-panel host (padding:20px; margin-top:20px;
+   display:flex; align-items:center; min-height:100%) — only !important beats an inline style. Neutralize it so
+   the canvas fills the panel flush and the toolbar never drifts on scroll. */
+.pxc-host { position: relative; display: block !important; padding: 0 !important; margin: 0 !important; min-height: 0 !important; }
+/* Full-bleed: neutralize Thymer's reading-width wrapper so the canvas fills the WHOLE panel (rule 2; self-cleaning
+   via :has — reverts to reading width for normal records when no canvas is mounted). */
+.layout-margin:has(.pxc-host) { margin-left: 0 !important; margin-right: 0 !important; width: auto !important; max-width: none !important; }
 .pxc-host .pxc-root { position: relative; width: 100%; overflow: hidden; background: var(--color-bg-900); color: var(--color-text-400); font-family: var(--font-family, system-ui, sans-serif); }
 .pxc-host .pxc-root .pxc-layer { position: absolute; inset: 0; display: block; }
 .pxc-host .pxc-root .pxc-static { z-index: 1; }
