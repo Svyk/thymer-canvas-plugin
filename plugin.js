@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.28.0';
+const PLEXUS_VERSION = '0.29.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1112,6 +1112,15 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
     } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed (' + e + '). Check your key.', dismissible: true }); } catch (_e) {} }
   }
+  // Phase 10 E14: re-date a record card's record in place (the in-plugin core of Day-View binding).
+  async _scheduleCard() {
+    const el = this._singleSel(); if (!el || (el.type !== 'record' && el.type !== 'board')) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a record/board card to schedule.', dismissible: true }); } catch (_e) {} return; }
+    const iso = await this._promptText('Schedule date (e.g. 2026-06-20 14:30, “tomorrow”, “monday 3pm”):', 'tomorrow');
+    if (!iso) return;
+    const r = await this.plugin._setSchedule(el.recordGuid, iso);
+    if (r.ok) { this._invalidateRec(el.recordGuid); try { this.plugin.ui.addToaster({ title: 'Re-dated in place.', dismissible: true }); } catch (_e) {} }
+    else { try { this.plugin.ui.addToaster({ title: 'Plexus: could not re-date — ' + (r.reason || '') + '.', dismissible: true }); } catch (_e) {} }
+  }
   // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
   _promptText(label, def) {
     return new Promise((resolve) => {
@@ -1298,6 +1307,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1328,6 +1338,16 @@ class Plugin extends AppPlugin {
     return this._embedderP;
   }
   async _embed(text) { const pipe = await this._getEmbedder(); const out = await pipe(String(text || '').slice(0, 400), { pooling: 'mean', normalize: true }); return Array.from(out.data); }
+  // Phase 10 E14: re-date in place — set a record's `Scheduled` datetime via the canonical DateTime build.
+  async _setSchedule(guid, iso) {
+    try {
+      const rec = await this.data.getRecord(guid); if (!rec) return { ok: false, reason: 'no record' };
+      const p = rec.prop('Scheduled') || rec.prop('Date') || rec.prop('Due'); if (!p) return { ok: false, reason: 'no Scheduled/Date/Due datetime property' };
+      let val = null; try { val = DateTime.parseDateTimeString(String(iso)).value(); } catch (e) { return { ok: false, reason: 'DateTime ' + e }; }
+      let ok = false; try { ok = p.set(val); } catch (e) { return { ok: false, reason: 'set ' + e }; }
+      return { ok: !!ok };
+    } catch (e) { return { ok: false, reason: String(e) }; }
+  }
   _cmdInsertCard() {
     const v = this._activeView();
     if (!v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
@@ -1432,6 +1452,15 @@ class Plugin extends AppPlugin {
         const sample = [{ type: 'rectangle', x: 0, y: 0, w: 120, h: 60, text: 'Ingest', color: '#7c5cff' }, { type: 'ellipse', x: 190, y: 0, w: 90, h: 90, text: 'Transform' }, { type: 'arrow', x: 120, y: 30, w: 70, h: 15 }, { type: 'text', x: 0, y: 130, text: 'pipeline' }];
         const els = elementsFromAiJson(sample, 0, 0); const types = els.map((e) => e.type);
         return { count: els.length, types, ok: els.length === 6 && types.includes('rectangle') && types.includes('ellipse') && types.includes('arrow') && types.filter((t) => t === 'text').length === 3 };
+      },
+      // Phase 10 E14: re-date in place — create an Event, set its Scheduled datetime, return for MCP verify.
+      scheduleTest: async () => {
+        const cols = await this.data.getAllCollections(); const events = (cols || []).find((c) => c.getName && c.getName() === 'Events'); if (!events) return { error: 'no Events collection' };
+        let g = null; try { g = events.createRecord('E14 schedule test'); } catch (e) { return { error: 'create ' + e }; }
+        if (typeof g !== 'string') return { error: 'guid not string' };
+        await getRecordPoll(this, g);
+        const set = await this._setSchedule(g, '2026-06-20 14:30');
+        return { guid: g, set };
       },
       views: () => [...this._views].map((v) => ({ record: v.recordGuid, tool: v.tool, elements: v.scene.elements.filter((e) => !e.isDeleted).length, selected: v.selected.size, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null })),
       addShapes: async () => {
