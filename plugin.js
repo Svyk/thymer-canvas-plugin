@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.58.0';
+const PLEXUS_VERSION = '0.59.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1706,6 +1706,9 @@ class CanvasView {
         const line = await findSceneLine(this.rec);
         if (line) { this._sceneLine = line; const loaded = await loadSceneFromLine(line, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
       }
+      // UX-4 migration: scene loaded from the BODY but the collection now has a `Scene` property → migrate on
+      // open (saveScene writes the property + deletes the body line). Auto-cleans existing flipped notes.
+      if (!fresh && this._sceneLine && sceneProp) { setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 500); }
     }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
