@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.37.0';
+const PLEXUS_VERSION = '0.38.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -71,6 +71,7 @@ const TOOLS = [
   { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
   { id: 'crop', icon: 'ti-scissors', title: 'Reference a region of an image (C) — drag a box over an image' },
+  { id: 'frame', icon: 'ti-layout-board', title: 'Frame (F) — a named boundary; moves its contents together' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -229,6 +230,16 @@ function makeRect(x, y, w, h, style) {
     fillStyle: style.fillStyle || 'hachure', strokeWidth: style.strokeWidth || 2,
     roughness: 1, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
+}
+// P1.0: a frame — a named boundary that owns the elements inside it (move together; slide/page unit).
+function makeFrame(x, y, w, h) {
+  return { id: newId(), type: 'frame', x, y, width: w, height: h, angle: 0, name: 'Frame', strokeColor: '#9aa0a6', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [] };
+}
+function hitFrameBorder(el, wx, wy, tol, labelH) {
+  if (wx >= el.x && wx <= el.x + Math.min(160, el.width) && wy >= el.y - labelH && wy <= el.y) return true; // name-label band
+  const inOuter = wx >= el.x - tol && wx <= el.x + el.width + tol && wy >= el.y - tol && wy <= el.y + el.height + tol;
+  const inInner = wx >= el.x + tol && wx <= el.x + el.width - tol && wy >= el.y + tol && wy <= el.y + el.height - tol;
+  return inOuter && !inInner; // border ring only — interior clicks pass through to contained elements
 }
 function makeFreedraw(wx, wy, style) {
   return {
@@ -705,10 +716,12 @@ class CanvasView {
     this.wrap.appendChild(box); setTimeout(() => inp.focus(), 0);
   }
   _hitTopAt(wx, wy) {
-    const tol = 6 / this.camera.zoom;
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (!el.isDeleted && hitElement(el, wx, wy, tol)) return el; }
+    const tol = 6 / this.camera.zoom, labelH = 18 / this.camera.zoom;
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted) continue; if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; } if (hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
+  _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
+  _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
   _bindableAt(wx, wy, excludeId) {
     const tol = 8 / this.camera.zoom;
     for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted || el.id === excludeId) continue; if ((el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') && hitElement(el, wx, wy, tol)) return el; }
@@ -763,7 +776,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board')) {
+        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -772,8 +785,14 @@ class CanvasView {
         const hit = this._hitTopAt(down.x, down.y);
         if (hit) {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
-          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null }));
+          const mk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
+          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map(mk);
+          // P1.0: moving a frame carries the elements inside it.
+          const seen = new Set(this.selected);
+          for (const m of [...moveEls]) { if (m.el.type === 'frame') for (const c of this._frameChildren(m.el)) if (!seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } }
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
+      } else if (this.tool === 'frame') {
+        mode = 'create'; created = makeFrame(down.x, down.y, 0, 0); this.scene.elements.unshift(created); this.selected.clear(); // P1.0: frames render behind (unshift to array front)
       } else if (this.tool === 'pen') {
         mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'eraser') {
@@ -855,7 +874,7 @@ class CanvasView {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -866,6 +885,7 @@ class CanvasView {
       else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'board') { this.plugin._openPanelFor(hit.recordGuid); }
+      else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
@@ -1070,6 +1090,17 @@ class CanvasView {
     return null;
   }
   _invalidateBoard(guid) { if (this._boardCache && this._boardCache.has(guid)) { this._boardCache.delete(guid); this.dirty = true; } }
+  // P1.0: draw a frame — clean rounded border + name label above the top-left.
+  _drawFrame(ctx, el) {
+    const z = this.camera.zoom;
+    ctx.save();
+    ctx.strokeStyle = el.strokeColor || '#9aa0a6'; ctx.lineWidth = 1.4 / z;
+    const r = 6 / z;
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(el.x, el.y, el.width, el.height, r); else ctx.rect(el.x, el.y, el.width, el.height); ctx.stroke();
+    ctx.font = (12 / z) + 'px system-ui, sans-serif'; ctx.fillStyle = el.strokeColor || '#9aa0a6'; ctx.textBaseline = 'bottom'; ctx.textAlign = 'left';
+    ctx.fillText(el.name || 'Frame', el.x + 2 / z, el.y - 4 / z);
+    ctx.restore();
+  }
   _drawBoardCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
@@ -1323,7 +1354,8 @@ class CanvasView {
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId || el.type === 'frame') continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else drawElement(sctx, el); }
     this._drawGhosts(sctx);
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
@@ -1580,6 +1612,14 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      // P1.0: a frame owns the elements whose centre is inside it (move-together unit).
+      frameTest: () => {
+        const v = this._activeView(); if (!v) return { ok: false, reason: 'no view' };
+        const fr = makeFrame(0, 0, 300, 200), inside = makeRect(50, 50, 40, 40, { type: 'rectangle' }), outside = makeRect(900, 900, 40, 40, { type: 'rectangle' });
+        v.scene.elements.unshift(fr); v.scene.elements.push(inside, outside);
+        const kids = v._frameChildren(fr).map((e) => e.id); v.dirty = true;
+        return { ok: kids.includes(inside.id) && !kids.includes(outside.id), childrenCount: kids.length };
+      },
       // P0.0: verify the encrypted-secret round-trip (right passphrase decrypts; wrong one throws — GCM tag).
       cryptoTest: async () => {
         const blob = await pxEncryptSecret(JSON.stringify({ openai: 'sk-test-123' }), 'hunter2');
