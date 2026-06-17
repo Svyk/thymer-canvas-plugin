@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.46.0';
+const PLEXUS_VERSION = '0.47.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -32,6 +32,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   pngScale: 2, exportPadding: 24, exportBackground: true,
   // S6 Laser pointer
   laserColor: '#ef4444', laserDecay: 1400, laserWidth: 4,
+  // S11 AI
+  aiProvider: 'openai', aiModel: '',
 };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
@@ -1353,46 +1355,73 @@ class CanvasView {
   }
   // P0.0: fetch the OpenAI key from the ENCRYPTED store (unlock once per session; migrate + delete any legacy
   // plaintext copy). The key never persists in plaintext and is wiped from memory on pagehide.
-  async _aiKey() {
+  // P0.0 + P3: per-PROVIDER encrypted key. One passphrase-locked blob holds all providers' keys; prompts only
+  // for the provider you use, reusing the session passphrase. Keys never persist in plaintext; wiped on pagehide.
+  async _aiKey(provider) {
+    provider = provider || (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
     const plug = this.plugin;
-    if (plug._secrets && plug._secrets.openai) return plug._secrets.openai;
+    if (plug._secrets && plug._secrets[provider]) return plug._secrets[provider];
     let blob = null; try { blob = JSON.parse(localStorage.getItem(PLEXUS_SECRET_LS) || 'null'); } catch (_e) {}
-    if (blob && blob.ct) {
-      const pass = await this._promptText('Passphrase to unlock your saved OpenAI key:', '');
+    if (blob && blob.ct && !plug._secrets) {
+      const pass = await this._promptText('Passphrase to unlock your saved API keys:', '');
       if (!pass) return null;
-      try { plug._secrets = JSON.parse(await pxDecryptSecret(blob, pass)); return plug._secrets.openai || null; }
+      try { plug._secrets = JSON.parse(await pxDecryptSecret(blob, pass)); plug._secretPass = pass; }
       catch (_e) { try { plug.ui.addToaster({ title: 'Plexus: wrong passphrase.', dismissible: true }); } catch (_e2) {} return null; }
+      if (plug._secrets[provider]) return plug._secrets[provider];
     }
-    // First use: migrate a legacy PLAINTEXT key if present, else collect a new one — then encrypt it.
-    let key = ''; try { key = localStorage.getItem('plexus_llm_key') || ''; } catch (_e) {}
-    if (!key) key = await this._promptText('OpenAI API key (encrypted at rest; sent only to OpenAI):', '');
+    // Need a key for this provider — collect it (migrate a legacy plaintext OpenAI key) and (re)encrypt the blob.
+    let key = '';
+    if (provider === 'openai' && (!blob || !blob.ct)) { try { key = localStorage.getItem('plexus_llm_key') || ''; } catch (_e) {} }
+    if (!key) key = await this._promptText(provider + ' API key (encrypted at rest; sent only to ' + provider + '):', '');
     if (!key) return null; key = key.trim();
-    const pass = await this._promptText('Create a passphrase to encrypt your key (re-entered once per session):', '');
-    if (!pass) return null;
-    try { localStorage.setItem(PLEXUS_SECRET_LS, JSON.stringify(await pxEncryptSecret(JSON.stringify({ openai: key }), pass))); } catch (_e) {}
-    try { localStorage.removeItem('plexus_llm_key'); } catch (_e) {} // delete the legacy PLAINTEXT copy
-    plug._secrets = { openai: key };
+    let pass = plug._secretPass;
+    if (!pass) { pass = await this._promptText('Create a passphrase to encrypt your key(s) (once per session):', ''); if (!pass) return null; plug._secretPass = pass; }
+    plug._secrets = Object.assign({}, plug._secrets || {}, { [provider]: key });
+    try { localStorage.setItem(PLEXUS_SECRET_LS, JSON.stringify(await pxEncryptSecret(JSON.stringify(plug._secrets), pass))); } catch (_e) {}
+    try { localStorage.removeItem('plexus_llm_key'); } catch (_e) {}
     return key;
+  }
+  // P3: provider-agnostic text completion (OpenAI / xAI / Anthropic / Gemini), direct client→provider call.
+  async _aiComplete(system, user) {
+    const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
+    const key = await this._aiKey(provider); if (!key) return null;
+    const model = (this.plugin._settings && this.plugin._settings.aiModel) || '';
+    try {
+      if (provider === 'openai' || provider === 'xai') {
+        const url = provider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+        const m = model || (provider === 'xai' ? 'grok-2-latest' : 'gpt-4o-mini');
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: m, temperature: 0.2, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) });
+        const data = await res.json(); return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+      }
+      if (provider === 'anthropic') {
+        const m = model || 'claude-3-5-haiku-latest';
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: m, max_tokens: 1500, system, messages: [{ role: 'user', content: user }] }) });
+        const data = await res.json(); return (data && data.content && data.content[0] && data.content[0].text) || '';
+      }
+      if (provider === 'gemini') {
+        const m = model || 'gemini-2.0-flash';
+        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + encodeURIComponent(key), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }] }) });
+        const data = await res.json(); return (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || '';
+      }
+    } catch (e) { console.error('[Plexus] ai', e); }
+    return null;
   }
   // Phase 10 E6: AI diagramming — prompt -> (consent + encrypted key) -> LLM -> JSON shapes -> elements.
   async _aiDiagram() {
     const what = await this._promptText('Describe the diagram to generate:', 'a 3-step data pipeline: ingest → transform → store');
     if (!what) return;
-    const key = await this._aiKey(); if (!key) return;
     try { this.plugin.ui.addToaster({ title: 'Plexus: asking the model…', dismissible: true }); } catch (_e) {}
-    try {
-      const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.2, messages: [{ role: 'system', content: 'Output ONLY a JSON array of canvas shapes, no prose. Each item: {"type":"rectangle|ellipse|diamond|text|arrow","x":<num>,"y":<num>,"w":<num>,"h":<num>,"text":"<label>","color":"#7c5cff"}. Lay nodes left-to-right ~190px apart; connect them with arrow shapes. Origin 0,0.' }, { role: 'user', content: String(what) }] }) });
-      const data = await res.json();
-      let txt = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
-      txt = txt.replace(/^```(json)?/i, '').replace(/```$/, '').trim();
-      let arr = null; try { arr = JSON.parse(txt); } catch (_e) { const m = txt.match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } }
-      if (!arr) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model did not return valid JSON.', dismissible: true }); } catch (_e) {} return; }
-      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-      const els = elementsFromAiJson(arr, c.x - 240, c.y - 120);
-      this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
-      this.dirty = true; this.scheduleSave();
-      try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
-    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed (' + e + '). Check your key.', dismissible: true }); } catch (_e) {} }
+    const SYS = 'Output ONLY a JSON array of canvas shapes, no prose. Each item: {"type":"rectangle|ellipse|diamond|text|arrow","x":<num>,"y":<num>,"w":<num>,"h":<num>,"text":"<label>","color":"#7c5cff"}. Lay nodes left-to-right ~190px apart; connect them with arrow shapes. Origin 0,0.';
+    let txt = null; try { txt = await this._aiComplete(SYS, String(what)); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed (' + e + ').', dismissible: true }); } catch (_e) {} return; }
+    if (txt == null) return; // no key / cancelled
+    txt = String(txt).replace(/^```(json)?/i, '').replace(/```$/, '').trim();
+    let arr = null; try { arr = JSON.parse(txt); } catch (_e) { const m = txt.match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } }
+    if (!arr) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model did not return valid JSON.', dismissible: true }); } catch (_e) {} return; }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const els = elementsFromAiJson(arr, c.x - 240, c.y - 120);
+    this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
   }
   // Phase 10 E14: re-date a record card's record in place (the in-plugin core of Day-View binding).
   async _scheduleCard() {
@@ -1724,6 +1753,8 @@ class Plugin extends AppPlugin {
     const color = (p, label, key, hint) => { const inp = document.createElement('input'); inp.type = 'color'; inp.className = 'pxc-set-color'; inp.value = s[key] || '#7c5cff'; inp.addEventListener('input', () => { s[key] = inp.value; apply(key); }); row(p, label, hint, inp); };
     const range = (p, label, key, hint, mn, mx, st2) => { const inp = document.createElement('input'); inp.type = 'range'; inp.className = 'pxc-set-range'; inp.min = mn; inp.max = mx; inp.step = st2 || 1; inp.value = s[key]; inp.addEventListener('input', () => { s[key] = parseFloat(inp.value); apply(key); }); row(p, label, hint, inp); };
     const select = (p, label, key, hint, opts) => { const sel = document.createElement('select'); sel.className = 'pxc-set-sel'; for (const o of opts) { const op = document.createElement('option'); op.value = o.v; op.textContent = o.l; if (s[key] === o.v) op.selected = true; sel.appendChild(op); } sel.addEventListener('change', () => { s[key] = sel.value; apply(key); }); row(p, label, hint, sel); };
+    const text = (p, label, key, hint, ph) => { const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'pxc-set-text'; inp.value = s[key] || ''; inp.placeholder = ph || 'default'; inp.addEventListener('change', () => { s[key] = inp.value.trim(); apply(key); }); row(p, label, hint, inp); };
+    const action = (p, label, hint, btnLabel, fn) => { const b = document.createElement('button'); b.className = 'pxc-set-btn'; b.textContent = btnLabel; b.addEventListener('click', fn); row(p, label, hint, b); };
 
     const gen = section('General', true);
     select(gen, 'Default open mode', 'openMode', 'How a drawing opens.', [{ v: 'normal', l: 'Normal' }, { v: 'present', l: 'Present' }]);
@@ -1754,6 +1785,11 @@ class Plugin extends AppPlugin {
       { v: '"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive', l: 'Handwriting (Comic)' },
       { v: '"Bradley Hand", "Segoe Print", cursive', l: 'Handwriting (Bradley)' },
     ]);
+
+    const ai = section('AI');
+    select(ai, 'AI provider', 'aiProvider', 'Used by “AI diagram”. Key is encrypted at rest; calls go direct to the provider.', [{ v: 'openai', l: 'OpenAI' }, { v: 'anthropic', l: 'Anthropic (Claude)' }, { v: 'gemini', l: 'Google Gemini' }, { v: 'xai', l: 'xAI (Grok)' }]);
+    text(ai, 'Model override', 'aiModel', 'Optional — blank uses the provider default.', 'default');
+    action(ai, 'Stored keys', 'Clear all saved API keys + passphrase from this device.', 'Reset keys', () => { try { localStorage.removeItem('plexus_secret_blob'); localStorage.removeItem('plexus_llm_key'); } catch (_e) {} this._secrets = null; this._secretPass = null; try { this.ui.addToaster({ title: 'Plexus: stored AI keys cleared.', dismissible: true }); } catch (_e) {} });
 
     const laser = section('Laser pointer');
     color(laser, 'Laser colour', 'laserColor', 'Trail colour for the laser tool (L).');
@@ -2248,6 +2284,9 @@ const BASE_CSS = `
 .pxc-set-color { width: 38px; height: 24px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: none; cursor: pointer; padding: 0; }
 .pxc-set-range { width: 130px; accent-color: var(--button-primary-bg-color, #7c5cff); }
 .pxc-set-sel { padding: 4px 8px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 12px; cursor: pointer; }
+.pxc-set-text { width: 150px; padding: 4px 8px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 12px; }
+.pxc-set-btn { padding: 4px 10px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--button-bg-color, transparent); color: var(--color-text-400); font-size: 12px; cursor: pointer; }
+.pxc-set-btn:hover { background: var(--sidebar-bg-hover); }
 /* P0.3: Icon Library palette */
 .pxc-iconlib { min-width: 460px; max-width: 540px; }
 .pxc-il-hint { font-size: 12px; color: var(--color-text-600); margin-bottom: 10px; }
