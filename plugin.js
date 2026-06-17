@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.48.0';
+const PLEXUS_VERSION = '0.49.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1679,6 +1679,7 @@ class Plugin extends AppPlugin {
     raf = requestAnimationFrame(tick); reg.add(() => cancelAnimationFrame(raf));
     const onScroll = () => { if (window.scrollX !== 0) window.scrollTo({ left: 0, top: window.scrollY, behavior: 'instant' }); };
     window.addEventListener('scroll', onScroll, { passive: true }); reg.add(() => window.removeEventListener('scroll', onScroll));
+    this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
   _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; }
@@ -1883,6 +1884,29 @@ class Plugin extends AppPlugin {
       grid.appendChild(cell);
       (async () => { try { const fv = rec.getBanner && rec.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); thumb.style.backgroundImage = 'url(' + url + ')'; return; } } } thumb.classList.add('pxc-gempty'); } catch (_e) { thumb.classList.add('pxc-gempty'); } })();
     }
+  }
+  // P1.1: PlexusAutomate — a native scripting API (no eval) exposed on window.__plexusCanvas.automate.
+  // Scripts/power-users build elements with the factories and add them to the active drawing.
+  _installAutomate() {
+    const plug = this; const v = () => plug._activeView();
+    window.__plexusCanvas.automate = {
+      version: 1,
+      view: v,
+      getScene: () => { const x = v(); return x ? x.scene : null; },
+      getSelection: () => { const x = v(); return x ? [...x.selected].map((id) => x._byId(id)).filter(Boolean) : []; },
+      add: (...els) => { const x = v(); if (!x) return null; const flat = els.flat(); for (const e of flat) x.scene.elements.push(e); x.selected = new Set(flat.map((e) => e.id)); x.dirty = true; x.scheduleSave(); return flat; },
+      rect: (x0, y0, w, h, color) => makeRect(x0, y0, w, h, { type: 'rectangle', stroke: color || '#1e1e1e', fill: color ? tintColor(color) : 'transparent', fillStyle: color ? 'solid' : 'hachure' }),
+      ellipse: (x0, y0, w, h, color) => makeRect(x0, y0, w, h, { type: 'ellipse', stroke: color || '#1e1e1e' }),
+      diamond: (x0, y0, w, h, color) => makeRect(x0, y0, w, h, { type: 'diamond', stroke: color || '#1e1e1e' }),
+      text: (x0, y0, str, size) => { const e = makeText(x0, y0, { fontSize: size || 20, stroke: '#1e1e1e' }); e.text = String(str || ''); measureText(e); return e; },
+      arrow: (x0, y0, x1, y1, color) => { const e = makeLinear(x0, y0, 'arrow', { stroke: color || '#1e1e1e', strokeWidth: 2 }); e.points = [[x0, y0], [x1, y1]]; linearBBox(e); return e; },
+      frame: (x0, y0, w, h, name) => { const f = makeFrame(x0, y0, w, h); if (name) f.name = name; return f; },
+      connect: (a, b, color) => { const e = makeLinear(0, 0, 'arrow', { stroke: color || '#9aa0a6', strokeWidth: 1.5 }); e.points = [[a.x + (a.width || 0), a.y + (a.height || 0) / 2], [b.x, b.y + (b.height || 0) / 2]]; linearBBox(e); return e; },
+      newMindMap: () => { const x = v(); return x ? x._newMindMap() : null; },
+      recolor: (color) => { const x = v(); return x ? x._applyColorToSelection(color) : false; },
+      schemes: COLOR_SCHEMES,
+      refresh: () => { const x = v(); if (x) x.dirty = true; },
+    };
   }
   _installTestHooks() {
     window.__plexusCanvas.test = {
