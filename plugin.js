@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.40.0';
+const PLEXUS_VERSION = '0.41.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1487,6 +1487,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
@@ -1668,6 +1669,31 @@ class Plugin extends AppPlugin {
       })();
     }
     return { cards: n };
+  }
+  // P0.3: Icon Library — a floating palette of records tagged #icon. Click an icon to drop a live board-card
+  // reference onto the canvas; Thymer backlinks then track every drawing that uses that icon (Nicole's loop).
+  async _openIconLibrary() {
+    const v0 = this._activeView();
+    if (!v0) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first, then the Icon Library.', dismissible: true }); } catch (_e) {} return; }
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-iconlib';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Icon Library'; box.appendChild(title);
+    const hint = document.createElement('div'); hint.className = 'pxc-il-hint'; hint.textContent = 'Records tagged #icon. Click one to drop it on the canvas — it backlinks to the source.'; box.appendChild(hint);
+    const grid = document.createElement('div'); grid.className = 'pxc-il-grid'; box.appendChild(grid);
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done'; close.addEventListener('click', () => overlay.remove()); box.appendChild(close);
+    overlay.appendChild(box); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    let recs = [];
+    try { const res = await this.data.searchByQuery('#icon', 200); recs = (res && res.records) || []; } catch (_e) {}
+    if (!recs.length) { grid.innerHTML = '<div class="pxc-il-empty">No icons yet — tag any record <b>#icon</b> (its drawing/banner becomes a reusable icon).</div>'; return; }
+    for (const rec of recs) {
+      const guid = rec.guid; const cell = document.createElement('button'); cell.className = 'pxc-il-cell'; cell.title = (rec.getName && rec.getName()) || 'icon';
+      const thumb = document.createElement('div'); thumb.className = 'pxc-il-thumb'; const cap = document.createElement('div'); cap.className = 'pxc-il-cap'; cap.textContent = (rec.getName && rec.getName()) || '';
+      cell.appendChild(thumb); cell.appendChild(cap);
+      cell.addEventListener('click', () => { const view = this._activeView() || v0; if (view) { const c = view.camera.screenToWorld(view.cssW / 2, view.cssH / 2); const card = makeBoardCard(view._snap(c.x - 50), view._snap(c.y - 50), 100, 100, guid); view.scene.elements.push(card); view.selected.clear(); view.selected.add(card.id); view.dirty = true; view.scheduleSave(); } overlay.remove(); });
+      grid.appendChild(cell);
+      (async () => { try { const fv = rec.getBanner && rec.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); thumb.style.backgroundImage = 'url(' + url + ')'; return; } } } thumb.classList.add('pxc-gempty'); } catch (_e) { thumb.classList.add('pxc-gempty'); } })();
+    }
   }
   _installTestHooks() {
     window.__plexusCanvas.test = {
@@ -2088,6 +2114,16 @@ const BASE_CSS = `
 .pxc-set-color { width: 38px; height: 24px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: none; cursor: pointer; padding: 0; }
 .pxc-set-range { width: 130px; accent-color: var(--button-primary-bg-color, #7c5cff); }
 .pxc-set-sel { padding: 4px 8px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 12px; cursor: pointer; }
+/* P0.3: Icon Library palette */
+.pxc-iconlib { min-width: 460px; max-width: 540px; }
+.pxc-il-hint { font-size: 12px; color: var(--color-text-600); margin-bottom: 10px; }
+.pxc-il-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 10px; max-height: 52vh; overflow-y: auto; }
+.pxc-il-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px; border: 1px solid var(--cards-border-color); border-radius: 8px; background: var(--cards-bg); color: var(--color-text-400); cursor: pointer; }
+.pxc-il-cell:hover { border-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-il-thumb { width: 56px; height: 56px; background-size: contain; background-position: center; background-repeat: no-repeat; border-radius: 6px; }
+.pxc-il-thumb.pxc-gempty { background: var(--sidebar-bg-hover); }
+.pxc-il-cap { font-size: 10px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 76px; }
+.pxc-il-empty { color: var(--color-text-600); font-size: 13px; padding: 16px 4px; grid-column: 1 / -1; }
 .pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .pxc-host .pxc-root.pxc-present .pxc-toolbar, .pxc-host .pxc-root.pxc-present .pxc-props, .pxc-host .pxc-root.pxc-present .pxc-hint, .pxc-host .pxc-root.pxc-present .pxc-search { display: none !important; }
 .pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
