@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.52.0';
+const PLEXUS_VERSION = '0.53.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -54,6 +54,30 @@ const _libCache = {};
 async function loadLib(url) { if (_libCache[url]) return _libCache[url]; _libCache[url] = await import(url); return _libCache[url]; }
 const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs' };
 function shapePolygon(el) { const x = el.x, y = el.y, w = el.width, h = el.height; if (el.type === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]]; if (el.type === 'ellipse') { const pts = []; for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push([x + w / 2 + Math.cos(a) * w / 2, y + h / 2 + Math.sin(a) * h / 2]); } return pts; } return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]; }
+// Rasterize an SVG string to a PNG File at 2× (white bg, size-capped) — used by Mermaid + LaTeX so the result
+// becomes a normal image element (no live SVG/HTML in the render loop → stays fast).
+function svgToPngFile(svg, name) {
+  return new Promise((resolve) => {
+    try {
+      const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg); const img = new Image();
+      img.onload = () => {
+        let w = img.naturalWidth || 600, h = img.naturalHeight || 400; const max = 900, s = Math.max(w, h) > max ? max / Math.max(w, h) : 1;
+        const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w * 2 * s)); cv.height = Math.max(1, Math.round(h * 2 * s));
+        const ctx = cv.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+        cv.toBlob((b) => resolve(b ? new File([b], name || 'render.png', { type: 'image/png' }) : null), 'image/png');
+      };
+      img.onerror = () => resolve(null); img.src = url;
+    } catch (_e) { resolve(null); }
+  });
+}
+// LaTeX → SVG via MathJax (classic script; tex-svg outputs self-contained vector paths → rasterizes cleanly).
+async function loadMathJax() {
+  if (window.MathJax && window.MathJax.tex2svg) return window.MathJax;
+  if (!window.__pxcMJ) { window.__pxcMJ = new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js'; s.async = true; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+  try { await window.__pxcMJ; } catch (_e) { return null; }
+  for (let i = 0; i < 60; i++) { if (window.MathJax && window.MathJax.tex2svg) return window.MathJax; await new Promise((r) => setTimeout(r, 100)); }
+  return window.MathJax || null;
+}
 /* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
    stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
 const pxEnc = new TextEncoder(), pxDec = new TextDecoder();
@@ -1289,6 +1313,38 @@ class CanvasView {
     this.scene.elements.push(fd); this.selected.clear(); this.selected.add(fd.id); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Boolean ' + op + ' → 1 shape.', dismissible: true }); } catch (_e) {}
   }
+  // P2: Mermaid diagram (mermaid.js, lazy) → SVG → rasterized image element.
+  async _insertMermaid() {
+    const code = await this._promptText('Mermaid code:', 'graph LR\n  A[Ingest] --> B[Transform] --> C[Store]');
+    if (!code) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: rendering Mermaid…', dismissible: true }); } catch (_e) {}
+    let svg = null;
+    try { const m = await loadLib(LIB.mermaid); const mermaid = m.default || m; if (!this.plugin._mmdInit) { mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' }); this.plugin._mmdInit = true; } const r = await mermaid.render('pxcmmd' + Date.now(), code); svg = r && r.svg; }
+    catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: Mermaid error — ' + ((e && e.message) || e) + '.', dismissible: true }); } catch (_e) {} return; }
+    if (!svg) return;
+    const file = await svgToPngFile(svg, 'mermaid.png'); if (!file) { try { this.plugin.ui.addToaster({ title: 'Plexus: Mermaid render failed.', dismissible: true }); } catch (_e) {} return; }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    await this._addImageFromFile(file, c.x, c.y);
+    try { this.plugin.ui.addToaster({ title: 'Mermaid diagram inserted.', dismissible: true }); } catch (_e) {}
+  }
+  // P2: LaTeX equation (MathJax SVG, lazy) → rasterized image element.
+  async _insertLatex() {
+    const tex = await this._promptText('LaTeX:', 'e = mc^2');
+    if (!tex) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: rendering LaTeX…', dismissible: true }); } catch (_e) {}
+    const MJ = await loadMathJax(); if (!MJ || !MJ.tex2svg) { try { this.plugin.ui.addToaster({ title: 'Plexus: MathJax failed to load.', dismissible: true }); } catch (_e) {} return; }
+    let svg = null;
+    try {
+      const node = MJ.tex2svg(tex, { display: true }); node.style.cssText = 'position:absolute;left:-9999px;top:0;font-size:34px;'; document.body.appendChild(node);
+      const svgEl = node.querySelector('svg'); if (svgEl) { const r = svgEl.getBoundingClientRect(); svgEl.setAttribute('width', Math.max(1, Math.ceil(r.width))); svgEl.setAttribute('height', Math.max(1, Math.ceil(r.height))); svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); svg = new XMLSerializer().serializeToString(svgEl); }
+      node.remove();
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: LaTeX error.', dismissible: true }); } catch (_e) {} return; }
+    if (!svg) return;
+    const file = await svgToPngFile(svg, 'latex.png'); if (!file) return;
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    await this._addImageFromFile(file, c.x, c.y);
+    try { this.plugin.ui.addToaster({ title: 'LaTeX inserted.', dismissible: true }); } catch (_e) {}
+  }
   _mmAddChild(node) {
     const rootId = node.mmRoot; if (!rootId) return null;
     const child = this._mmMakeNode('New idea', node.x + 200, node.y, rootId, node.id); this.scene.elements.push(child);
@@ -1709,6 +1765,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — subtract', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('difference'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — intersect', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('intersect'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert Mermaid diagram', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._insertMermaid(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert LaTeX equation', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._insertLatex(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
