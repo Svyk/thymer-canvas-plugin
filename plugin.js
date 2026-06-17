@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.17.0';
+const PLEXUS_VERSION = '0.18.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -418,6 +418,7 @@ class CanvasView {
     this.iCv = document.createElement('canvas'); this.iCv.className = 'pxc-layer pxc-interactive'; this.iCv.tabIndex = 0;
     wrap.appendChild(this.staticCv); wrap.appendChild(this.iCv);
     wrap.appendChild(this._buildToolbar());
+    wrap.appendChild(this._buildPropPanel());
     const hint = document.createElement('div'); hint.className = 'pxc-hint';
     hint.textContent = 'V select · R/O/D shapes · handles resize/rotate · drag = pan · scroll = zoom · ⌫ delete';
     wrap.appendChild(hint); host.appendChild(wrap); this.wrap = wrap;
@@ -503,6 +504,53 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Exported drawing as SVG.', dismissible: true }); } catch (_e) {}
       return svg.length;
     } catch (e) { console.error('[Plexus] exportSvg', e); return 0; }
+  }
+  // Phase 8: contextual property panel — stroke width / opacity / fill style for the selection.
+  _buildPropPanel() {
+    const p = document.createElement('div'); p.className = 'pxc-props'; this._propEl = p;
+    p.addEventListener('pointerdown', (e) => e.stopPropagation());
+    const lab = (t) => { const s = document.createElement('span'); s.className = 'pxc-prop-label'; s.textContent = t; return s; };
+    const sep = () => { const s = document.createElement('span'); s.className = 'pxc-prop-sep'; return s; };
+    p.appendChild(lab('Width')); this._swBtns = {};
+    for (const [t, v] of [['S', 1], ['M', 2], ['L', 4], ['XL', 8]]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyProp('strokeWidth', v)); p.appendChild(b); this._swBtns[v] = b; }
+    p.appendChild(sep()); p.appendChild(lab('Opacity'));
+    const op = document.createElement('input'); op.type = 'range'; op.min = '10'; op.max = '100'; op.value = '100'; op.className = 'pxc-prop-range'; this._opRange = op;
+    op.addEventListener('input', () => this._applyProp('opacity', Math.round(+op.value) / 100)); p.appendChild(op);
+    p.appendChild(sep()); p.appendChild(lab('Fill')); this._fillBtns = {};
+    for (const [t, v] of [['Solid', 'solid'], ['Hachure', 'hachure'], ['None', 'none']]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyFill(v)); p.appendChild(b); this._fillBtns[v] = b; }
+    return p;
+  }
+  _applyProp(key, val) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { el[key] = val; ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
+  _applyFill(style) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { if (style === 'none') el.backgroundColor = 'transparent'; else { el.backgroundColor = FILLS[el.strokeColor] || '#efeaff'; el.fillStyle = style; } ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
+  _syncPropPanel(force) {
+    if (!this._propEl) return;
+    const has = this.selected.size > 0; this._propEl.classList.toggle('show', has);
+    const sig = [...this.selected].join(','); if (!force && sig === this._propSig) return; this._propSig = sig;
+    if (!has) return; const el = this._byId([...this.selected][0]); if (!el) return;
+    if (this._opRange) this._opRange.value = String(Math.round((el.opacity == null ? 1 : el.opacity) * 100));
+    for (const v in this._swBtns) this._swBtns[v].classList.toggle('active', +v === (el.strokeWidth || 2));
+    const fs = (!el.backgroundColor || el.backgroundColor === 'transparent') ? 'none' : (el.fillStyle || 'solid');
+    for (const v in this._fillBtns) this._fillBtns[v].classList.toggle('active', v === fs);
+  }
+  // Phase 8 (gap #10): in-canvas text search — find/centre text elements; Cmd/Ctrl+F or the command.
+  _searchScene(q) { q = (q || '').trim().toLowerCase(); if (!q) return []; return this.scene.elements.filter((el) => !el.isDeleted && el.type === 'text' && String(el.text || '').toLowerCase().includes(q)).map((el) => el.id); }
+  _focusMatch(id) { const el = this._byId(id); if (!el) return; this.selected = new Set([id]); const cx = el.x + Math.abs(el.width) / 2, cy = el.y + Math.abs(el.height) / 2; this.camera.x = cx - (this.cssW / this.camera.zoom) / 2; this.camera.y = cy - (this.cssH / this.camera.zoom) / 2; this.dirty = true; }
+  _closeSearch() { if (this._searchEl) { try { this._searchEl.remove(); } catch (_e) {} this._searchEl = null; } }
+  _openSearch() {
+    if (this._searchEl) { const i = this._searchEl.querySelector('input'); if (i) i.focus(); return; }
+    const box = document.createElement('div'); box.className = 'pxc-search'; this._searchEl = box;
+    box.addEventListener('pointerdown', (e) => e.stopPropagation());
+    const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = 'Find text…'; inp.className = 'pxc-search-input';
+    const count = document.createElement('span'); count.className = 'pxc-search-count';
+    const close = document.createElement('button'); close.className = 'pxc-tool'; close.innerHTML = '<span class="ti ti-x"></span>';
+    let matches = [], idx = 0;
+    const run = () => { matches = this._searchScene(inp.value); idx = 0; count.textContent = matches.length ? ('1/' + matches.length) : (inp.value ? '0' : ''); if (matches.length) this._focusMatch(matches[0]); };
+    const step = (d) => { if (!matches.length) return; idx = (idx + d + matches.length) % matches.length; count.textContent = (idx + 1) + '/' + matches.length; this._focusMatch(matches[idx]); };
+    inp.addEventListener('input', run);
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') step(e.shiftKey ? -1 : 1); if (e.key === 'Escape') this._closeSearch(); });
+    close.addEventListener('click', () => this._closeSearch());
+    box.appendChild(inp); box.appendChild(count); box.appendChild(close);
+    this.wrap.appendChild(box); setTimeout(() => inp.focus(), 0);
   }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom;
@@ -649,6 +697,7 @@ class CanvasView {
         if (k === 'g') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._ungroup(); else this._group(); return; }
         if (k === ']') { e.preventDefault(); e.stopPropagation(); this._bringToFront(); return; }
         if (k === '[') { e.preventDefault(); e.stopPropagation(); this._sendToBack(); return; }
+        if (k === 'f') { e.preventDefault(); e.stopPropagation(); this._openSearch(); return; }
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
@@ -839,6 +888,7 @@ class CanvasView {
   _saveCamera() { this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom; if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   render() {
     if (this.destroyed || !this.staticCv) return;
+    this._syncPropPanel();
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
     sctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -899,8 +949,9 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-grid-dots', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     let raf = 0;
     const tick = () => {
@@ -1162,6 +1213,21 @@ class Plugin extends AppPlugin {
         const svg = exportSvg(v.scene);
         return { len: svg.length, startsOk: svg.startsWith('<svg'), endsOk: svg.endsWith('</svg>'), hasShape: /<(rect|ellipse|polygon|text|path|image|polyline)\b/.test(svg) };
       },
+      // Phase 8 property panel: apply stroke width / opacity / fill to the selection.
+      propPanelTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = makeRect(0, 0, 80, 60, { stroke: '#7c5cff' }); v.scene.elements.push(el); v.selected = new Set([el.id]);
+        v._applyProp('strokeWidth', 4); v._applyProp('opacity', 0.5); v._applyFill('hachure');
+        return { sw: el.strokeWidth, op: el.opacity, fillStyle: el.fillStyle, ok: el.strokeWidth === 4 && el.opacity === 0.5 && el.fillStyle === 'hachure' && el.backgroundColor !== 'transparent' };
+      },
+      // Phase 8 in-canvas search: match text elements, focus the first.
+      searchTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const mk = (y, txt) => { const t = makeText(0, y, { fontSize: 24 }); t.text = txt; measureText(t); v.scene.elements.push(t); return t; };
+        mk(0, 'apple pie'); mk(100, 'banana bread'); mk(200, 'apple sauce');
+        const m = v._searchScene('apple'); if (m.length) v._focusMatch(m[0]);
+        return { matchCount: m.length, ok: m.length === 2, focusedOne: v.selected.size === 1 };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
@@ -1194,6 +1260,17 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-flipnote { width: auto; gap: 4px; padding: 0 9px; font-size: 12px; font-weight: 600; }
 .pxc-host .pxc-root .pxc-flipnote:hover { background: var(--sidebar-bg-hover); }
+.pxc-host .pxc-root .pxc-props { position: absolute; left: 50%; transform: translateX(-50%); top: 54px; z-index: 5; display: none; align-items: center; gap: 6px; padding: 4px 9px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 12px; }
+.pxc-host .pxc-root .pxc-props.show { display: flex; }
+.pxc-host .pxc-root .pxc-prop-label { color: var(--color-text-600); font-size: 11px; }
+.pxc-host .pxc-root .pxc-prop-sep { width: 1px; height: 18px; background: var(--cards-border-color); }
+.pxc-host .pxc-root .pxc-prop-btn { min-width: 26px; height: 24px; padding: 0 6px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 11px; }
+.pxc-host .pxc-root .pxc-prop-btn:hover { background: var(--sidebar-bg-hover); }
+.pxc-host .pxc-root .pxc-prop-btn.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-prop-range { width: 80px; accent-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-search { position: absolute; right: 12px; top: 12px; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.pxc-host .pxc-root .pxc-search-input { width: 150px; border: 0; outline: none; background: transparent; color: var(--color-text-400); font-size: 13px; }
+.pxc-host .pxc-root .pxc-search-count { font-size: 11px; color: var(--color-text-600); min-width: 28px; text-align: right; }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
