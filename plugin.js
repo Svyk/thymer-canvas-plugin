@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.20.0';
+const PLEXUS_VERSION = '0.20.1';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -878,9 +878,10 @@ class CanvasView {
     (async () => {
       try {
         const res = await this.plugin.data.searchByQuery(q, 30);
-        const recs = (res && res.records) || [];
-        entry.items = recs.slice(0, 30).map((r) => ({ guid: r.guid, title: (r.getName && r.getName()) || 'Untitled' }));
-        entry.count = recs.length; entry.ready = true; this.dirty = true;
+        const recs = (res && res.records) || [], lines = (res && res.lines) || [];
+        const recItems = recs.slice(0, 20).map((r) => ({ guid: r.guid, title: (r.getName && r.getName()) || 'Untitled', kind: 'record' }));
+        const lineItems = lines.slice(0, 20).map((li) => { let g = null; try { g = li.getRecord && li.getRecord().guid; } catch (_e) {} return { guid: g, title: lineTextOf(li) || '(line item)', kind: 'line' }; });
+        entry.items = recItems.concat(lineItems); entry.count = recs.length + lines.length; entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(query error)'; entry.ready = true; this.dirty = true; }
     })();
     return null;
@@ -1082,7 +1083,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-cards', onSelected: () => this._cmdInsertCard() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
