@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ CANVAS ROADMAP COMPLETE (v0.29.0, 2026-06-16) — every Phase + every E-item built & MCP-verified
+Phases 0–8 (full whiteboard + parity polish, incl. SVG import) + Phase 9 E1/E2/E10/E11/E13 + Phase 10
+E3/E5/E6/E7/E8/E9/E14. Notes: **E6** AI-diagram parser verified (live OpenAI call gated on the user's key);
+**E9** semantic ghost-edges via in-browser transformers.js embeddings (verified dim=384, related 0.672 vs
+unrelated −0.01); **E14** re-date-in-place verified server-side (Scheduled datetime written via
+`DateTime.parseDateTimeString().value()`; the Day-View *drop UI* is the only cross-plugin remainder).
+Companion **Plexus Brain** plugin at Phases 0/1/2/3/4/5/7 (only Phase-6 semantic-lens UI left; its embedding
+engine is the same one proven in canvas E9).
+
+
 Live plugin (svy workspace): **Plexus Canvas** global AppPlugin, guid `197R5JHA5A9Z0ZECNA2GM23KKB`.
 Drawings collection: **Plexus Drawings** `1M80FGPHDZ58M4P5AEPBB91B67` — props (by label): `Scene` (file),
 `Scene Rev` (number), `Scene Schema` (number).
