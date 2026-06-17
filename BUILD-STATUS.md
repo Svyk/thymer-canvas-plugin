@@ -29,7 +29,17 @@ network request because the fetch is server-side). FIX: PM card → **Edit GitHu
 GitHub fetch server-side (desktop app), so it won't show in chrome-devtools network — check the **console**
 for the error. (404s for plugin.css are harmless — Plexus has none.)
 
-## DONE + verified live (v0.25.0)
+## DONE + verified live (v0.27.1)
+
+**MORE elevation (since v0.25.0, verified live 2026-06-16):**
+- **E13 drawings gallery** (v0.26.0) — `plexus-gallery` custom panel: responsive grid of all Drawings'
+  banner thumbnails, click to open. galleryTest: getAllRecords + banner fetch ok.
+- **E9 semantic ghost-edges** (v0.27.1) — `_getEmbedder` lazy-loads transformers.js (Xenova/all-MiniLM-L6-v2)
+  from CDN, runs IN-BROWSER (nothing leaves the device); `_computeSemantic` embeds each text/card and draws
+  faint amber ghost-edges between cosine-similar pairs (>0.45). **VERIFIED:** embedTest dim=384, modelLoaded,
+  petSim 0.672 vs petFinSim −0.01 (the embedder ranks related text far higher). Same engine = Brain Phase 6.
+
+
 
 **PHASE 10 elevation (since v0.22.1, all verified live 2026-06-16):**
 - **E10 multi-canvas transclusion** (v0.23.0) — `board`-type element embeds ANOTHER drawing's live banner
