@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.36.0';
+const PLEXUS_VERSION = '0.37.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -26,6 +26,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   wheelZoom: true, panRightMouse: false, zoomToFitOnOpen: false, zoomMin: 0.1, zoomMax: 30,
   // S5 Grid
   gridColor: '#7c5cff', gridOpacity: 28, gridDynamic: false,
+  // S7 Fonts
+  defaultFont: 'system-ui, sans-serif',
 };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
@@ -160,7 +162,8 @@ function drawFreedraw(ctx, el) {
   const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]);
   ctx.stroke(); ctx.restore();
 }
-function textFont(el) { return (el.fontSize || 24) + 'px ' + (el.fontFamily || 'system-ui, sans-serif'); }
+let PLEXUS_DEFAULT_FONT = 'system-ui, sans-serif'; // S7/P0.6: user-chosen default font (set from settings on load + change)
+function textFont(el) { return (el.fontSize || 24) + 'px ' + ((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT); }
 function measureText(el) { // updates el.width/height from el.text; uses a shared offscreen ctx
   if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
   const ctx = measureText._c; ctx.font = textFont(el);
@@ -243,7 +246,7 @@ function freedrawBBox(el) {
 function makeText(wx, wy, style) {
   return {
     id: newId(), type: 'text', x: wx, y: wy, width: 8, height: (style.fontSize || 24) * 1.25, angle: 0,
-    text: '', fontSize: style.fontSize || 24, fontFamily: 'system-ui, sans-serif', textAlign: 'left',
+    text: '', fontSize: style.fontSize || 24, fontFamily: style.fontFamily || PLEXUS_DEFAULT_FONT, textAlign: 'left',
     strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
     strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
@@ -441,7 +444,7 @@ function exportSvg(scene) {
     if (el.type === 'rectangle') p.push(`<rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="2" ${common}${rot}/>`);
     else if (el.type === 'ellipse') p.push(`<ellipse cx="${el.x + el.width / 2}" cy="${el.y + el.height / 2}" rx="${Math.abs(el.width / 2)}" ry="${Math.abs(el.height / 2)}" ${common}${rot}/>`);
     else if (el.type === 'diamond') { const mx = el.x + el.width / 2, my = el.y + el.height / 2; p.push(`<polygon points="${mx},${el.y} ${el.x + el.width},${my} ${mx},${el.y + el.height} ${el.x},${my}" ${common}${rot}/>`); }
-    else if (el.type === 'text') { const fs = el.fontSize || 24, lines = String(el.text || '').split('\n'); const ts = lines.map((ln, i) => `<tspan x="${el.x}" dy="${i === 0 ? fs : (fs * 1.25).toFixed(1)}">${svgEsc(ln)}</tspan>`).join(''); p.push(`<text font-family="system-ui,sans-serif" font-size="${fs}" fill="${sc}" opacity="${op}">${ts}</text>`); }
+    else if (el.type === 'text') { const fs = el.fontSize || 24, ff = svgEsc((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT), lines = String(el.text || '').split('\n'); const ts = lines.map((ln, i) => `<tspan x="${el.x}" dy="${i === 0 ? fs : (fs * 1.25).toFixed(1)}">${svgEsc(ln)}</tspan>`).join(''); p.push(`<text font-family="${ff}" font-size="${fs}" fill="${sc}" opacity="${op}">${ts}</text>`); }
     else if (el.type === 'arrow' || el.type === 'line') { const pts = (el.points || []).map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
     else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
     else if (el.type === 'image') { const f = scene.files && scene.files[el.fileId]; if (f && f.dataURL) p.push(`<image x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" href="${svgEsc(f.dataURL)}" opacity="${op}" preserveAspectRatio="none"/>`); }
@@ -901,7 +904,7 @@ class CanvasView {
     const place = () => {
       const z = this.camera.zoom, s = this.camera.worldToScreen(el.x, el.y);
       ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
-      ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = el.strokeColor || '#1e1e1e';
+      ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = el.strokeColor || '#1e1e1e'; ta.style.fontFamily = (el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT; // S7
       ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px';
     };
     place(); this.wrap.appendChild(ta);
@@ -1368,6 +1371,7 @@ class Plugin extends AppPlugin {
     const reg = freshRegistry(); this._reg = reg;
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
     this._settings = loadPlexusSettings();
+    PLEXUS_DEFAULT_FONT = this._settings.defaultFont || 'system-ui, sans-serif'; // S7
     this._secrets = null; // P0.0: decrypted AI key cache (session only)
     this._onPageHide = () => { this._secrets = null; }; // wipe the decrypted key from memory on unload
     try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
@@ -1493,7 +1497,7 @@ class Plugin extends AppPlugin {
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
   _openSettings() {
     const s = this._settings || (this._settings = loadPlexusSettings());
-    const apply = (key) => { savePlexusSettings(s); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
+    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
     const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
     const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-settings-wide';
     const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
@@ -1523,6 +1527,16 @@ class Plugin extends AppPlugin {
     color(grid, 'Grid colour', 'gridColor', 'Dot colour (when dynamic is off).');
     range(grid, 'Grid opacity (%)', 'gridOpacity', '0–100.', 0, 100, 1);
     toggle(grid, 'Dynamic grid colour', 'gridDynamic', 'Grid follows light/dark instead of the fixed colour.');
+
+    const fonts = section('Fonts');
+    select(fonts, 'Default text font', 'defaultFont', 'Applies to new text (and existing text on the system default).', [
+      { v: 'system-ui, sans-serif', l: 'System (default)' },
+      { v: 'Helvetica, Arial, sans-serif', l: 'Sans (Helvetica)' },
+      { v: 'Georgia, "Times New Roman", serif', l: 'Serif (Georgia)' },
+      { v: 'ui-monospace, Menlo, Consolas, monospace', l: 'Mono' },
+      { v: '"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive', l: 'Handwriting (Comic)' },
+      { v: '"Bradley Hand", "Segoe Print", cursive', l: 'Handwriting (Bradley)' },
+    ]);
 
     const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done';
     close.addEventListener('click', () => wrap.remove()); box.appendChild(close);
