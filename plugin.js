@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.23.0';
+const PLEXUS_VERSION = '0.24.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -1019,6 +1019,25 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // Phase 10 E3: outline -> canvas — lay a record's line-item tree out as connected text nodes (a mind-map).
+  async _outlineToCanvas(guid) {
+    const rec = await this.plugin.data.getRecord(guid); if (!rec) return 0;
+    const c = this.camera.screenToWorld(80, 80); const ox = c.x, oy = c.y;
+    const created = []; const st = { row: 0 };
+    const root = makeText(ox, oy, { fontSize: 20, stroke: '#7c5cff' }); root.text = (rec.getName && rec.getName()) || 'Outline'; measureText(root);
+    this.scene.elements.push(root); created.push(root); st.row = 1;
+    const connect = (a, b) => { const arr = makeLinear(0, 0, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); arr.elbowed = true; arr.endArrowhead = null; arr.points = [[a.x, a.y + a.height], [b.x, b.y + b.height / 2]]; linearBBox(arr); this.scene.elements.push(arr); created.push(arr); };
+    const walk = async (parentEl, items, depth) => {
+      for (const li of (items || [])) {
+        if (st.row > 60) return; // cap to keep the scene sane
+        const txt = lineTextOf(li); let node = parentEl;
+        if (txt) { node = makeText(ox + depth * 44, oy + st.row * 54, { fontSize: 15, stroke: '#1e1e1e' }); node.text = txt; measureText(node); this.scene.elements.push(node); created.push(node); st.row++; connect(parentEl, node); }
+        try { const ch = await li.getChildren(); if (ch && ch.length) await walk(node, ch, txt ? depth + 1 : depth); } catch (_e) {}
+      }
+    };
+    try { const top = await rec.getLineItems(); await walk(root, top, 1); } catch (_e) {}
+    this.selected = new Set(created.map((e) => e.id)); this.dirty = true; this.scheduleSave(); return created.length;
+  }
   // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
   _promptText(label, def) {
     return new Promise((resolve) => {
@@ -1195,6 +1214,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Outline to canvas (mind-map a note)', icon: 'ti-sitemap', onSelected: () => { const v = this._activeView(); const g = this._lastRecordGuid; if (v && g) v._outlineToCanvas(g); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then map its outline.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
@@ -1537,6 +1557,15 @@ class Plugin extends AppPlugin {
         const el = v._insertBoardCard(v.recordGuid, 700, 300);
         let b = null; for (let i = 0; i < 50; i++) { await sleep(150); b = v._boardCache && v._boardCache.get(v.recordGuid); if (b && b.ready) break; }
         return { cardId: el ? el.id : null, type: el ? el.type : null, ready: !!(b && b.ready), title: b ? b.title : null, hasImg: !!(b && b.img) };
+      },
+      // Phase 10 E3 outline->canvas: map a real record's outline into connected text nodes; expect nodes.
+      outlineTest: async (guid) => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const before = v.scene.elements.filter((e) => !e.isDeleted).length;
+        const count = await v._outlineToCanvas(guid);
+        const texts = v.scene.elements.filter((e) => !e.isDeleted && e.type === 'text').length;
+        const arrows = v.scene.elements.filter((e) => !e.isDeleted && e.type === 'arrow').length;
+        return { created: count, textNodes: texts, arrows, ok: count > 1 && texts > 1 && arrows > 0 };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
