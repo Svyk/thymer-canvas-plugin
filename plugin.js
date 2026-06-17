@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.16.0';
+const PLEXUS_VERSION = '0.17.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -351,6 +351,32 @@ function exportPng(scene, maxPx = 1024) {
     } catch (_e) { resolve(null); }
   });
 }
+function svgEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+// Phase 8: export the scene to a standalone SVG string (clean shapes — not the hand-drawn rough look).
+function exportSvg(scene) {
+  const b = sceneBounds(scene), pad = 24;
+  const W = Math.max(1, Math.round(b.w + pad * 2)), H = Math.max(1, Math.round(b.h + pad * 2));
+  const p = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`];
+  p.push(`<rect width="100%" height="100%" fill="${svgEsc((scene.appState && scene.appState.viewBackgroundColor) || '#ffffff')}"/>`);
+  p.push(`<g transform="translate(${(-b.x + pad).toFixed(2)},${(-b.y + pad).toFixed(2)})">`);
+  for (const el of scene.elements) {
+    if (el.isDeleted) continue;
+    const sw = el.strokeWidth || 2, sc = el.strokeColor || '#1e1e1e';
+    const fillc = (el.backgroundColor && el.backgroundColor !== 'transparent') ? el.backgroundColor : 'none';
+    const op = el.opacity == null ? 1 : el.opacity;
+    const rot = el.angle ? ` transform="rotate(${(el.angle * 180 / Math.PI).toFixed(2)} ${(el.x + el.width / 2).toFixed(2)} ${(el.y + el.height / 2).toFixed(2)})"` : '';
+    const common = `stroke="${sc}" stroke-width="${sw}" fill="${fillc}" opacity="${op}"`;
+    if (el.type === 'rectangle') p.push(`<rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="2" ${common}${rot}/>`);
+    else if (el.type === 'ellipse') p.push(`<ellipse cx="${el.x + el.width / 2}" cy="${el.y + el.height / 2}" rx="${Math.abs(el.width / 2)}" ry="${Math.abs(el.height / 2)}" ${common}${rot}/>`);
+    else if (el.type === 'diamond') { const mx = el.x + el.width / 2, my = el.y + el.height / 2; p.push(`<polygon points="${mx},${el.y} ${el.x + el.width},${my} ${mx},${el.y + el.height} ${el.x},${my}" ${common}${rot}/>`); }
+    else if (el.type === 'text') { const fs = el.fontSize || 24, lines = String(el.text || '').split('\n'); const ts = lines.map((ln, i) => `<tspan x="${el.x}" dy="${i === 0 ? fs : (fs * 1.25).toFixed(1)}">${svgEsc(ln)}</tspan>`).join(''); p.push(`<text font-family="system-ui,sans-serif" font-size="${fs}" fill="${sc}" opacity="${op}">${ts}</text>`); }
+    else if (el.type === 'arrow' || el.type === 'line') { const pts = (el.points || []).map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
+    else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
+    else if (el.type === 'image') { const f = scene.files && scene.files[el.fileId]; if (f && f.dataURL) p.push(`<image x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" href="${svgEsc(f.dataURL)}" opacity="${op}" preserveAspectRatio="none"/>`); }
+  }
+  p.push('</g></svg>');
+  return p.join('');
+}
 async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
   const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
@@ -452,6 +478,32 @@ class CanvasView {
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
+  // Phase 8: snap-to-grid (active only when the grid is on).
+  _gridOn() { return !!(this.scene.appState && this.scene.appState.gridModeEnabled); }
+  _gridSize() { return (this.scene.appState && this.scene.appState.gridSize) || 20; }
+  _snap(n) { if (!this._gridOn()) return n; const gs = this._gridSize(); return Math.round(n / gs) * gs; }
+  _toggleGrid() { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridModeEnabled = !this._gridOn(); this.dirty = true; this.scheduleSave(); return this.scene.appState.gridModeEnabled; }
+  _drawGrid(ctx) {
+    if (!this._gridOn()) return;
+    const gs = this._gridSize(), z = this.camera.zoom;
+    const x0 = this.camera.x, y0 = this.camera.y, x1 = x0 + this.cssW / z, y1 = y0 + this.cssH / z;
+    const sx = Math.floor(x0 / gs) * gs, sy = Math.floor(y0 / gs) * gs;
+    ctx.save(); ctx.fillStyle = 'rgba(124,92,255,0.28)'; const r = Math.max(0.5, 1 / z);
+    for (let x = sx; x <= x1; x += gs) for (let y = sy; y <= y1; y += gs) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+    ctx.restore();
+  }
+  // Phase 8: download the current scene as a standalone SVG file.
+  _exportSvg() {
+    try {
+      const svg = exportSvg(this.scene);
+      const blob = new Blob([svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob); const a = document.createElement('a');
+      a.href = url; a.download = 'plexus-drawing.svg'; document.body.appendChild(a); a.click();
+      setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (_e) {} }, 1000);
+      try { this.plugin.ui.addToaster({ title: 'Exported drawing as SVG.', dismissible: true }); } catch (_e) {}
+      return svg.length;
+    } catch (e) { console.error('[Plexus] exportSvg', e); return 0; }
+  }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom;
     for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (!el.isDeleted && hitElement(el, wx, wy, tol)) return el; }
@@ -545,11 +597,11 @@ class CanvasView {
       if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
-      if (mode === 'create' && created) { created.x = down.x; created.y = down.y; created.width = w.x - down.x; created.height = w.y - down.y; this.dirty = true; return; }
+      if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
-      if (mode === 'move' && moveEls) { const dx = w.x - down.x, dy = w.y - down.y; let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
-      if (mode === 'resize' && rsEl) { this._applyResize(rsEl, rsHandle, rs0, w); this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
     };
     const onUp = (e) => {
       if (!mode) return;
@@ -793,6 +845,7 @@ class CanvasView {
     sctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+    this._drawGrid(sctx);
     for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else drawElement(sctx, el); }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
@@ -846,6 +899,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-grid-dots', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     let raf = 0;
     const tick = () => {
@@ -859,6 +914,7 @@ class Plugin extends AppPlugin {
   }
   _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
+  _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
   async _drawingsCollection() {
     if (this._drawingsCol) return this._drawingsCol;
     const cols = await this.data.getAllCollections();
@@ -1089,6 +1145,22 @@ class Plugin extends AppPlugin {
         const clip = this._imgRefClip;
         const pasted = await this._pasteImageRef(noteGuid);
         return { copied, hadClip: !!clip, clipHasCrop: !!(clip && clip.crop), clipPngBytes: clip && clip.png ? clip.png.size : 0, sourceGuid: clip ? clip.sourceRecordGuid : null, pasted };
+      },
+      // Phase 8 grid/snap: snapping rounds to gridSize when grid on, passthrough when off.
+      gridSnapTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        v.scene.appState.gridModeEnabled = true; v.scene.appState.gridSize = 20;
+        const on = [v._snap(13), v._snap(27), v._snap(31)]; // -> 20, 20, 40
+        v.scene.appState.gridModeEnabled = false; const off = v._snap(13);
+        v.dirty = true;
+        return { on, off, snapOk: on[0] === 20 && on[1] === 20 && on[2] === 40, offOk: off === 13 };
+      },
+      // Phase 8 SVG export: scene -> standalone <svg> string with shape elements.
+      svgExportTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        if (!v.scene.elements.filter((e) => !e.isDeleted).length) v.scene.elements.push(makeRect(0, 0, 100, 80, { stroke: '#7c5cff', fill: '#efeaff' }));
+        const svg = exportSvg(v.scene);
+        return { len: svg.length, startsOk: svg.startsWith('<svg'), endsOk: svg.endsWith('</svg>'), hasShape: /<(rect|ellipse|polygon|text|path|image|polyline)\b/.test(svg) };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
