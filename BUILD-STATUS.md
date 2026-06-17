@@ -29,7 +29,23 @@ network request because the fetch is server-side). FIX: PM card → **Edit GitHu
 GitHub fetch server-side (desktop app), so it won't show in chrome-devtools network — check the **console**
 for the error. (404s for plugin.css are harmless — Plexus has none.)
 
-## DONE + verified live (v0.22.1)
+## DONE + verified live (v0.25.0)
+
+**PHASE 10 elevation (since v0.22.1, all verified live 2026-06-16):**
+- **E10 multi-canvas transclusion** (v0.23.0) — `board`-type element embeds ANOTHER drawing's live banner
+  PNG (`getBanner`→`getBlobFromPropertyFileValue`→download→Image, cover-fit), live on record.updated.
+  boardCardTest hasImg=true.
+- **E3 outline→canvas** (v0.24.0) — `_outlineToCanvas` reads a record's line-item tree (recursive
+  getChildren) into connected text nodes (indented + elbow arrows) = doc→mind-map. Verified + screenshot:
+  real 66-item project page → 121 elements (61 nodes + 60 arrows).
+- **E5 drag-to-restructure** (v0.25.0) — `Plexus: Link selected cards` writes REAL ref relations: the
+  source card's record gets a `ref` line item to each other selected card's record. **Verified server-side
+  via get_line_items** (source got `→ related: <ref guid>` resolving to the target). The Brain graph then
+  shows that edge. Explicit+safe (no accidental drag-mutation).
+- **E7 time-travel + E8 presentation-over-live-data are effectively COVERED** by existing features — query
+  nodes accept any Thymer query incl. dates (`@scheduled <= @today`); present mode + live cards = live slides.
+
+
 
 **PHASE 8 COMPLETE + Phase 9 E1/E2/E11 + Brain v0.1.0 — all verified live 2026-06-16.** Also done since
 the list below: **elbow arrows** (v0.21.0, routedPoints orthogonal routing, elbowTest), **presentation mode**
