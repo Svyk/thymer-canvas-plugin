@@ -29,7 +29,30 @@ network request because the fetch is server-side). FIX: PM card → **Edit GitHu
 GitHub fetch server-side (desktop app), so it won't show in chrome-devtools network — check the **console**
 for the error. (404s for plugin.css are harmless — Plexus has none.)
 
-## DONE + verified live (v0.16.0)
+## DONE + verified live (v0.20.1)
+
+**PHASE 8 (parity polish) + PHASE 9 E1/E2 (elevation wedge) — all verified live 2026-06-16:**
+- **Phase 8 grid + snap (v0.17.0):** `appState.gridModeEnabled` dot grid; create/move/resize snap to
+  `gridSize`; `Plexus: Toggle grid`. `gridSnapTest` green.
+- **Phase 8 SVG export (v0.17.0):** `exportSvg()` → clean SVG (all element kinds); `Plexus: Export drawing
+  as SVG` downloads it. `svgExportTest` green.
+- **Phase 8 property panel (v0.18.0):** contextual strip on selection — stroke width S/M/L/XL, opacity
+  slider, fill solid/hachure/none — applies live. `propPanelTest` green.
+- **Phase 8 in-canvas search / gap #10 (v0.18.0):** `Cmd/Ctrl+F` or `Plexus: Search in drawing` → find
+  text elements, n/total stepper, centers+selects each match. `searchTest` green.
+- **Phase 9 E1 — LIVE-RECORD CARDS (v0.19.0, THE WEDGE):** `record`-type element embeds a Thymer record
+  (title + first line items, async-cached). LIVE: plugin subscribes to `record.updated` + `lineitem.*`
+  and invalidates the card cache → cards repaint on any change. `Plexus: Insert record card` (uses the
+  last-focused note, tracked via `panel.focused`/`panel.navigated`); dbl-click opens the record.
+  **Verified live + SCREENSHOT-confirmed** rendering "Plexus Canvas" + 8 real body lines; `recordCardTest`
+  title/lineCount/invalidate-reload all green.
+- **Phase 9 E2 — LIVE QUERY NODES (v0.20.1):** `query`-type element runs `data.searchByQuery` and lists
+  matching **records AND line items** (so `@task` works — returned count 31 live); re-runs on record
+  events. `Plexus: Insert query node` + in-panel prompt modal (`_promptText`, rule 49); dbl-click edits
+  the query. `queryNodeTest` count/live-reran green.
+- Element kinds `record`/`query` are bbox-hit, movable, resizable, group/copy/z-order/persist like any element.
+
+## DONE earlier (v0.16.0 — flip-a-card + image part-refs)
 
 - **Phase 0** — global AppPlugin, custom panel (`registerCustomPanelType` + `createPanel` +
   `navigateToCustomType`), command palette, window-singleton dispose. Banner fires once.
@@ -170,16 +193,25 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
   showing just that part + a ref. Render = drawImage with source-rect (sx,sy,sw,sh from crop). This is
   Excalidraw's `#^area=`/crop grammar reimagined on Thymer refs.
 
-## NEXT (roadmap §9, not yet built)
+## NEXT (remaining roadmap — Phase 8 tail, Phase 9 rest, Phase 10, + Brain plugin)
 
-- **Phase 7c** — (later) Excalidraw-grade focus+gap binding + multi-point arrow editing.
-  startBinding/endBinding fields already exist on linear elements, unused.
-- **Phase 7b-rest** — groups/frames, copy/paste, full property panel, in-panel Settings modal, IndexedDB cache, concurrency rev-check. (undo done 7a; images done 7b-images.)
-  Settings modal, copy/paste, IndexedDB cache, concurrency rev-check. (Undo done in 7a.)
-- **Phase 8** — parity polish (SVG import, elbow arrows, fonts, Mermaid/LaTeX, in-canvas search, presentation).
-- **Phase 9/10** — elevation: live-record cards (E1), query nodes (E2), property encoding (E11),
-  outline⇄canvas (E3), drag-to-restructure ontology (E5), Day-View binding (E14), live brain graph (E4).
-- Companion **Drawings CollectionPlugin** declaring Scene fields in plugin.json.config.fields
-  (reinstall-safe, rule 60) — currently the props are MCP-added to the collection.
-- When plugin.js grows: create private GitHub repo `Svyk/thymer-canvas-plugin`, set `__source_repo`,
-  switch deploy to Plugins-Manager reinstall.
+DONE so far: Phases 0–7 (full whiteboard) + flip-a-card + image part-refs + Phase 8 core (grid/snap, SVG
+export, property panel, in-canvas search) + Phase 9 **E1 live-record cards** + **E2 query nodes**.
+
+- **Phase 8 tail** — SVG IMPORT (read SVG → elements), elbow/orthogonal arrows, presentation/view mode;
+  LAZY-loaded (never in core, rule 37/Scope #5): opentype.js (vector text/CJK), Mermaid, LaTeX/KaTeX.
+- **Phase 9 rest** — **E11** property encoding (size/color a card by a record property), **E10** multi-canvas
+  transclusion (embed another board's live SVG snapshot — `DrawingSnapshot.ts`), **E13** canvas-as-record +
+  companion Drawings CollectionPlugin GALLERY view, sub-drawing deep-link anchors.
+- **Phase 10 (elevation tier 2)** — **E3** outline⇄canvas, **E5** drag-to-restructure ontology
+  (`writeRelationsAsRefs` — drag in the graph rewrites real relations), **E14** Day-View/timeline binding
+  (re-date in place, `DateTime.parseDateTimeString(iso).value()`), **E-export** snapshot-into-note, **E9**
+  semantic ghost-edges, **E8** presentation over live data, **E6** AI diagramming, **E7** time-travel.
+- **PLEXUS BRAIN plugin (E4 / Scope #4) — NOT STARTED.** Separate global AppPlugin: TheBrain-style radial
+  graph from Thymer relations/refs/backrefs/hashtags. Roadmap `~/plexus/BRAIN-ROADMAP.md`. Ships its own
+  lighter Canvas2D graph renderer; ports ExcaliBrain's Page/Relation + getRelationVector truth-table +
+  plex layout + NavigationHistory. ZERO runtime coupling to the canvas.
+- **Phase 7c** (later) — Excalidraw-grade focus+gap binding + multi-point arrow editing (fields exist).
+- Polish backlog: in-panel Settings modal, IndexedDB cache, concurrency rev-check, restored-panel reopen
+  (KNOWN ISSUE above), record/query cards in PNG/SVG export (drawElement has no record/query case),
+  companion Drawings CollectionPlugin declaring Scene fields in plugin.json (rule 60).
