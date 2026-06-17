@@ -11,7 +11,25 @@ Deploy loop (current): edit `plugin.js` → `node --check` → `git commit` → 
 banner → drive `window.__plexusCanvas.test.*`. Switch to git→Plugins-Manager reinstall once plugin.js
 passes ~150–200 KB (currently ~65 KB). NOTE (2026-06-16): a FORKED worker can't spawn a push agent (Agent tool errors 'fork inside a forked worker'); deploy via direct MCP `update_plugin_code` instead — it echoes the 62KB code back, but the harness REDIRECTS that oversized result to a tool-result file (harmless to context, ~200 tokens), and the push STILL LANDS. Verify live via chrome-devtools (version banner + test hooks); never trust the echo. git is the canonical source; the live deploy is a reconstructed inline emit of the same edits.
 
-## DONE + verified live (v0.14.1)
+## DEPLOY (FIXED 2026-06-16) — plugin.js outgrew the MCP push; use Plugins-Manager reinstall
+
+**The MCP `update_plugin_code` path is DEAD above ~80KB** (plugin.js is now 86KB): the tool echoes the
+full PREVIOUS code back (~86KB ≈ 24k tokens), which overflows a push-agent's 32k OUTPUT cap, and a direct
+emit would need hand-reproducing 86KB byte-exact. **Deploy via git → Plugins-Manager "Reinstall from
+source" instead** (byte-exact, no echo):
+1. `git push origin main` (repo `Svyk/thymer-canvas-plugin`, private; gh ssh auth).
+2. Open **Plugins Manager** (cmd palette → "Open Plugins Manager") → Plexus Canvas card → **Reinstall from
+   source (force overwrite)** → accept confirm → **reload the tab** → verify the `v… loaded` banner.
+
+**ROOT-CAUSE GOTCHA (cost ~1h):** PM's stored repo link for Plexus Canvas was the **shorthand**
+`Svyk/thymer-canvas-plugin`; PM's fetcher REQUIRES a full URL and silently errored
+`Failed to fetch … URL must point to github.com` (console only, no toast, label stuck at "v0.5.0", NO
+network request because the fetch is server-side). FIX: PM card → **Edit GitHub repo link** → set
+`https://github.com/Svyk/thymer-canvas-plugin`. Every other plugin already had a full URL. PM does the
+GitHub fetch server-side (desktop app), so it won't show in chrome-devtools network — check the **console**
+for the error. (404s for plugin.css are harmless — Plexus has none.)
+
+## DONE + verified live (v0.16.0)
 
 - **Phase 0** — global AppPlugin, custom panel (`registerCustomPanelType` + `createPanel` +
   `navigateToCustomType`), command palette, window-singleton dispose. Banner fires once.
@@ -85,6 +103,18 @@ passes ~150–200 KB (currently ~65 KB). NOTE (2026-06-16): a FORKED worker can'
   `flipRecordTest` on a real Captures note (no Scene prop) → scene saved as line item, reloadEls=2, startedBlank;
   `reopenTest` → fresh panel loads 2 els from the line; **MCP `get_line_items` confirms the note carries a
   `type:file` `plexus-scene.json` line (filesize 733, blob_guid).** All 4 test records trashed after.
+- **IMAGE PART-REFERENCES** (v0.15.0 + v0.16.0) — "block reference an image AND PART of an image".
+  **Layer 1 — crop primitive (v0.15.0):** image elements gain a `crop` {x,y,w,h} in NATURAL pixels;
+  `_drawImage` renders via 8-arg `drawImage` source-rect. **Crop tool** (`C`, `ti-scissors`): drag a
+  marquee over an image → `_referenceRegion` creates a NEW element showing just that region, SHARING the
+  source `fileId` (zero data copy) + `cropOf` provenance; handles crop-of-crop. Verified: `cropTest`
+  cropOk + cropOfCropOk; visually confirmed live (purple/green halves + crop elements rendered).
+  **Layer 2 — note-side block reference (v0.16.0):** canvas **"Cite"** button → `_copyImageRefToClip`
+  snapshots the selected image (honoring crop) to a PNG on `plugin._imgRefClip`; command **"Plexus: Paste
+  image reference"** → on the active note, appends an `image` line (the PNG snapshot) + a `ulist` line with
+  a `ref` segment back to the source drawing (`{type:'ref',text:{guid}}`, rule 13). Verified live:
+  `imageRefTest` clipHasCrop + pasted.ok; **MCP `get_line_items` confirms the note got a `type:image`
+  `plexus-image-ref.png` line (373B blob) + a `ref` line resolving to the source drawing.** Test records trashed.
 
 ## KEY CORRECTIONS to the roadmap (verified live — supersede the doc)
 
@@ -130,7 +160,10 @@ roundTrip/reopen hooks were removed after verification (history in git + SPIKE-R
   `lineItem.setBlob(blob)`/`getBlob()` (SDK-verified); reopen scans `getLineItems()` for the blob named
   `plexus-scene.json`. Both Plexus Drawings AND flipped notes use this ONE path; legacy `Scene`-property
   read kept as fallback. See the DONE list above for the verification record.
-- **IMAGE part-references (block-ref an image AND a REGION of it).** ⏳ NEXT (this session). (a) Reference/embed an image element
+- **IMAGE part-references (block-ref an image AND a REGION of it). ✅ DONE + verified live (v0.16.0,
+  2026-06-16)** — see the DONE list above (crop primitive + Cite/Paste note reference). Implemented as a
+  PNG snapshot embed (the visual, honoring crop) + a live `ref` segment back to the source drawing record.
+  ORIGINAL design notes (superseded by the shipped approach): (a) Reference/embed an image element
   from a note via a `ref` segment to the element (needs line-level element identity — store an anchor in
   customData + navigate at action time, rules 13/26/54). (b) **Crop / region ref:** an image element gets
   a `crop` rect (Excalidraw's `crop` field); a "reference this region" action creates a crop element
