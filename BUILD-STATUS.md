@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.49.0 + Brain v0.9.0, 2026-06-17)
+Built from `~/plexus/SCRIPTS-ROADMAP.md` under the `/goal` to complete it. Shipped (each its own
+commit/version, syntax-checked, pushed to `Svyk/thymer-canvas-plugin`): **UX-1…6** · **P0.0**
+encrypted multi-provider key store (`pxEncryptSecret`, passphrase, pagehide-wipe) · **granular
+Settings panel** (`_openSettings`, sections S1/2/3/5/6/7/8/11; schema in `PLEXUS_SETTINGS_DEFAULTS`)
+· **P0.6** fonts (`PLEXUS_DEFAULT_FONT`) · **P1.0** Frames (`makeFrame`/`_drawFrame`/`_frameChildren`)
+· **P0.5** Presentation (`_slideFrames`/`_gotoSlide`) · **P1.3** Pizza Slicer (`_deconstructSelection`)
+· **P1.4** Capture Note (`_captureNote`) · **P0.3** Icon Library (`_openIconLibrary`, scans `#icon`)
+· **P0.2** MindMap Builder (`_newMindMap`/`_mmAddChild`/`_mmLayout`, Tab/Enter) · **P0.4/b** Colours
+(`_openColorTool`, `COLOR_SCHEMES`) · **P1.5** Printable (`_printFrames`/`_renderRegionPng`) · **S6**
+Laser (`this._laser` trail) · **P3** multi-provider AI (`_aiComplete`/`_aiKey(provider)`) · **P2**
+CSV→chart (`_chartFromCsv`) · **P1.1** PlexusAutomate (`_installAutomate` → `window.__plexusCanvas.automate`).
+**Brain v0.9.0:** P8 `layoutCross` (parents-up/children-down/friends-sides) + direction arrowheads.
+DEPLOY: git push → Plugins-Manager "Reinstall from source" (Canvas is ~110KB, past MCP echo limit;
+Brain deploys via PM reinstall too). **ALL UNVERIFIED by the user as of the build push — needs a
+reinstall+spot-check.** Remaining roadmap items are triaged "Deferred" (lib-blocked / subsystem /
+covered) in SCRIPTS-ROADMAP.md.
+
 ## ✅ CANVAS ROADMAP COMPLETE (v0.29.0, 2026-06-16) — every Phase + every E-item built & MCP-verified
 Phases 0–8 (full whiteboard + parity polish, incl. SVG import) + Phase 9 E1/E2/E10/E11/E13 + Phase 10
 E3/E5/E6/E7/E8/E9/E14. Notes: **E6** AI-diagram parser verified (live OpenAI call gated on the user's key);

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.49.0';
+const PLEXUS_VERSION = '0.50.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -959,7 +959,7 @@ class CanvasView {
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
-      if (hit && hit.type === 'text') { if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
+      if (hit && hit.type === 'text') { if (hit.refGuid) { this._openRecord(hit.refGuid); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record
       else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'board') { this.plugin._openPanelFor(hit.recordGuid); }
@@ -1251,6 +1251,20 @@ class CanvasView {
     this.scene.elements.push(root); this.selected.clear(); this.selected.add(root.id); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Mind map: Tab = child, Enter = sibling, double-click to rename.', dismissible: true }); } catch (_e) {}
     return root.id;
+  }
+  // P1.6 (v1): insert an @@ REFERENCE NODE — a clickable text chip linked to a record (double-click opens it).
+  async _insertRef() {
+    const q = await this._promptText('Reference a record — search:', '');
+    if (!q) return null;
+    let rec = null; try { const res = await this.plugin.data.searchByQuery(q, 6); rec = res && res.records && res.records[0]; } catch (_e) {}
+    if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: no record matched “' + q + '”.', dismissible: true }); } catch (_e) {} return null; }
+    const name = (rec.getName && rec.getName()) || 'record';
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const el = makeText(this._snap(c.x), this._snap(c.y), { fontSize: 16, stroke: '#7c5cff' });
+    el.text = '@' + name; el.refGuid = rec.guid; el.isRef = true; measureText(el);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Reference inserted — double-click to open ' + name + '.', dismissible: true }); } catch (_e) {}
+    return el.id;
   }
   _mmAddChild(node) {
     const rootId = node.mmRoot; if (!rootId) return null;
@@ -1638,6 +1652,7 @@ class Plugin extends AppPlugin {
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
     this.ui.registerCustomPanelType(GALLERY_PANEL_ID, (panel) => this._mountGallery(panel));
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New hybrid visual note', icon: 'ti-pencil', onSelected: () => this._newHybridNote() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
@@ -1662,6 +1677,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
@@ -1722,6 +1738,19 @@ class Plugin extends AppPlugin {
     const col = await this._drawingsCollection(); if (!col) return null;
     let guid = null; try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
     if (typeof guid !== 'string') return null; await this._openPanelFor(guid); return guid;
+  }
+  // §6 / P0.1: "every note is a hybrid visual note by default" — create a record in Notes (so it stays a
+  // queryable NOTE), born flip-ready. Flip back to type its text; draw on the front. No Templater dependency.
+  async _newHybridNote() {
+    let col = null;
+    try { const cols = await this.data.getAllCollections(); col = (cols || []).find((c) => /^notes$/i.test(c.getName())) || (cols || []).find((c) => /^captures$/i.test(c.getName())); } catch (_e) {}
+    if (!col) col = await this._drawingsCollection();
+    if (!col) { try { this.ui.addToaster({ title: 'Plexus: no Notes collection found.', dismissible: true }); } catch (_e) {} return null; }
+    let guid = null; try { guid = col.createRecord('Visual note'); } catch (_e) {}
+    if (typeof guid !== 'string') return null;
+    await this._openPanelFor(guid, { blank: true });
+    try { this.ui.addToaster({ title: 'Hybrid visual note — draw here, or use “Flip to note” to type its text.', dismissible: true }); } catch (_e) {}
+    return guid;
   }
   // Flip the ACTIVE note (whatever record the focused editor panel shows) into a drawing.
   // The note's text line items stay its "front"; the scene rides along as a file line item.
