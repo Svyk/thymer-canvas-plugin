@@ -10,16 +10,26 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.35.0';
+const PLEXUS_VERSION = '0.36.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
 const PLEXUS_SETTINGS_KEY = 'plexus_settings';
-const PLEXUS_SETTINGS_DEFAULTS = { bannerPreview: true, darkMode: false };
+const PLEXUS_SETTINGS_DEFAULTS = {
+  // S1 General
+  bannerPreview: true, darkMode: false, openMode: 'normal',
+  // S2 Canvas behavior
+  dblClickText: true,
+  // S3 Zoom & Pan
+  wheelZoom: true, panRightMouse: false, zoomToFitOnOpen: false, zoomMin: 0.1, zoomMax: 30,
+  // S5 Grid
+  gridColor: '#7c5cff', gridOpacity: 28, gridDynamic: false,
+};
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
+function hexToRgba(hex, a) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16); return 'rgba(' + (r || 124) + ',' + (g || 92) + ',' + (b || 255) + ',' + a + ')'; }
 /* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
    stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
 const pxEnc = new TextEncoder(), pxDec = new TextDecoder();
@@ -357,7 +367,7 @@ class Camera {
   screenToWorld(sx, sy) { return { x: sx / this.zoom + this.x, y: sy / this.zoom + this.y }; }
   worldToScreen(wx, wy) { return { x: (wx - this.x) * this.zoom, y: (wy - this.y) * this.zoom }; }
   zoomAt(sx, sy, factor) {
-    const nz = Math.min(30, Math.max(0.05, this.zoom * factor));
+    const nz = Math.min(this.zoomMax || 30, Math.max(this.zoomMin || 0.05, this.zoom * factor));
     const wx = sx / this.zoom + this.x, wy = sy / this.zoom + this.y;
     this.x = wx - sx / nz; this.y = wy - sy / nz; this.zoom = nz;
   }
@@ -615,10 +625,13 @@ class CanvasView {
   _exitPresent() { this._present = false; if (this.wrap) this.wrap.classList.remove('pxc-present'); this.dirty = true; }
   _drawGrid(ctx) {
     if (!this._gridOn()) return;
+    const st = this.plugin._settings || {};
     const gs = this._gridSize(), z = this.camera.zoom;
     const x0 = this.camera.x, y0 = this.camera.y, x1 = x0 + this.cssW / z, y1 = y0 + this.cssH / z;
     const sx = Math.floor(x0 / gs) * gs, sy = Math.floor(y0 / gs) * gs;
-    ctx.save(); ctx.fillStyle = 'rgba(124,92,255,0.28)'; const r = Math.max(0.5, 1 / z);
+    const op = Math.max(0, Math.min(100, st.gridOpacity == null ? 28 : st.gridOpacity)) / 100; // S5
+    const col = st.gridDynamic ? (st.darkMode ? 'rgba(255,255,255,' + op + ')' : 'rgba(0,0,0,' + op + ')') : hexToRgba(st.gridColor || '#7c5cff', op);
+    ctx.save(); ctx.fillStyle = col; const r = Math.max(0.5, 1 / z);
     for (let x = sx; x <= x1; x += gs) for (let y = sy; y <= y1; y += gs) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
     ctx.restore();
   }
@@ -740,7 +753,8 @@ class CanvasView {
     let rsEl = null, rsHandle = null, rs0 = null, rotEl = null, rotCenter = null, rotStart = 0, rotPtr0 = 0;
     const onDown = (e) => {
       host.focus();
-      if (e.button === 1 || (e.button === 0 && e.altKey)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; }
+      const stp = this.plugin._settings || {};
+      if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 2 && stp.panRightMouse)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; } // S3: right-mouse pan
       if (e.button !== 0) return;
       moved = false; down = this._worldAt(e);
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -819,7 +833,7 @@ class CanvasView {
       this.wrap.classList.remove('pxc-panning'); try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
       mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
     };
-    const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this._saveCamera(); };
+    const onWheel = (e) => { e.preventDefault(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if (this._present) { if (e.key === 'Escape') { e.preventDefault(); this._exitPresent(); } return; } // present mode: read-only except Esc
@@ -843,16 +857,18 @@ class CanvasView {
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
     const onDblClick = (e) => {
+      const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
-      if (hit && hit.type === 'text') { this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
+      if (hit && hit.type === 'text') { if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
       else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'board') { this.plugin._openPanelFor(hit.recordGuid); }
-      else if (!hit) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
+      else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
+    const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick);
-    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); });
+    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
+    this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
     const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
@@ -1276,8 +1292,12 @@ class CanvasView {
     }
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
+    const st = this.plugin._settings || {};
+    this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
     this.dirty = true; if (fresh && this.rec) this.saveNow();
+    if (!fresh && st.zoomToFitOnOpen) this._fitToScene(); // S3
+    if (st.openMode === 'present') setTimeout(() => { if (!this.destroyed) this._enterPresent(); }, 50); // S1
   }
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
@@ -1470,21 +1490,40 @@ class Plugin extends AppPlugin {
     panel.navigateToCustomType(PANEL_ID); return panel;
   }
   // UX-5/UX-6: lightweight settings modal (banner-preview toggle + dark canvas). Persisted to localStorage.
+  // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
   _openSettings() {
     const s = this._settings || (this._settings = loadPlexusSettings());
+    const apply = (key) => { savePlexusSettings(s); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
     const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
-    const box = document.createElement('div'); box.className = 'pxc-settings-box';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-settings-wide';
     const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
-    const mkToggle = (label, key, hint) => {
-      const row = document.createElement('label'); row.className = 'pxc-settings-row';
-      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!s[key];
-      cb.addEventListener('change', () => { s[key] = cb.checked; savePlexusSettings(s); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } } });
-      const span = document.createElement('span'); const b = document.createElement('b'); b.textContent = label; span.appendChild(b);
-      if (hint) { span.appendChild(document.createElement('br')); const sm = document.createElement('small'); sm.textContent = hint; span.appendChild(sm); }
-      row.appendChild(cb); row.appendChild(span); return row;
-    };
-    box.appendChild(mkToggle('Show drawing preview as the record banner', 'bannerPreview', 'Off keeps the note header clean; the preview PNG still saves.'));
-    box.appendChild(mkToggle('Dark canvas background', 'darkMode', 'Paints the canvas dark; your shapes keep their colours.'));
+    const section = (name, open) => { const d = document.createElement('details'); d.className = 'pxc-set-section'; if (open) d.open = true; const sm = document.createElement('summary'); sm.textContent = name; d.appendChild(sm); box.appendChild(d); return d; };
+    const row = (parent, label, hint, control) => { const r = document.createElement('label'); r.className = 'pxc-settings-row'; const sp = document.createElement('span'); const b = document.createElement('b'); b.textContent = label; sp.appendChild(b); if (hint) { sp.appendChild(document.createElement('br')); const sm = document.createElement('small'); sm.textContent = hint; sp.appendChild(sm); } r.appendChild(sp); r.appendChild(control); parent.appendChild(r); };
+    const toggle = (p, label, key, hint) => { const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!s[key]; cb.addEventListener('change', () => { s[key] = cb.checked; apply(key); }); row(p, label, hint, cb); };
+    const color = (p, label, key, hint) => { const inp = document.createElement('input'); inp.type = 'color'; inp.className = 'pxc-set-color'; inp.value = s[key] || '#7c5cff'; inp.addEventListener('input', () => { s[key] = inp.value; apply(key); }); row(p, label, hint, inp); };
+    const range = (p, label, key, hint, mn, mx, st2) => { const inp = document.createElement('input'); inp.type = 'range'; inp.className = 'pxc-set-range'; inp.min = mn; inp.max = mx; inp.step = st2 || 1; inp.value = s[key]; inp.addEventListener('input', () => { s[key] = parseFloat(inp.value); apply(key); }); row(p, label, hint, inp); };
+    const select = (p, label, key, hint, opts) => { const sel = document.createElement('select'); sel.className = 'pxc-set-sel'; for (const o of opts) { const op = document.createElement('option'); op.value = o.v; op.textContent = o.l; if (s[key] === o.v) op.selected = true; sel.appendChild(op); } sel.addEventListener('change', () => { s[key] = sel.value; apply(key); }); row(p, label, hint, sel); };
+
+    const gen = section('General', true);
+    select(gen, 'Default open mode', 'openMode', 'How a drawing opens.', [{ v: 'normal', l: 'Normal' }, { v: 'present', l: 'Present' }]);
+    toggle(gen, 'Show drawing preview as the record banner', 'bannerPreview', 'Off keeps the note header clean; the preview PNG still saves.');
+    toggle(gen, 'Dark canvas background', 'darkMode', 'Paints the canvas + toolbar dark; shapes keep their colours.');
+
+    const beh = section('Canvas behavior');
+    toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');
+
+    const zp = section('Zoom & Pan');
+    toggle(zp, 'Mouse wheel zooms', 'wheelZoom', 'On = wheel zooms (Ctrl scrolls). Off = wheel scrolls (Ctrl zooms).');
+    toggle(zp, 'Pan with right mouse button', 'panRightMouse', 'Right-drag pans the canvas (Miro-style).');
+    toggle(zp, 'Zoom to fit on open', 'zoomToFitOnOpen', 'Frame the whole drawing when it opens.');
+    range(zp, 'Min zoom', 'zoomMin', 'Furthest zoom-out.', 0.05, 1, 0.05);
+    range(zp, 'Max zoom', 'zoomMax', 'Furthest zoom-in.', 2, 30, 1);
+
+    const grid = section('Grid');
+    color(grid, 'Grid colour', 'gridColor', 'Dot colour (when dynamic is off).');
+    range(grid, 'Grid opacity (%)', 'gridOpacity', '0–100.', 0, 100, 1);
+    toggle(grid, 'Dynamic grid colour', 'gridDynamic', 'Grid follows light/dark instead of the fixed colour.');
+
     const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done';
     close.addEventListener('click', () => wrap.remove()); box.appendChild(close);
     wrap.appendChild(box); wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
@@ -1922,6 +1961,19 @@ const BASE_CSS = `
 .pxc-settings-row input { margin-top: 2px; accent-color: var(--button-primary-bg-color, #7c5cff); }
 .pxc-settings-row small { color: var(--color-text-600); }
 .pxc-settings-close { margin-top: 14px; padding: 7px 16px; border: 0; border-radius: 8px; background: var(--button-primary-bg-color, #7c5cff); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+/* Granular settings panel (S1–S14): collapsible sections + control types. */
+.pxc-settings-wide { min-width: 430px; max-width: 480px; max-height: 82vh; overflow-y: auto; }
+.pxc-settings-wide .pxc-settings-row { justify-content: space-between; align-items: center; gap: 14px; }
+.pxc-settings-wide .pxc-settings-row > span { flex: 1; }
+.pxc-set-section { border-top: 1px solid var(--cards-border-color); }
+.pxc-set-section > summary { cursor: pointer; font-weight: 700; font-size: 12px; letter-spacing: .02em; text-transform: uppercase; padding: 10px 0 6px; list-style: none; color: var(--color-text-600); }
+.pxc-set-section > summary::-webkit-details-marker { display: none; }
+.pxc-set-section > summary::before { content: '▸ '; opacity: .6; }
+.pxc-set-section[open] > summary::before { content: '▾ '; }
+.pxc-set-section[open] > summary { color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-set-color { width: 38px; height: 24px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: none; cursor: pointer; padding: 0; }
+.pxc-set-range { width: 130px; accent-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-set-sel { padding: 4px 8px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 12px; cursor: pointer; }
 .pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .pxc-host .pxc-root.pxc-present .pxc-toolbar, .pxc-host .pxc-root.pxc-present .pxc-props, .pxc-host .pxc-root.pxc-present .pxc-hint, .pxc-host .pxc-root.pxc-present .pxc-search { display: none !important; }
 .pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
