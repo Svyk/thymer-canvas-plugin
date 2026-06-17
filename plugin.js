@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.55.0';
+const PLEXUS_VERSION = '0.56.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -77,6 +77,12 @@ async function loadMathJax() {
   try { await window.__pxcMJ; } catch (_e) { return null; }
   for (let i = 0; i < 60; i++) { if (window.MathJax && window.MathJax.tex2svg) return window.MathJax; await new Promise((r) => setTimeout(r, 100)); }
   return window.MathJax || null;
+}
+// P2 Text-to-Path: point + tangent angle at arc-length d along a polyline (world coords).
+function pointAtArcLength(pts, segLen, d) {
+  let acc = 0;
+  for (let i = 0; i < segLen.length; i++) { if (acc + segLen[i] >= d) { const t = (d - acc) / (segLen[i] || 1); return { x: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, y: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t, angle: Math.atan2(pts[i + 1][1] - pts[i][1], pts[i + 1][0] - pts[i][0]) }; } acc += segLen[i]; }
+  return null;
 }
 /* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
    stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
@@ -1558,6 +1564,33 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Chart: ' + rows.length + ' bars.', dismissible: true }); } catch (_e) {}
   }
+  // P2: Text to Path — flow a text element's glyphs along a selected path (line/arrow/freedraw).
+  _textToPath() {
+    const sel = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+    const txt = sel.find((e) => e.type === 'text'); const path = sel.find((e) => e.type === 'arrow' || e.type === 'line' || e.type === 'freedraw');
+    if (!txt || !path) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a text element AND a path (line/arrow/freedraw).', dismissible: true }); } catch (_e) {} return; }
+    const pts = path.points; if (!pts || pts.length < 2) return;
+    const segLen = []; for (let i = 1; i < pts.length; i++) segLen.push(Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const fs = txt.fontSize || 24, ctx = measureText._c; ctx.font = textFont(txt);
+    const chars = String(txt.text || '').split(''), els = []; let dist = 0;
+    for (const ch of chars) { const cw = ctx.measureText(ch).width || fs * 0.5; const pos = pointAtArcLength(pts, segLen, dist + cw / 2); if (pos && ch.trim()) { const e = makeText(0, 0, { fontSize: fs, stroke: txt.strokeColor }); e.text = ch; measureText(e); e.x = pos.x - e.width / 2; e.y = pos.y - e.height / 2; e.angle = pos.angle; els.push(e); } dist += cw; }
+    if (!els.length) return;
+    txt.isDeleted = true; this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Text placed along the path (' + els.length + ' glyphs).', dismissible: true }); } catch (_e) {}
+  }
+  // Editor polish: toggle word-wrap on the selected text (wraps to its current width; toggle restores).
+  _toggleTextWrap() {
+    const el = this._singleSel(); if (!el || el.type !== 'text') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a text element.', dismissible: true }); } catch (_e) {} return; }
+    if (el._wrapOrig != null) { el.text = el._wrapOrig; delete el._wrapOrig; measureText(el); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Text unwrapped.', dismissible: true }); } catch (_e) {} return; }
+    el._wrapOrig = el.text; const flat = String(el.text || '').replace(/\n/g, ' ');
+    const ctx = measureText._c; ctx.font = textFont(el); const maxW = Math.max(60, Math.abs(el.width));
+    const words = flat.split(/\s+/), lines = []; let cur = '';
+    for (const w of words) { const test = cur ? cur + ' ' + w : w; if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; } else cur = test; }
+    if (cur) lines.push(cur);
+    el.text = lines.join('\n'); measureText(el); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Text wrapped to width — toggle again to unwrap.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 10 E14: re-date a record card's record in place (the in-plugin core of Day-View binding).
   async _scheduleCard() {
     const el = this._singleSel(); if (!el || (el.type !== 'record' && el.type !== 'board')) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a record/board card to schedule.', dismissible: true }); } catch (_e) {} return; }
@@ -1805,6 +1838,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert Mermaid diagram', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._insertMermaid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert LaTeX equation', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._insertLatex(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF (pages → images)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPicker(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
