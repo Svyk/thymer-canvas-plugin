@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.43.0';
+const PLEXUS_VERSION = '0.44.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -34,6 +34,16 @@ const PLEXUS_SETTINGS_DEFAULTS = {
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
 function hexToRgba(hex, a) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16); return 'rgba(' + (r || 124) + ',' + (g || 92) + ',' + (b || 255) + ',' + a + ')'; }
+// P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
+function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
+const COLOR_SCHEMES = {
+  Plexus: ['#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#1e1e1e'],
+  Cloud: ['#FF9900', '#4285F4', '#0089D6', '#326CE5', '#00A4A6'],
+  Nature: ['#1b4332', '#2d6a4f', '#52b788', '#74c69d', '#b7e4c7'],
+  Sunset: ['#fd7e14', '#ff6b6b', '#f06595', '#cc5de8', '#845ef7'],
+  Mono: ['#111111', '#444444', '#777777', '#aaaaaa', '#cccccc'],
+  Ocean: ['#03045e', '#0077b6', '#00b4d8', '#90e0ef', '#caf0f8'],
+};
 /* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
    stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
 const pxEnc = new TextEncoder(), pxDec = new TextDecoder();
@@ -1228,6 +1238,32 @@ class CanvasView {
     for (const n of nodes) { n.x = baseX + (n._mmDepth || 0) * HGAP; n.y = baseY + ((rowOf[n.id] || 0) - rootRow) * VGAP; measureText(n); }
     for (const ed of this.scene.elements) { if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue; const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); if (a && b) { ed.points = [[a.x + a.width + 4, a.y + a.height / 2], [b.x - 4, b.y + b.height / 2]]; linearBBox(ed); } }
   }
+  // P0.4/P0.4b: apply a colour to the selection (stroke + tinted fill if the element is filled).
+  _applyColorToSelection(color) {
+    let ch = false;
+    for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.strokeColor = color; if (el.backgroundColor && el.backgroundColor !== 'transparent') el.backgroundColor = FILLS[color] || tintColor(color); ch = true; }
+    if (ch) { this.dirty = true; this.scheduleSave(); this._syncToolbar && this._syncToolbar(); }
+    return ch;
+  }
+  // P0.4 Shade Master + P0.4b Color Scheme Manager — palette extracted from this drawing + named schemes.
+  _openColorTool() {
+    const used = [...new Set(this.scene.elements.filter((e) => !e.isDeleted && e.strokeColor && e.type !== 'frame').map((e) => e.strokeColor))].slice(0, 24);
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-colortool';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Colours — Shade Master & Schemes'; box.appendChild(title);
+    const note = document.createElement('div'); note.className = 'pxc-il-hint'; note.textContent = this.selected.size ? 'Click a colour to apply it to the ' + this.selected.size + ' selected element(s).' : 'Select element(s) first, then click a colour to recolour them.'; box.appendChild(note);
+    const swatchRow = (label, colors) => {
+      const sec = document.createElement('div'); sec.className = 'pxc-ct-sec'; const h = document.createElement('div'); h.className = 'pxc-ct-h'; h.textContent = label; sec.appendChild(h);
+      const row = document.createElement('div'); row.className = 'pxc-ct-row';
+      for (const c of colors) { const sw = document.createElement('button'); sw.className = 'pxc-ct-sw'; sw.style.background = c; sw.title = c; sw.addEventListener('click', () => { this._applyColorToSelection(c); }); row.appendChild(sw); }
+      sec.appendChild(row); box.appendChild(sec);
+    };
+    if (used.length) swatchRow('In this drawing', used);
+    for (const name in COLOR_SCHEMES) swatchRow(name, COLOR_SCHEMES[name]);
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done'; close.addEventListener('click', () => overlay.remove()); box.appendChild(close);
+    overlay.appendChild(box); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
   // Phase 10 E5: drag-to-restructure (explicit + safe) — write REAL ref relations between selected cards.
   // The first selected record/board card becomes the source; a ref line item is added to its record for
   // each other selected card. This is the canvas WRITING real ontology, the Brain graph then shows the edge.
@@ -1536,6 +1572,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
@@ -2177,6 +2214,13 @@ const BASE_CSS = `
 .pxc-il-thumb.pxc-gempty { background: var(--sidebar-bg-hover); }
 .pxc-il-cap { font-size: 10px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 76px; }
 .pxc-il-empty { color: var(--color-text-600); font-size: 13px; padding: 16px 4px; grid-column: 1 / -1; }
+/* P0.4/P0.4b: Colour tool */
+.pxc-colortool { min-width: 360px; max-width: 420px; }
+.pxc-ct-sec { margin-bottom: 10px; }
+.pxc-ct-h { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--color-text-600); margin: 4px 0; }
+.pxc-ct-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.pxc-ct-sw { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--cards-border-color); cursor: pointer; padding: 0; }
+.pxc-ct-sw:hover { transform: scale(1.12); }
 .pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .pxc-host .pxc-root.pxc-present .pxc-toolbar, .pxc-host .pxc-root.pxc-present .pxc-props, .pxc-host .pxc-root.pxc-present .pxc-hint, .pxc-host .pxc-root.pxc-present .pxc-search { display: none !important; }
 .pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
