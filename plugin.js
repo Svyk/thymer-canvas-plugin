@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.21.0';
+const PLEXUS_VERSION = '0.22.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -21,6 +21,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PALETTE = ['#1e1e1e', '#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444'];
 const FILLS = { '#1e1e1e': 'transparent', '#7c5cff': '#efeaff', '#0ea5e9': '#e0f2fe', '#10b981': '#dcfce7', '#f59e0b': '#fef3c7', '#ef4444': '#fee2e2' };
+const TAG_COLORS = ['#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#14b8a6'];
+function tagColor(s) { s = String(s || ''); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return TAG_COLORS[Math.abs(h) % TAG_COLORS.length]; }
 const TOOLS = [
   { id: 'select', icon: 'ti-pointer', title: 'Select (V)' },
   { id: 'rectangle', icon: 'ti-square', title: 'Rectangle (R)' },
@@ -403,6 +405,30 @@ function exportSvg(scene) {
   p.push('</g></svg>');
   return p.join('');
 }
+// Phase 8: SVG import — parse the common SVG subset (incl. our own exportSvg output) into elements.
+function parsePathML(d, ox, oy) {
+  if (!d) return []; const pts = []; const re = /([MLml])\s*(-?[\d.]+)[ ,]+(-?[\d.]+)/g; let m;
+  while ((m = re.exec(d))) { pts.push([ox + parseFloat(m[2]), oy + parseFloat(m[3])]); }
+  return pts;
+}
+function importSvg(svgText, ox, oy) {
+  ox = ox || 0; oy = oy || 0; const els = [];
+  let svg = null; try { svg = new DOMParser().parseFromString(svgText, 'image/svg+xml').querySelector('svg'); } catch (_e) {}
+  if (!svg) return els;
+  const num = (v, d) => { const n = parseFloat(v); return isFinite(n) ? n : (d || 0); };
+  const col = (v, d) => (!v || v === 'none') ? (d || 'transparent') : v;
+  for (const node of svg.querySelectorAll('rect,circle,ellipse,line,polyline,polygon,path,text')) {
+    const stroke = col(node.getAttribute('stroke'), '#1e1e1e'), fill = col(node.getAttribute('fill'), 'transparent'), sw = num(node.getAttribute('stroke-width'), 2), tag = node.tagName.toLowerCase();
+    if (tag === 'rect') els.push(makeRect(ox + num(node.getAttribute('x')), oy + num(node.getAttribute('y')), num(node.getAttribute('width'), 40), num(node.getAttribute('height'), 40), { stroke, fill, fillStyle: 'solid', strokeWidth: sw }));
+    else if (tag === 'circle') { const r = num(node.getAttribute('r'), 20), cx = num(node.getAttribute('cx')), cy = num(node.getAttribute('cy')); els.push(makeRect(ox + cx - r, oy + cy - r, r * 2, r * 2, { type: 'ellipse', stroke, fill, fillStyle: 'solid', strokeWidth: sw })); }
+    else if (tag === 'ellipse') { const rx = num(node.getAttribute('rx'), 20), ry = num(node.getAttribute('ry'), 20), cx = num(node.getAttribute('cx')), cy = num(node.getAttribute('cy')); els.push(makeRect(ox + cx - rx, oy + cy - ry, rx * 2, ry * 2, { type: 'ellipse', stroke, fill, fillStyle: 'solid', strokeWidth: sw })); }
+    else if (tag === 'line') { const a = makeLinear(0, 0, 'line', { stroke, strokeWidth: sw }); a.points = [[ox + num(node.getAttribute('x1')), oy + num(node.getAttribute('y1'))], [ox + num(node.getAttribute('x2')), oy + num(node.getAttribute('y2'))]]; a.endArrowhead = null; linearBBox(a); els.push(a); }
+    else if (tag === 'polyline' || tag === 'polygon') { const pts = (node.getAttribute('points') || '').trim().split(/\s+/).map((q) => q.split(',').map(Number)).filter((q) => q.length === 2 && q.every(isFinite)); if (pts.length >= 2) { const a = makeLinear(0, 0, 'line', { stroke, strokeWidth: sw }); a.points = pts.map((q) => [ox + q[0], oy + q[1]]); if (tag === 'polygon') a.points.push([ox + pts[0][0], oy + pts[0][1]]); a.endArrowhead = null; linearBBox(a); els.push(a); } }
+    else if (tag === 'path') { const pts = parsePathML(node.getAttribute('d'), ox, oy); if (pts.length >= 2) { const fd = makeFreedraw(pts[0][0], pts[0][1], { stroke, strokeWidth: sw }); fd.points = pts; freedrawBBox(fd); els.push(fd); } }
+    else if (tag === 'text') { const fs = num(node.getAttribute('font-size'), 16); const t = makeText(ox + num(node.getAttribute('x')), oy + num(node.getAttribute('y')) - fs, { stroke, fontSize: fs }); t.text = node.textContent || ''; measureText(t); els.push(t); }
+  }
+  return els;
+}
 async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
   const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
@@ -544,6 +570,13 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Exported drawing as SVG.', dismissible: true }); } catch (_e) {}
       return svg.length;
     } catch (e) { console.error('[Plexus] exportSvg', e); return 0; }
+  }
+  // Phase 8: import an SVG string as elements at (wx,wy) (or viewport centre); selects them.
+  _importSvgText(svgText, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const els = importSvg(svgText, wx, wy); if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no importable SVG shapes found.', dismissible: true }); } catch (_e) {} return 0; }
+    this.selected.clear(); for (const el of els) { this.scene.elements.push(el); this.selected.add(el.id); }
+    this.dirty = true; this.scheduleSave(); return els.length;
   }
   // Phase 8: contextual property panel — stroke width / opacity / fill style for the selection.
   _buildPropPanel() {
@@ -758,7 +791,7 @@ class CanvasView {
     this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
-    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } };
+    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
     const onPaste = (e) => { if (this.destroyed || this.editingId) return; if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return; const items = (e.clipboardData && e.clipboardData.items) || []; for (const it of items) if (it.kind === 'file' && it.type && it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) { e.preventDefault(); const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addImageFromFile(f, c.x, c.y); } } };
     this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
@@ -854,6 +887,7 @@ class CanvasView {
         const rec = await this.plugin.data.getRecord(guid);
         if (!rec) { entry.title = '(record not found)'; entry.ready = true; this.dirty = true; return; }
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
+        try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { const items = await rec.getLineItems(); entry.lines = (items || []).map(lineTextOf).filter(Boolean).slice(0, 8); } catch (_e) {}
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
@@ -869,8 +903,9 @@ class CanvasView {
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#7c5cff'; ctx.stroke();
-    ctx.save(); ctx.clip(); ctx.fillStyle = el.strokeColor || '#7c5cff'; ctx.fillRect(x, y, 4, h); // accent bar
+    ctx.save(); ctx.clip();
     const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
+    ctx.fillStyle = (rec && rec.tag) ? tagColor(rec.tag) : (el.strokeColor || '#7c5cff'); ctx.fillRect(x, y, 4, h); // E11: accent encodes a choice property
     ctx.textBaseline = 'top';
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
@@ -1431,6 +1466,15 @@ class Plugin extends AppPlugin {
         v._enterPresent(); const inPresent = !!v._present && v.wrap.classList.contains('pxc-present');
         v._exitPresent(); const exited = !v._present && !v.wrap.classList.contains('pxc-present');
         return { inPresent, exited, ok: inPresent && exited };
+      },
+      // Phase 8 SVG import: round-trip — export a 3-element scene to SVG, re-import, confirm 3 elements back.
+      svgImportTest: () => {
+        const tmp = newScene(true);
+        tmp.elements.push(makeRect(0, 0, 100, 80, { stroke: '#7c5cff', fill: '#efeaff', fillStyle: 'solid' }));
+        tmp.elements.push(makeRect(120, 0, 60, 60, { type: 'ellipse', stroke: '#10b981' }));
+        const t = makeText(0, 120, { fontSize: 20 }); t.text = 'hello'; measureText(t); tmp.elements.push(t);
+        const svg = exportSvg(tmp); const imp = importSvg(svg, 0, 0);
+        return { exportedLen: svg.length, importedCount: imp.length, types: imp.map((e) => e.type), ok: imp.length === 3 };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
