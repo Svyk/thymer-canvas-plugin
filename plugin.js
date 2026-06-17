@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.30.0';
+const PLEXUS_VERSION = '0.31.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -551,6 +551,10 @@ class CanvasView {
     let h = scroller ? scroller.clientHeight : 0;
     if (!h || h < 80) h = Math.max(320, (window.innerHeight || 800) - 120);
     this.wrap.style.height = h + 'px';
+    // GUARDRAILS: Thymer wraps the custom panel in `empty-msg-panel` (flex + padding + min-height:100%) → the
+    // scroller overflows and the absolute toolbar (with the Note button) drifts off as you scroll. CSS neutralizes
+    // that box; trim any residual overshoot here so the panel never scrolls.
+    if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) { h = Math.max(160, h - (scroller.scrollHeight - scroller.clientHeight)); this.wrap.style.height = h + 'px'; }
     const w = this.wrap.clientWidth || this.host.clientWidth || 600;
     for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
     this.cssW = w; this.cssH = h;
@@ -1315,6 +1319,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1813,6 +1818,8 @@ class Plugin extends AppPlugin {
 
 const BASE_CSS = `
 .pxc-host { position: relative; }
+/* UX-1: neutralize Thymer's empty-msg-panel box (flex + 20px padding + centering + min-height:100%) so the canvas fills the panel flush at the top and the toolbar doesn't drift on scroll. */
+.empty-msg-panel.pxc-host { display: block; padding: 0; align-items: stretch; justify-content: flex-start; min-height: 0; }
 .pxc-host .pxc-root { position: relative; width: 100%; overflow: hidden; background: var(--color-bg-900); color: var(--color-text-400); font-family: var(--font-family, system-ui, sans-serif); }
 .pxc-host .pxc-root .pxc-layer { position: absolute; inset: 0; display: block; }
 .pxc-host .pxc-root .pxc-static { z-index: 1; }
