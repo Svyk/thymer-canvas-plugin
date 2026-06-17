@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.20.1';
+const PLEXUS_VERSION = '0.21.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -146,8 +146,15 @@ function drawArrowhead(ctx, fromX, fromY, toX, toY, size) {
   ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang + spread), toY - len * Math.sin(ang + spread));
   ctx.stroke();
 }
+// Phase 8: elbow arrows — route a 2-point linear element as an orthogonal (right-angle) path.
+function routedPoints(el) {
+  if (!el.elbowed || !el.points || el.points.length !== 2) return el.points;
+  const a = el.points[0], b = el.points[1], ax = a[0], ay = a[1], bx = b[0], by = b[1];
+  if (Math.abs(bx - ax) >= Math.abs(by - ay)) { const mx = (ax + bx) / 2; return [[ax, ay], [mx, ay], [mx, by], [bx, by]]; }
+  const my = (ay + by) / 2; return [[ax, ay], [ax, my], [bx, my], [bx, by]];
+}
 function drawLinear(ctx, el) {
-  const pts = el.points; if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
+  const pts = routedPoints(el); if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
   const rng = mulberry32((el.seed | 0) || 1);
   ctx.save(); applyStroke(ctx, { stroke: el.strokeColor, strokeWidth: el.strokeWidth, opacity: el.opacity });
   const rgh = (el.roughness == null ? 1 : el.roughness) * 1.1;
@@ -288,7 +295,7 @@ function sceneBounds(scene) {
 }
 function hitElement(el, wx, wy, tol) {
   if (el.type === 'arrow' || el.type === 'line') {
-    const pts = el.points || []; const t = tol + (el.strokeWidth || 2);
+    const pts = routedPoints(el) || []; const t = tol + (el.strokeWidth || 2);
     for (let i = 0; i < pts.length - 1; i++) if (distToSeg(wx, wy, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) <= t) return true;
     return false;
   }
@@ -503,6 +510,20 @@ class CanvasView {
   _gridSize() { return (this.scene.appState && this.scene.appState.gridSize) || 20; }
   _snap(n) { if (!this._gridOn()) return n; const gs = this._gridSize(); return Math.round(n / gs) * gs; }
   _toggleGrid() { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridModeEnabled = !this._gridOn(); this.dirty = true; this.scheduleSave(); return this.scene.appState.gridModeEnabled; }
+  // Phase 8: elbow-arrow toggle on the selected arrow/line elements.
+  _toggleElbow() { let ch = false, on = null; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = !el.elbowed; on = el.elbowed; ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); } return on; }
+  // Phase 8: presentation/view mode — hide chrome, fit the scene, read-only until Esc.
+  _fitToScene() {
+    const live = this.scene.elements.filter((e) => !e.isDeleted); if (!live.length) return;
+    const b = sceneBounds(this.scene), pad = 60;
+    const zw = this.cssW / (b.w + pad * 2), zh = this.cssH / (b.h + pad * 2);
+    this.camera.zoom = Math.min(8, Math.max(0.05, Math.min(zw, zh)));
+    this.camera.x = b.x + b.w / 2 - (this.cssW / this.camera.zoom) / 2;
+    this.camera.y = b.y + b.h / 2 - (this.cssH / this.camera.zoom) / 2;
+    this.dirty = true;
+  }
+  _enterPresent() { this._present = true; if (this.wrap) this.wrap.classList.add('pxc-present'); this.selected.clear(); this._fitToScene(); }
+  _exitPresent() { this._present = false; if (this.wrap) this.wrap.classList.remove('pxc-present'); this.dirty = true; }
   _drawGrid(ctx) {
     if (!this._gridOn()) return;
     const gs = this._gridSize(), z = this.camera.zoom;
@@ -705,6 +726,7 @@ class CanvasView {
     const onWheel = (e) => { e.preventDefault(); const rect = this.wrap.getBoundingClientRect(); this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); this.dirty = true; this._saveCamera(); };
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
+      if (this._present) { if (e.key === 'Escape') { e.preventDefault(); this._exitPresent(); } return; } // present mode: read-only except Esc
       if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this.redo(); else this.undo(); return; }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); e.stopPropagation(); this.redo(); return; }
       if (e.metaKey || e.ctrlKey) {
@@ -1085,6 +1107,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
@@ -1393,6 +1417,21 @@ class Plugin extends AppPlugin {
         let res2 = null; for (let i = 0; i < 40; i++) { await sleep(150); res2 = v._queryCache && v._queryCache.get('@task'); if (res2 && res2.ready) break; }
         return { nodeId: el ? el.id : null, type: el ? el.type : null, count: res ? res.count : -1, items: res ? res.items.length : -1, ready: !!(res && res.ready), liveReran: !!(res2 && res2.ready) };
       },
+      // Phase 8 elbow arrow: toggling .elbowed expands a 2-point arrow to a 4-point orthogonal path.
+      elbowTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const arr = makeLinear(0, 0, 'arrow', { stroke: '#7c5cff', strokeWidth: 2 }); arr.points = [[0, 0], [200, 80]]; v.scene.elements.push(arr);
+        v.selected = new Set([arr.id]); const straight = routedPoints(arr).length; v._toggleElbow(); const elbow = routedPoints(arr).length;
+        return { straight, elbow, on: !!arr.elbowed, ok: straight === 2 && elbow === 4 && !!arr.elbowed };
+      },
+      // Phase 8 presentation mode: enter hides chrome (.pxc-present) + fits; Esc/exit restores.
+      presentTest: () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        if (!v.scene.elements.filter((e) => !e.isDeleted).length) v.scene.elements.push(makeRect(0, 0, 100, 80, { stroke: '#7c5cff' }));
+        v._enterPresent(); const inPresent = !!v._present && v.wrap.classList.contains('pxc-present');
+        v._exitPresent(); const exited = !v._present && !v.wrap.classList.contains('pxc-present');
+        return { inPresent, exited, ok: inPresent && exited };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
@@ -1441,6 +1480,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-modal-label { font-size: 13px; color: var(--color-text-400); margin-bottom: 8px; }
 .pxc-host .pxc-root .pxc-modal-input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 14px; outline: none; }
 .pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.pxc-host .pxc-root.pxc-present .pxc-toolbar, .pxc-host .pxc-root.pxc-present .pxc-props, .pxc-host .pxc-root.pxc-present .pxc-hint, .pxc-host .pxc-root.pxc-present .pxc-search { display: none !important; }
+.pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
