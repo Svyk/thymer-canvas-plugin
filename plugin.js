@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.57.0';
+const PLEXUS_VERSION = '0.58.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -34,6 +34,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   laserColor: '#ef4444', laserDecay: 1400, laserWidth: 4,
   // S11 AI
   aiProvider: 'openai', aiModel: '',
+  // S9/S14 Advanced
+  pdfScale: 2, cullMargin: 80,
 };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
@@ -1363,7 +1365,7 @@ class CanvasView {
     const n = Math.min(doc.numPages, 20); let y = wy;
     for (let p = 1; p <= n; p++) {
       try {
-        const page = await doc.getPage(p), vp = page.getViewport({ scale: 2 });
+        const page = await doc.getPage(p), vp = page.getViewport({ scale: (this.plugin._settings && this.plugin._settings.pdfScale) || 2 });
         const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
         await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
         const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
@@ -1736,7 +1738,7 @@ class CanvasView {
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
     // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
-    const m = 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
+    const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
     const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
     let drawn = 0;
     for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
@@ -2004,6 +2006,10 @@ class Plugin extends AppPlugin {
     select(ai, 'AI provider', 'aiProvider', 'Used by “AI diagram”. Key is encrypted at rest; calls go direct to the provider.', [{ v: 'openai', l: 'OpenAI' }, { v: 'anthropic', l: 'Anthropic (Claude)' }, { v: 'gemini', l: 'Google Gemini' }, { v: 'xai', l: 'xAI (Grok)' }]);
     text(ai, 'Model override', 'aiModel', 'Optional — blank uses the provider default.', 'default');
     action(ai, 'Stored keys', 'Clear all saved API keys + passphrase from this device.', 'Reset keys', () => { try { localStorage.removeItem('plexus_secret_blob'); localStorage.removeItem('plexus_llm_key'); } catch (_e) {} this._secrets = null; this._secretPass = null; try { this.ui.addToaster({ title: 'Plexus: stored AI keys cleared.', dismissible: true }); } catch (_e) {} });
+
+    const adv = section('Advanced');
+    range(adv, 'PDF import scale', 'pdfScale', 'Higher = sharper PDF pages (bigger images).', 1, 4, 0.5);
+    range(adv, 'Render cull margin (px)', 'cullMargin', 'Off-screen buffer before culling — lower = faster on huge graphs, higher = less pop-in.', 0, 300, 20);
 
     const laser = section('Laser pointer');
     color(laser, 'Laser colour', 'laserColor', 'Trail colour for the laser tool (L).');
