@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.27.1';
+const PLEXUS_VERSION = '0.28.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -437,6 +437,18 @@ function importSvg(svgText, ox, oy) {
     else if (tag === 'text') { const fs = num(node.getAttribute('font-size'), 16); const t = makeText(ox + num(node.getAttribute('x')), oy + num(node.getAttribute('y')) - fs, { stroke, fontSize: fs }); t.text = node.textContent || ''; measureText(t); els.push(t); }
   }
   return els;
+}
+// Phase 10 E6: turn an LLM's JSON shape list into canvas elements (the verifiable half of AI diagramming).
+function elementsFromAiJson(arr, ox, oy) {
+  ox = ox || 0; oy = oy || 0; const out = [];
+  for (const it of (Array.isArray(arr) ? arr : [])) {
+    if (!it || typeof it !== 'object') continue;
+    const x = ox + (+it.x || 0), y = oy + (+it.y || 0), w = +it.w || 130, h = +it.h || 70, color = it.color || '#7c5cff', t = String(it.type || 'rectangle').toLowerCase();
+    if (t === 'text') { const e = makeText(x, y, { fontSize: +it.fontSize || 20, stroke: color }); e.text = String(it.text || ''); measureText(e); out.push(e); }
+    else if (t === 'arrow' || t === 'line') { const e = makeLinear(x, y, t === 'line' ? 'line' : 'arrow', { stroke: color, strokeWidth: 2 }); e.points = [[x, y], [x + w, y + h]]; linearBBox(e); out.push(e); }
+    else { const e = makeRect(x, y, w, h, { type: (t === 'ellipse' || t === 'diamond') ? t : 'rectangle', stroke: color, fill: FILLS[color] || '#efeaff', fillStyle: 'solid' }); out.push(e); if (it.text) { const lbl = makeText(x + 9, y + h / 2 - 10, { fontSize: 14, stroke: '#1e1e1e' }); lbl.text = String(it.text); measureText(lbl); out.push(lbl); } }
+  }
+  return out;
 }
 async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
@@ -1079,6 +1091,27 @@ class CanvasView {
     for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); }
     ctx.setLineDash([]); ctx.restore();
   }
+  // Phase 10 E6: AI diagramming — prompt -> (consent + stored key) -> LLM -> JSON shapes -> elements.
+  async _aiDiagram() {
+    const what = await this._promptText('Describe the diagram to generate:', 'a 3-step data pipeline: ingest → transform → store');
+    if (!what) return;
+    let key = ''; try { key = localStorage.getItem('plexus_llm_key') || ''; } catch (_e) {}
+    if (!key) { key = await this._promptText('OpenAI API key (stored locally; sent only to OpenAI):', ''); if (!key) return; try { localStorage.setItem('plexus_llm_key', key); } catch (_e) {} }
+    try { this.plugin.ui.addToaster({ title: 'Plexus: asking the model…', dismissible: true }); } catch (_e) {}
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.2, messages: [{ role: 'system', content: 'Output ONLY a JSON array of canvas shapes, no prose. Each item: {"type":"rectangle|ellipse|diamond|text|arrow","x":<num>,"y":<num>,"w":<num>,"h":<num>,"text":"<label>","color":"#7c5cff"}. Lay nodes left-to-right ~190px apart; connect them with arrow shapes. Origin 0,0.' }, { role: 'user', content: String(what) }] }) });
+      const data = await res.json();
+      let txt = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+      txt = txt.replace(/^```(json)?/i, '').replace(/```$/, '').trim();
+      let arr = null; try { arr = JSON.parse(txt); } catch (_e) { const m = txt.match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } }
+      if (!arr) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model did not return valid JSON.', dismissible: true }); } catch (_e) {} return; }
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      const els = elementsFromAiJson(arr, c.x - 240, c.y - 120);
+      this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
+      this.dirty = true; this.scheduleSave();
+      try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed (' + e + '). Check your key.', dismissible: true }); } catch (_e) {} }
+  }
   // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
   _promptText(label, def) {
     return new Promise((resolve) => {
@@ -1264,6 +1297,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1392,6 +1426,12 @@ class Plugin extends AppPlugin {
           const petSim = cos(a, b), petFinSim = cos(a, c);
           return { dim: a.length, modelLoaded: !!this._embedderP, petSim: +petSim.toFixed(3), petFinSim: +petFinSim.toFixed(3), ok: petSim > petFinSim };
         } catch (e) { return { error: String(e) }; }
+      },
+      // Phase 10 E6 (view-independent): the LLM-JSON -> elements parser (the live LLM call needs the user's key).
+      aiParseTest: () => {
+        const sample = [{ type: 'rectangle', x: 0, y: 0, w: 120, h: 60, text: 'Ingest', color: '#7c5cff' }, { type: 'ellipse', x: 190, y: 0, w: 90, h: 90, text: 'Transform' }, { type: 'arrow', x: 120, y: 30, w: 70, h: 15 }, { type: 'text', x: 0, y: 130, text: 'pipeline' }];
+        const els = elementsFromAiJson(sample, 0, 0); const types = els.map((e) => e.type);
+        return { count: els.length, types, ok: els.length === 6 && types.includes('rectangle') && types.includes('ellipse') && types.includes('arrow') && types.filter((t) => t === 'text').length === 3 };
       },
       views: () => [...this._views].map((v) => ({ record: v.recordGuid, tool: v.tool, elements: v.scene.elements.filter((e) => !e.isDeleted).length, selected: v.selected.size, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null })),
       addShapes: async () => {
