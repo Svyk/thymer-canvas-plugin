@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.45.0';
+const PLEXUS_VERSION = '0.46.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -698,6 +698,28 @@ class CanvasView {
     setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (_e) {} }, 1000);
     try { this.plugin.ui.addToaster({ title: 'Exported drawing as PNG.', dismissible: true }); } catch (_e) {}
     return blob.size;
+  }
+  // P1.5: render a world-bounds region to a PNG dataURL (shapes/text/images; cards via drawElement fallback).
+  _renderRegionPng(b, scale) {
+    const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(b.w * scale)); cv.height = Math.max(1, Math.round(b.h * scale));
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.setTransform(scale, 0, 0, scale, -b.x * scale, -b.y * scale);
+    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { drawElement(ctx, el); } catch (_e) {} } // outside-bounds elements clip to canvas
+    return cv.toDataURL('image/png');
+  }
+  // P1.5: Printable Layout — named frames become ordered pages; opens a print view (Save as PDF).
+  _printFrames() {
+    const frames = this._slideFrames();
+    if (!frames.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: add named frames first — each frame is a page.', dismissible: true }); } catch (_e) {} return; }
+    const scale = Math.max(1, (this.plugin._settings && this.plugin._settings.pngScale) || 2);
+    const pages = frames.map((f) => this._renderRegionPng({ x: f.x, y: f.y, w: f.width, h: f.height }, scale));
+    const w = window.open('', '_blank');
+    if (!w) { try { this.plugin.ui.addToaster({ title: 'Plexus: allow popups to print, or use Export as PNG per frame.', dismissible: true }); } catch (_e) {} return; }
+    const imgs = pages.map((d) => '<div class="pg"><img src="' + d + '"/></div>').join('');
+    w.document.write('<html><head><title>Plexus — print</title><style>@page{margin:10mm}body{margin:0}.pg{page-break-after:always;display:flex;align-items:center;justify-content:center;height:100vh}img{max-width:100%;max-height:100%}</style></head><body>' + imgs + '<scr' + 'ipt>window.onload=function(){setTimeout(function(){window.print();},350);}</scr' + 'ipt></body></html>');
+    w.document.close();
+    try { this.plugin.ui.addToaster({ title: frames.length + ' page(s) — use “Save as PDF” in the print dialog.', dismissible: true }); } catch (_e) {}
   }
   // Phase 8: import an SVG string as elements at (wx,wy) (or viewport centre); selects them.
   _importSvgText(svgText, wx, wy) {
@@ -1574,6 +1596,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as PNG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportPngFile(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Print frames as pages (PDF)', icon: 'ti-printer', onSelected: () => { const v = this._activeView(); if (v) v._printFrames(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
