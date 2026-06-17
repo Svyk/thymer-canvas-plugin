@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.22.0';
+const PLEXUS_VERSION = '0.22.1';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -419,7 +419,7 @@ function importSvg(svgText, ox, oy) {
   const col = (v, d) => (!v || v === 'none') ? (d || 'transparent') : v;
   for (const node of svg.querySelectorAll('rect,circle,ellipse,line,polyline,polygon,path,text')) {
     const stroke = col(node.getAttribute('stroke'), '#1e1e1e'), fill = col(node.getAttribute('fill'), 'transparent'), sw = num(node.getAttribute('stroke-width'), 2), tag = node.tagName.toLowerCase();
-    if (tag === 'rect') els.push(makeRect(ox + num(node.getAttribute('x')), oy + num(node.getAttribute('y')), num(node.getAttribute('width'), 40), num(node.getAttribute('height'), 40), { stroke, fill, fillStyle: 'solid', strokeWidth: sw }));
+    if (tag === 'rect') { if (/%/.test(node.getAttribute('width') || '') || /%/.test(node.getAttribute('height') || '')) continue; els.push(makeRect(ox + num(node.getAttribute('x')), oy + num(node.getAttribute('y')), num(node.getAttribute('width'), 40), num(node.getAttribute('height'), 40), { stroke, fill, fillStyle: 'solid', strokeWidth: sw })); }
     else if (tag === 'circle') { const r = num(node.getAttribute('r'), 20), cx = num(node.getAttribute('cx')), cy = num(node.getAttribute('cy')); els.push(makeRect(ox + cx - r, oy + cy - r, r * 2, r * 2, { type: 'ellipse', stroke, fill, fillStyle: 'solid', strokeWidth: sw })); }
     else if (tag === 'ellipse') { const rx = num(node.getAttribute('rx'), 20), ry = num(node.getAttribute('ry'), 20), cx = num(node.getAttribute('cx')), cy = num(node.getAttribute('cy')); els.push(makeRect(ox + cx - rx, oy + cy - ry, rx * 2, ry * 2, { type: 'ellipse', stroke, fill, fillStyle: 'solid', strokeWidth: sw })); }
     else if (tag === 'line') { const a = makeLinear(0, 0, 'line', { stroke, strokeWidth: sw }); a.points = [[ox + num(node.getAttribute('x1')), oy + num(node.getAttribute('y1'))], [ox + num(node.getAttribute('x2')), oy + num(node.getAttribute('y2'))]]; a.endArrowhead = null; linearBBox(a); els.push(a); }
