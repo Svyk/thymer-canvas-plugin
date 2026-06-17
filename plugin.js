@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.41.0';
+const PLEXUS_VERSION = '0.42.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -28,6 +28,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   gridColor: '#7c5cff', gridOpacity: 28, gridDynamic: false,
   // S7 Fonts
   defaultFont: 'system-ui, sans-serif',
+  // S8 Export
+  pngScale: 2, exportPadding: 24, exportBackground: true,
 };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
@@ -422,15 +424,17 @@ async function loadScene(rec, tries = 1) {
   }
   return null;
 }
-function exportPng(scene, maxPx = 1024) {
+function exportPng(scene, maxPx = 1024, opts) {
+  opts = opts || {};
   return new Promise((resolve) => {
     try {
-      const b = sceneBounds(scene); const pad = 24;
-      const w = b.w + pad * 2, h = b.h + pad * 2, scale = Math.min(2, maxPx / Math.max(w, h, 1));
+      const b = sceneBounds(scene); const pad = opts.padding != null ? opts.padding : 24;
+      const w = b.w + pad * 2, h = b.h + pad * 2; // S8: explicit scale, else fit to maxPx
+      const scale = opts.scale ? opts.scale : Math.min(2, maxPx / Math.max(w, h, 1));
       const cv = document.createElement('canvas');
       cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
       const ctx = cv.getContext('2d');
-      ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
       ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
       for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el);
       cv.toBlob((blob) => resolve(blob), 'image/png');
@@ -670,6 +674,17 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Exported drawing as SVG.', dismissible: true }); } catch (_e) {}
       return svg.length;
     } catch (e) { console.error('[Plexus] exportSvg', e); return 0; }
+  }
+  // S8: export the drawing as a PNG, honoring the export settings (scale / padding / background).
+  async _exportPngFile() {
+    const st = this.plugin._settings || {};
+    const blob = await exportPng(this.scene, 4096, { scale: st.pngScale || 2, padding: st.exportPadding != null ? st.exportPadding : 24, background: st.exportBackground !== false });
+    if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: PNG export failed.', dismissible: true }); } catch (_e) {} return 0; }
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = 'plexus-drawing.png'; document.body.appendChild(a); a.click();
+    setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (_e) {} }, 1000);
+    try { this.plugin.ui.addToaster({ title: 'Exported drawing as PNG.', dismissible: true }); } catch (_e) {}
+    return blob.size;
   }
   // Phase 8: import an SVG string as elements at (wx,wy) (or viewport centre); selects them.
   _importSvgText(svgText, wx, wy) {
@@ -1475,6 +1490,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as PNG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportPngFile(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
@@ -1630,6 +1646,11 @@ class Plugin extends AppPlugin {
       { v: '"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive', l: 'Handwriting (Comic)' },
       { v: '"Bradley Hand", "Segoe Print", cursive', l: 'Handwriting (Bradley)' },
     ]);
+
+    const exp = section('Export');
+    range(exp, 'PNG export scale', 'pngScale', 'Resolution multiplier for “Export as PNG”.', 1, 5, 0.5);
+    range(exp, 'Export padding (px)', 'exportPadding', 'Margin around exported PNG/SVG.', 0, 50, 1);
+    toggle(exp, 'Export with background', 'exportBackground', 'Off = transparent PNG.');
 
     const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done';
     close.addEventListener('click', () => wrap.remove()); box.appendChild(close);
