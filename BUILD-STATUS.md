@@ -1,6 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
-## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.54.0 + Brain v0.9.0, 2026-06-17)
+## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.60.0 + Brain v0.11.0, 2026-06-17)
+**v0.60.0 — micro-setting subsystems built:** **S4 Pen/stylus** (pointerType routing — pen draws
+freedraw without the Pen tool, single-finger pan, double-tap-erase, precision crosshair;
+`_penActive`/`_penDoubleTap`, all in the pointer handlers, zero per-frame cost) · **S9 image cache**
+(one shared bounded LRU decode cache on the plugin — `_imgCacheGet`/`_imgCacheEvict`/`_purgeImageCache`;
+N views of M drawings = one decode per unique fileId; Advanced settings + Purge action) · **S10
+Interaction** (long-press to open cards via one closure timer; `linkOpacity` dims @@ refs + card accent
+chrome via `PLEXUS_LINK_ALPHA` module mirror; `openInNewPanel` side-panel-vs-in-place through `_openCard`).
+Earlier baseline:
 v0.50–v0.54 added: hybrid visual note + `@@` reference node + **P2 content COMPLETE** (Boolean/
 polybool · Mermaid · LaTeX/MathJax-SVG · PDF/pdf.js — all lazy-loaded via `loadLib`/CDN, off the
 render loop) + **viewport culling** (`inView`, render is O(visible) — per the user's huge-graph
