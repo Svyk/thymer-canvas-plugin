@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.54.0';
+const PLEXUS_VERSION = '0.55.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -737,7 +737,7 @@ class CanvasView {
     const ctx = cv.getContext('2d');
     ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.setTransform(scale, 0, 0, scale, -b.x * scale, -b.y * scale);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { drawElement(ctx, el); } catch (_e) {} } // outside-bounds elements clip to canvas
+    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images now render; cards skipped (async). outside-bounds clip to canvas
     return cv.toDataURL('image/png');
   }
   // P1.5: Printable Layout — named frames become ordered pages; opens a print view (Save as PDF).
@@ -1636,11 +1636,24 @@ class CanvasView {
   // pasted as a block reference into any note. Stores a PNG snapshot + the source record + element id.
   async _copyImageRefToClip(el) {
     el = el || this._singleSel();
-    if (!el || el.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image (or a cropped region) first.', dismissible: true }); } catch (_e) {} return false; }
-    const png = await this._snapshotElement(el);
-    if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image (still loading?).', dismissible: true }); } catch (_e) {} return false; }
-    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)) };
-    try { this.plugin.ui.addToaster({ title: 'Image reference copied — run “Plexus: Paste image reference” inside a note.', dismissible: true }); } catch (_e) {}
+    // A single image → snapshot it (preserves crop). Anything else → snapshot the whole SELECTION area.
+    if (el && el.type === 'image') {
+      const png = await this._snapshotElement(el);
+      if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image (still loading?).', dismissible: true }); } catch (_e) {} return false; }
+      this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)) };
+      try { this.plugin.ui.addToaster({ title: 'Image reference copied — run “Plexus: Paste image reference” inside a note.', dismissible: true }); } catch (_e) {}
+      return true;
+    }
+    const sel = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+    if (!sel.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image or element(s) to cite first.', dismissible: true }); } catch (_e) {} return false; }
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const e of sel) { const x0 = Math.min(e.x, e.x + (e.width || 0)), y0 = Math.min(e.y, e.y + (e.height || 0)), x1 = Math.max(e.x, e.x + (e.width || 0)), y1 = Math.max(e.y, e.y + (e.height || 0)); if (x0 < minx) minx = x0; if (y0 < miny) miny = y0; if (x1 > maxx) maxx = x1; if (y1 > maxy) maxy = y1; }
+    if (!isFinite(minx)) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to cite.', dismissible: true }); } catch (_e) {} return false; }
+    const pad = 10, b = { x: minx - pad, y: miny - pad, w: (maxx - minx) + pad * 2, h: (maxy - miny) + pad * 2 };
+    let png = null; try { const dataURL = this._renderRegionPng(b, 2); png = await (await fetch(dataURL)).blob(); } catch (_e) {}
+    if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the selection.', dismissible: true }); } catch (_e) {} return false; }
+    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: sel[0].id, crop: null, w: Math.round(b.w), h: Math.round(b.h) };
+    try { this.plugin.ui.addToaster({ title: sel.length + ' element(s) copied as a reference — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
   async loadOrInit() {

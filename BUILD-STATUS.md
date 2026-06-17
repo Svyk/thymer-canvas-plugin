@@ -1,6 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
-## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.49.0 + Brain v0.9.0, 2026-06-17)
+## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.54.0 + Brain v0.9.0, 2026-06-17)
+v0.50–v0.54 added: hybrid visual note + `@@` reference node + **P2 content COMPLETE** (Boolean/
+polybool · Mermaid · LaTeX/MathJax-SVG · PDF/pdf.js — all lazy-loaded via `loadLib`/CDN, off the
+render loop) + **viewport culling** (`inView`, render is O(visible) — per the user's huge-graph
+speed directive). DESIGN PRINCIPLES (user 2026-06-17): build from scratch, speed-first for the huge
+graph — see SCRIPTS-ROADMAP top. Remaining = low-value/triaged (Text-to-Path, editor polish,
+canvas-text index, Brain P9, a few settings).
 Built from `~/plexus/SCRIPTS-ROADMAP.md` under the `/goal` to complete it. Shipped (each its own
 commit/version, syntax-checked, pushed to `Svyk/thymer-canvas-plugin`): **UX-1…6** · **P0.0**
 encrypted multi-provider key store (`pxEncryptSecret`, passphrase, pagehide-wipe) · **granular
