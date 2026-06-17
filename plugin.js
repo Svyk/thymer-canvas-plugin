@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.44.0';
+const PLEXUS_VERSION = '0.45.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -30,6 +30,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   defaultFont: 'system-ui, sans-serif',
   // S8 Export
   pngScale: 2, exportPadding: 24, exportBackground: true,
+  // S6 Laser pointer
+  laserColor: '#ef4444', laserDecay: 1400, laserWidth: 4,
 };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
@@ -84,6 +86,7 @@ const TOOLS = [
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
   { id: 'crop', icon: 'ti-scissors', title: 'Reference a region of an image (C) — drag a box over an image' },
   { id: 'frame', icon: 'ti-layout-board', title: 'Frame (F) — a named boundary; moves its contents together' },
+  { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -829,6 +832,8 @@ class CanvasView {
         } else { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); }
       } else if (this.tool === 'frame') {
         mode = 'create'; created = makeFrame(down.x, down.y, 0, 0); this.scene.elements.unshift(created); this.selected.clear(); // P1.0: frames render behind (unshift to array front)
+      } else if (this.tool === 'laser') {
+        mode = 'laser'; this._laser = [{ x: down.x, y: down.y, t: Date.now() }]; this.dirty = true; // S6: transient trail
       } else if (this.tool === 'pen') {
         mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'eraser') {
@@ -850,6 +855,7 @@ class CanvasView {
       if (!mode) return; moved = true;
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this.dirty = true; return; }
       const w = this._worldAt(e);
+      if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
       if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
@@ -922,7 +928,7 @@ class CanvasView {
         if (e.key === 'Tab') { e.preventDefault(); this._mmAddChild(mmSel); return; }
         if (e.key === 'Enter') { e.preventDefault(); this._mmAddSibling(mmSel); return; }
       }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -1508,6 +1514,16 @@ class CanvasView {
       ictx.strokeRect(r.x, r.y, r.w, r.h); ictx.setLineDash([]);
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    if (this._laser && this._laser.length) { // S6: fading laser trail (transient, not saved)
+      const st = this.plugin._settings || {}, now = Date.now(), decay = st.laserDecay || 1400;
+      this._laser = this._laser.filter((p) => now - p.t < decay);
+      if (this._laser.length > 1) {
+        ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.lineCap = 'round'; ictx.lineJoin = 'round';
+        for (let i = 1; i < this._laser.length; i++) { const p0 = this._laser[i - 1], p1 = this._laser[i], age = (now - p1.t) / decay; ictx.globalAlpha = Math.max(0, 1 - age); ictx.strokeStyle = st.laserColor || '#ef4444'; ictx.lineWidth = ((st.laserWidth || 4) * (1 - age * 0.6)) / z; ictx.beginPath(); ictx.moveTo(p0.x, p0.y); ictx.lineTo(p1.x, p1.y); ictx.stroke(); }
+        ictx.globalAlpha = 1; ictx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+      if (this._laser.length) this.dirty = true; // keep animating the fade
+    }
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
@@ -1715,6 +1731,11 @@ class Plugin extends AppPlugin {
       { v: '"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive', l: 'Handwriting (Comic)' },
       { v: '"Bradley Hand", "Segoe Print", cursive', l: 'Handwriting (Bradley)' },
     ]);
+
+    const laser = section('Laser pointer');
+    color(laser, 'Laser colour', 'laserColor', 'Trail colour for the laser tool (L).');
+    range(laser, 'Trail fade (ms)', 'laserDecay', 'How long the trail lingers.', 500, 4000, 100);
+    range(laser, 'Trail width', 'laserWidth', 'Stroke width of the trail.', 2, 12, 1);
 
     const exp = section('Export');
     range(exp, 'PNG export scale', 'pngScale', 'Resolution multiplier for “Export as PNG”.', 1, 5, 0.5);
