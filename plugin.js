@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.24.0';
+const PLEXUS_VERSION = '0.25.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -1019,6 +1019,19 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // Phase 10 E5: drag-to-restructure (explicit + safe) — write REAL ref relations between selected cards.
+  // The first selected record/board card becomes the source; a ref line item is added to its record for
+  // each other selected card. This is the canvas WRITING real ontology, the Brain graph then shows the edge.
+  async _linkSelectedCards() {
+    const cards = [...this.selected].map((id) => this._byId(id)).filter((el) => el && (el.type === 'record' || el.type === 'board') && el.recordGuid);
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ record/board cards (first = source) to link.', dismissible: true }); } catch (_e) {} return 0; }
+    const src = cards[0]; let rec = null; try { rec = await this.plugin.data.getRecord(src.recordGuid); } catch (_e) {}
+    if (!rec) return 0;
+    let n = 0;
+    for (const c of cards.slice(1)) { try { const li = await rec.createLineItem(null, null, 'ulist', [{ type: 'text', text: '→ related: ' }, { type: 'ref', text: { guid: c.recordGuid } }], null); if (li) { n++; this._invalidateRec(src.recordGuid); } } catch (_e) {} }
+    try { this.plugin.ui.addToaster({ title: 'Linked ' + n + ' relation(s) from this card.', dismissible: true }); } catch (_e) {}
+    return n;
+  }
   // Phase 10 E3: outline -> canvas — lay a record's line-item tree out as connected text nodes (a mind-map).
   async _outlineToCanvas(guid) {
     const rec = await this.plugin.data.getRecord(guid); if (!rec) return 0;
@@ -1214,7 +1227,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Outline to canvas (mind-map a note)', icon: 'ti-sitemap', onSelected: () => { const v = this._activeView(); const g = this._lastRecordGuid; if (v && g) v._outlineToCanvas(g); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then map its outline.', dismissible: true }); } catch (_e) {} } } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Outline to canvas (mind-map a note)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); const g = this._lastRecordGuid; if (v && g) v._outlineToCanvas(g); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then map its outline.', dismissible: true }); } catch (_e) {} } } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Link selected cards (write relations)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._linkSelectedCards(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
@@ -1566,6 +1580,18 @@ class Plugin extends AppPlugin {
         const texts = v.scene.elements.filter((e) => !e.isDeleted && e.type === 'text').length;
         const arrows = v.scene.elements.filter((e) => !e.isDeleted && e.type === 'arrow').length;
         return { created: count, textNodes: texts, arrows, ok: count > 1 && texts > 1 && arrows > 0 };
+      },
+      // Phase 10 E5 link-cards: create 2 throwaway records, card them, link, return guids for MCP verify.
+      linkCardsTest: async () => {
+        const col = await this._drawingsCollection(); if (!col) return { error: 'no col' };
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        let g1 = null, g2 = null; try { g1 = col.createRecord('E5 link src'); g2 = col.createRecord('E5 link tgt'); } catch (e) { return { error: 'create ' + e }; }
+        if (typeof g1 !== 'string' || typeof g2 !== 'string') return { error: 'guids not strings' };
+        await getRecordPoll(this, g1); await getRecordPoll(this, g2);
+        const c1 = v._insertRecordCard(g1, 0, 0), c2 = v._insertRecordCard(g2, 320, 0);
+        v.selected = new Set([c1.id, c2.id]);
+        const n = await v._linkSelectedCards();
+        return { src: g1, tgt: g2, linked: n, ok: n === 1 };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
