@@ -10,12 +10,16 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.29.0';
+const PLEXUS_VERSION = '0.30.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
+const PLEXUS_SETTINGS_KEY = 'plexus_settings';
+const PLEXUS_SETTINGS_DEFAULTS = { bannerPreview: true, darkMode: false };
+function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
+function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
 const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -465,8 +469,8 @@ async function saveScene(plugin, rec, scene, camera, view) {
   try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
   // Best-effort legacy metadata (only Plexus Drawings records have these props; silently skipped elsewhere).
   try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
-  // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record).
-  try { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } catch (_e) {}
+  // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record). UX-5: gated by setting.
+  try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } } catch (_e) {}
   return { ok, blobGuid: blob.guid, lineGuid: line.guid };
 }
 
@@ -529,13 +533,14 @@ class CanvasView {
     bar.appendChild(cite);
     setTimeout(() => this._syncToolbar(), 0); return bar;
   }
-  // Flip back: open this drawing's source record as a normal note editor, side-by-side (rule 16).
+  // Flip back to the plain note. UX-3: open IN PLACE (navigate THIS panel to the note editor), not a side panel.
   async _flipToNote() {
     const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
+    try { await this.panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); return; } catch (_e) {}
+    // Fallback: if in-place nav fails, open in a side panel.
     let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
     if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
-    if (!panel) return;
-    try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); }
+    if (panel) { try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); } }
   }
   _syncToolbar() {
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === this.tool);
@@ -1234,7 +1239,7 @@ class CanvasView {
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
     sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff';
+    sctx.fillStyle = (this.plugin._settings && this.plugin._settings.darkMode) ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); // UX-6 dark mode override (no scene mutation)
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
@@ -1285,6 +1290,7 @@ class Plugin extends AppPlugin {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
     const reg = freshRegistry(); this._reg = reg;
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
+    this._settings = loadPlexusSettings();
     window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
@@ -1308,6 +1314,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1372,7 +1379,7 @@ class Plugin extends AppPlugin {
     let rec = null; try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {}
     if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then flip it to a drawing.', dismissible: true }); } catch (_e) {} return null; }
     let existing = null; try { existing = await findSceneLine(rec); } catch (_e) {}
-    await this._openPanelFor(rec.guid, { blank: !existing });
+    await this._openPanelFor(rec.guid, { blank: !existing, inPlace: true });
     return rec.guid;
   }
   // Paste a copied image reference (from a canvas "Cite") into a note: an `image` line item carrying a
@@ -1395,9 +1402,32 @@ class Plugin extends AppPlugin {
   async _openPanelFor(recordGuid, opts) {
     if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now(), blank: !!(opts && opts.blank) });
     const here = this.ui.getActivePanel();
+    // UX-2: flip opens IN PLACE — reuse the active panel instead of spawning a side panel.
+    if (opts && opts.inPlace && here) { try { here.navigateToCustomType(PANEL_ID); return here; } catch (_e) {} }
     const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
     if (!panel) { this._pendingQueue.pop(); return null; }
     panel.navigateToCustomType(PANEL_ID); return panel;
+  }
+  // UX-5/UX-6: lightweight settings modal (banner-preview toggle + dark canvas). Persisted to localStorage.
+  _openSettings() {
+    const s = this._settings || (this._settings = loadPlexusSettings());
+    const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
+    const mkToggle = (label, key, hint) => {
+      const row = document.createElement('label'); row.className = 'pxc-settings-row';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!s[key];
+      cb.addEventListener('change', () => { s[key] = cb.checked; savePlexusSettings(s); for (const v of this._views) v.dirty = true; });
+      const span = document.createElement('span'); const b = document.createElement('b'); b.textContent = label; span.appendChild(b);
+      if (hint) { span.appendChild(document.createElement('br')); const sm = document.createElement('small'); sm.textContent = hint; span.appendChild(sm); }
+      row.appendChild(cb); row.appendChild(span); return row;
+    };
+    box.appendChild(mkToggle('Show drawing preview as the record banner', 'bannerPreview', 'Off keeps the note header clean; the preview PNG still saves.'));
+    box.appendChild(mkToggle('Dark canvas background', 'darkMode', 'Paints the canvas dark; your shapes keep their colours.'));
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done';
+    close.addEventListener('click', () => wrap.remove()); box.appendChild(close);
+    wrap.appendChild(box); wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
+    document.body.appendChild(wrap);
   }
   _mountPanel(panel) {
     // Time-windowed pending: consume only a guid queued in the last ~4s, dropping stale entries.
@@ -1789,7 +1819,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-interactive { z-index: 2; touch-action: none; cursor: crosshair; outline: none; }
 .pxc-host .pxc-root .pxc-interactive:focus { outline: none; }
 .pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
-.pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 50%; transform: translateX(-50%); top: 10px; z-index: 5; display: flex; align-items: center; gap: 4px; padding: 5px 7px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 8px; right: 8px; top: 10px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; padding: 5px 7px; width: auto; max-width: calc(100% - 16px); margin: 0 auto; box-sizing: border-box; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
 .pxc-host .pxc-root .pxc-tool { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 16px; padding: 0; }
 .pxc-host .pxc-root .pxc-tool:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; }
@@ -1811,6 +1841,13 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-modal-box { background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 12px; padding: 16px; min-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
 .pxc-host .pxc-root .pxc-modal-label { font-size: 13px; color: var(--color-text-400); margin-bottom: 8px; }
 .pxc-host .pxc-root .pxc-modal-input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 14px; outline: none; }
+.pxc-settings-overlay { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.32); }
+.pxc-settings-box { min-width: 340px; max-width: 440px; padding: 18px 20px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.3); color: var(--color-text-400); font-family: var(--font-family, system-ui, sans-serif); }
+.pxc-settings-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; color: var(--color-text-100); }
+.pxc-settings-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; cursor: pointer; font-size: 13px; line-height: 1.4; }
+.pxc-settings-row input { margin-top: 2px; accent-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-settings-row small { color: var(--color-text-600); }
+.pxc-settings-close { margin-top: 14px; padding: 7px 16px; border: 0; border-radius: 8px; background: var(--button-primary-bg-color, #7c5cff); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .pxc-host .pxc-root.pxc-present .pxc-toolbar, .pxc-host .pxc-root.pxc-present .pxc-props, .pxc-host .pxc-root.pxc-present .pxc-hint, .pxc-host .pxc-root.pxc-present .pxc-search { display: none !important; }
 .pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
