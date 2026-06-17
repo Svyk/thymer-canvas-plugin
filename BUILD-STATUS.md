@@ -29,9 +29,17 @@ network request because the fetch is server-side). FIX: PM card → **Edit GitHu
 GitHub fetch server-side (desktop app), so it won't show in chrome-devtools network — check the **console**
 for the error. (404s for plugin.css are harmless — Plexus has none.)
 
-## DONE + verified live (v0.20.1)
+## DONE + verified live (v0.22.1)
 
-**PHASE 8 (parity polish) + PHASE 9 E1/E2 (elevation wedge) — all verified live 2026-06-16:**
+**PHASE 8 COMPLETE + Phase 9 E1/E2/E11 + Brain v0.1.0 — all verified live 2026-06-16.** Also done since
+the list below: **elbow arrows** (v0.21.0, routedPoints orthogonal routing, elbowTest), **presentation mode**
+(v0.21.0, hides chrome + fits, presentTest), **SVG import** (v0.22.1, importSvg parses the common subset incl.
+our own export, drag-drop .svg, round-trip svgImportTest=3 ok), **E11 property encoding** (v0.22.0, record
+cards read getAllProperties→choiceLabel and color the accent by tagColor). Only the deliberately-LAZY Phase-8
+bloaters (Mermaid/LaTeX/opentype.js) remain out of core by design. **A SECOND PLUGIN, Plexus Brain v0.1.0, is
+live** — radial plex graph (see ~/plexus-brain + project MEMORY).
+
+**Earlier verified-live entries:**
 - **Phase 8 grid + snap (v0.17.0):** `appState.gridModeEnabled` dot grid; create/move/resize snap to
   `gridSize`; `Plexus: Toggle grid`. `gridSnapTest` green.
 - **Phase 8 SVG export (v0.17.0):** `exportSvg()` → clean SVG (all element kinds); `Plexus: Export drawing
