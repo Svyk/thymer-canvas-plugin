@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.50.0';
+const PLEXUS_VERSION = '0.51.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -48,6 +48,12 @@ const COLOR_SCHEMES = {
   Mono: ['#111111', '#444444', '#777777', '#aaaaaa', '#cccccc'],
   Ocean: ['#03045e', '#0077b6', '#00b4d8', '#90e0ef', '#caf0f8'],
 };
+/* P2: heavy libs lazy-loaded from CDN on first use + cached (same pattern Smart Connections uses for
+   transformers.js — keeps plugin.js lean, cold start untouched). */
+const _libCache = {};
+async function loadLib(url) { if (_libCache[url]) return _libCache[url]; _libCache[url] = await import(url); return _libCache[url]; }
+const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs' };
+function shapePolygon(el) { const x = el.x, y = el.y, w = el.width, h = el.height; if (el.type === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]]; if (el.type === 'ellipse') { const pts = []; for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push([x + w / 2 + Math.cos(a) * w / 2, y + h / 2 + Math.sin(a) * h / 2]); } return pts; } return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]; }
 /* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
    stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
 const pxEnc = new TextEncoder(), pxDec = new TextDecoder();
@@ -1266,6 +1272,23 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Reference inserted — double-click to open ' + name + '.', dismissible: true }); } catch (_e) {}
     return el.id;
   }
+  // P2: Boolean ops on shapes (polybool, lazy-loaded). op = 'union' | 'difference' | 'intersect'.
+  async _boolean(op) {
+    const sel = [...this.selected].map((id) => this._byId(id)).filter((e) => e && (e.type === 'rectangle' || e.type === 'ellipse' || e.type === 'diamond'));
+    if (sel.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ shapes (rect/ellipse/diamond).', dismissible: true }); } catch (_e) {} return; }
+    let pb; try { const m = await loadLib(LIB.polybool); pb = m.default || m; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not load the boolean lib.', dismissible: true }); } catch (_e) {} return; }
+    const poly = (el) => ({ regions: [shapePolygon(el)], inverted: false });
+    let acc = poly(sel[0]);
+    try { for (let i = 1; i < sel.length; i++) { const p = poly(sel[i]); acc = op === 'union' ? pb.union(acc, p) : op === 'difference' ? pb.difference(acc, p) : pb.intersect(acc, p); } }
+    catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: boolean failed.', dismissible: true }); } catch (_e) {} return; }
+    const region = acc.regions && acc.regions[0];
+    if (!region || region.length < 3) { try { this.plugin.ui.addToaster({ title: 'Plexus: empty result.', dismissible: true }); } catch (_e) {} return; }
+    const fd = makeFreedraw(region[0][0], region[0][1], { stroke: sel[0].strokeColor, strokeWidth: 2 });
+    fd.points = region.concat([region[0]]); freedrawBBox(fd);
+    for (const e of sel) e.isDeleted = true;
+    this.scene.elements.push(fd); this.selected.clear(); this.selected.add(fd.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Boolean ' + op + ' → 1 shape.', dismissible: true }); } catch (_e) {}
+  }
   _mmAddChild(node) {
     const rootId = node.mmRoot; if (!rootId) return null;
     const child = this._mmMakeNode('New idea', node.x + 200, node.y, rootId, node.id); this.scene.elements.push(child);
@@ -1678,6 +1701,9 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — subtract', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('difference'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — intersect', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('intersect'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
