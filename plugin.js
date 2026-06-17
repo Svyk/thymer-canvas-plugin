@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.53.0';
+const PLEXUS_VERSION = '0.54.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1002,7 +1002,7 @@ class CanvasView {
     this._localDisposers.push(() => { host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
-    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
+    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
     const onPaste = (e) => { if (this.destroyed || this.editingId) return; if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return; const items = (e.clipboardData && e.clipboardData.items) || []; for (const it of items) if (it.kind === 'file' && it.type && it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) { e.preventDefault(); const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addImageFromFile(f, c.x, c.y); } } };
     this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
@@ -1344,6 +1344,30 @@ class CanvasView {
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
     await this._addImageFromFile(file, c.x, c.y);
     try { this.plugin.ui.addToaster({ title: 'LaTeX inserted.', dismissible: true }); } catch (_e) {}
+  }
+  // P2: PDF import (pdf.js, lazy) — render pages to images, stacked on the canvas.
+  async _addPdf(file, wx, wy) {
+    let pdfjs; try { pdfjs = await loadLib(LIB.pdfjs); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: pdf.js failed to load.', dismissible: true }); } catch (_e) {} return; }
+    try { if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs'; } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Plexus: importing PDF…', dismissible: true }); } catch (_e) {}
+    let doc; try { const buf = await file.arrayBuffer(); doc = await pdfjs.getDocument({ data: buf }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
+    const n = Math.min(doc.numPages, 20); let y = wy;
+    for (let p = 1; p <= n; p++) {
+      try {
+        const page = await doc.getPage(p), vp = page.getViewport({ scale: 2 });
+        const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+        await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+        const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+        if (blob) await this._addImageFromFile(new File([blob], 'pdf-' + p + '.png', { type: 'image/png' }), wx, y);
+        y += 520;
+      } catch (_e) {}
+    }
+    try { this.plugin.ui.addToaster({ title: n + ' PDF page(s) imported.', dismissible: true }); } catch (_e) {}
+  }
+  _importPdfPicker() {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+    inp.addEventListener('change', () => { const f = inp.files && inp.files[0]; if (f) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addPdf(f, c.x, c.y); } });
+    inp.click();
   }
   _mmAddChild(node) {
     const rootId = node.mmRoot; if (!rootId) return null;
@@ -1767,6 +1791,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — intersect', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('intersect'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert Mermaid diagram', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._insertMermaid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert LaTeX equation', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._insertLatex(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF (pages → images)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPicker(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
