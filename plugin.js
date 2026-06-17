@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.56.0';
+const PLEXUS_VERSION = '0.57.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -581,6 +581,9 @@ async function saveScene(plugin, rec, scene, camera, view) {
   }
   // Best-effort metadata (Plexus Drawings + any collection with these props; silently skipped elsewhere).
   try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
+  // P0.7: mirror visual text into a `Canvas Text` PROPERTY (not the body — no clutter) so Thymer native search
+  // + omni-search find text written on the canvas. Only when the collection has the property.
+  try { const ct = rec.prop('Canvas Text'); if (ct && typeof ct.set === 'function') { const txt = scene.elements.filter((e) => !e.isDeleted && e.type === 'text' && e.text).map((e) => String(e.text).trim()).filter(Boolean).join(' • ').slice(0, 4000); ct.set(txt); } } catch (_e) {}
   // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record). UX-5: gated by setting.
   try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {} // UX-5: clear the banner when the preview is disabled
   return { ok, mode, blobGuid: blob.guid };
