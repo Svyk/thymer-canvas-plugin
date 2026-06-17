@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.19.0';
+const PLEXUS_VERSION = '0.20.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -238,6 +238,14 @@ function makeRecordCard(x, y, w, h, recordGuid) {
 function lineTextOf(li) {
   try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
 }
+// Phase 9 E2: a LIVE query node — runs a searchByQuery and lists matching records, re-runs on changes.
+function makeQueryNode(x, y, w, h, query) {
+  return {
+    id: newId(), type: 'query', x, y, width: w, height: h, angle: 0, query: query || '@task',
+    strokeColor: '#0ea5e9', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
@@ -288,7 +296,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -621,7 +629,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image')) {
+        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -720,6 +728,7 @@ class CanvasView {
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
       if (hit && hit.type === 'text') { this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
       else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
+      else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (!hit) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
@@ -860,6 +869,66 @@ class CanvasView {
     if (!panel) return;
     try { panel.navigateTo({ type: 'edit_panel', rootId: guid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] openRecord', e); }
   }
+  // Phase 9 E2: query-node cache + render. Runs searchByQuery; the plugin invalidates on record events.
+  _queryFor(q) {
+    if (!this._queryCache) this._queryCache = new Map();
+    const c = this._queryCache.get(q);
+    if (c) return c.ready ? c : null;
+    const entry = { ready: false, items: [], count: 0 }; this._queryCache.set(q, entry);
+    (async () => {
+      try {
+        const res = await this.plugin.data.searchByQuery(q, 30);
+        const recs = (res && res.records) || [];
+        entry.items = recs.slice(0, 30).map((r) => ({ guid: r.guid, title: (r.getName && r.getName()) || 'Untitled' }));
+        entry.count = recs.length; entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.title = '(query error)'; entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateQueries() { if (this._queryCache && this._queryCache.size) { this._queryCache.clear(); this.dirty = true; } }
+  _drawQueryNode(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill(); ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#0ea5e9'; ctx.stroke();
+    ctx.save(); ctx.clip();
+    const pad = 10, tx = x + pad, maxW = w - pad * 2; let ty = y + pad; ctx.textBaseline = 'top';
+    const res = this._queryFor(el.query);
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = el.strokeColor || '#0ea5e9';
+    ctx.fillText(this._clipText(ctx, '⌕ ' + el.query + (res ? '  (' + res.count + ')' : ''), maxW), tx, ty); ty += 20;
+    if (!res) { ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Searching…', tx, ty); ctx.restore(); ctx.restore(); return; }
+    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#3c4043';
+    if (!res.items.length) { ctx.fillStyle = '#9aa0a6'; ctx.fillText('No matches', tx, ty); }
+    for (const it of res.items) { if (ty > y + h - 14) break; ctx.fillText(this._clipText(ctx, '• ' + it.title, maxW), tx, ty); ty += 16; }
+    ctx.restore(); ctx.restore();
+  }
+  _insertQueryNode(query, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeQueryNode(this._snap(wx - 140), this._snap(wy - 100), 280, 200, query);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
+  _promptText(label, def) {
+    return new Promise((resolve) => {
+      const ov = document.createElement('div'); ov.className = 'pxc-modal';
+      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { e.stopPropagation(); done(null); } });
+      const box = document.createElement('div'); box.className = 'pxc-modal-box';
+      box.addEventListener('pointerdown', (e) => e.stopPropagation());
+      const lab = document.createElement('div'); lab.className = 'pxc-modal-label'; lab.textContent = label;
+      const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'pxc-modal-input'; inp.value = def || '';
+      const row = document.createElement('div'); row.className = 'pxc-modal-row';
+      const ok = document.createElement('button'); ok.className = 'pxc-prop-btn'; ok.textContent = 'OK';
+      const cancel = document.createElement('button'); cancel.className = 'pxc-prop-btn'; cancel.textContent = 'Cancel';
+      const done = (val) => { try { ov.remove(); } catch (_e) {} resolve(val); };
+      ok.addEventListener('click', () => done(inp.value.trim() || null));
+      cancel.addEventListener('click', () => done(null));
+      inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') done(inp.value.trim() || null); if (e.key === 'Escape') done(null); });
+      row.appendChild(ok); row.appendChild(cancel); box.appendChild(lab); box.appendChild(inp); box.appendChild(row); ov.appendChild(box);
+      this.wrap.appendChild(ov); setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    });
+  }
   // Topmost image element whose box overlaps the given world rect (for the crop marquee).
   _topImageIn(rect) {
     for (let i = this.scene.elements.length - 1; i >= 0; i--) {
@@ -957,7 +1026,7 @@ class CanvasView {
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else drawElement(sctx, el); }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -973,7 +1042,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image')) {
+    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image' || single.type === 'query')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -1014,12 +1083,13 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-cards', onSelected: () => this._cmdInsertCard() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; if (!g) return; for (const v of this._views) v._invalidateRec(g); };
+    const onRecChange = (e) => { const g = e && e.recordGuid; for (const v of this._views) { if (g) v._invalidateRec(g); v._invalidateQueries(); } };
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     let raf = 0;
     const tick = () => {
@@ -1312,6 +1382,16 @@ class Plugin extends AppPlugin {
         let rec2 = null; for (let i = 0; i < 40; i++) { await sleep(150); rec2 = v._recCache && v._recCache.get(guid); if (rec2 && rec2.ready) break; }
         return { cardId: el ? el.id : null, type: el ? el.type : null, title: rec ? rec.title : null, lineCount: rec ? rec.lines.length : -1, ready: !!(rec && rec.ready), invalidatedThenReloaded: !!(rec2 && rec2.ready), reloadedTitle: rec2 ? rec2.title : null };
       },
+      // Phase 9 E2 query node: insert a node for '@task', confirm searchByQuery returns records,
+      // then invalidate (record-event simulation) and confirm it re-runs.
+      queryNodeTest: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = v._insertQueryNode('@task', 100, 100);
+        let res = null; for (let i = 0; i < 40; i++) { await sleep(150); res = v._queryCache && v._queryCache.get('@task'); if (res && res.ready) break; }
+        v._invalidateQueries();
+        let res2 = null; for (let i = 0; i < 40; i++) { await sleep(150); res2 = v._queryCache && v._queryCache.get('@task'); if (res2 && res2.ready) break; }
+        return { nodeId: el ? el.id : null, type: el ? el.type : null, count: res ? res.count : -1, items: res ? res.items.length : -1, ready: !!(res && res.ready), liveReran: !!(res2 && res2.ready) };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
@@ -1355,6 +1435,11 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-search { position: absolute; right: 12px; top: 12px; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
 .pxc-host .pxc-root .pxc-search-input { width: 150px; border: 0; outline: none; background: transparent; color: var(--color-text-400); font-size: 13px; }
 .pxc-host .pxc-root .pxc-search-count { font-size: 11px; color: var(--color-text-600); min-width: 28px; text-align: right; }
+.pxc-host .pxc-root .pxc-modal { position: absolute; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.28); }
+.pxc-host .pxc-root .pxc-modal-box { background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 12px; padding: 16px; min-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+.pxc-host .pxc-root .pxc-modal-label { font-size: 13px; color: var(--color-text-400); margin-bottom: 8px; }
+.pxc-host .pxc-root .pxc-modal-input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 14px; outline: none; }
+.pxc-host .pxc-root .pxc-modal-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
