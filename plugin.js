@@ -10,8 +10,9 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.25.0';
+const PLEXUS_VERSION = '0.26.0';
 const PANEL_ID = 'plexus-canvas';
+const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
@@ -1218,6 +1219,7 @@ class Plugin extends AppPlugin {
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
+    this.ui.registerCustomPanelType(GALLERY_PANEL_ID, (panel) => this._mountGallery(panel));
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
@@ -1232,6 +1234,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1309,6 +1312,32 @@ class Plugin extends AppPlugin {
     while (this._pendingQueue.length) { const e = this._pendingQueue.shift(); if (Date.now() - e.at < 4000) { recordGuid = e.guid; blank = !!e.blank; break; } }
     if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”, or “Plexus: Flip to drawing” on a note</small></div>'; host.appendChild(r); return; }
     const view = new CanvasView(this, panel, recordGuid, { blank }); this._views.add(view); view.mount();
+  }
+  // Phase 9 E13: gallery — a grid of all drawings' banner thumbnails, click to open.
+  async _openGallery() {
+    const here = this.ui.getActivePanel();
+    const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
+    if (panel) panel.navigateToCustomType(GALLERY_PANEL_ID);
+    return panel;
+  }
+  async _mountGallery(panel) {
+    try { panel.setTitle('Plexus Gallery'); } catch (_e) {}
+    const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host');
+    const root = document.createElement('div'); root.className = 'pxc-gallery'; host.appendChild(root);
+    const col = await this._drawingsCollection();
+    let recs = []; try { recs = (col && (await col.getAllRecords())) || []; } catch (_e) {}
+    if (!recs.length) { root.innerHTML = '<div class="pxc-empty">No drawings yet<br><small>run “Plexus: New Drawing”</small></div>'; return { cards: 0 }; }
+    let n = 0;
+    for (const rec of recs.slice(0, 60)) {
+      const guid = rec.guid; const card = document.createElement('div'); card.className = 'pxc-gcard';
+      const thumb = document.createElement('div'); thumb.className = 'pxc-gthumb';
+      const cap = document.createElement('div'); cap.className = 'pxc-gcap'; cap.textContent = (rec.getName && rec.getName()) || 'Untitled drawing';
+      card.appendChild(thumb); card.appendChild(cap); card.addEventListener('click', () => this._openPanelFor(guid)); root.appendChild(card); n++;
+      (async () => {
+        try { const fv = rec.getBanner && rec.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); thumb.style.backgroundImage = 'url(' + url + ')'; return; } } } thumb.classList.add('pxc-gempty'); } catch (_e) { thumb.classList.add('pxc-gempty'); }
+      })();
+    }
+    return { cards: n };
   }
   _installTestHooks() {
     window.__plexusCanvas.test = {
@@ -1593,6 +1622,18 @@ class Plugin extends AppPlugin {
         const n = await v._linkSelectedCards();
         return { src: g1, tgt: g2, linked: n, ok: n === 1 };
       },
+      // Phase 9 E13 gallery: create a drawing with a banner, confirm getAllRecords + banner fetch (gallery data path).
+      galleryTest: async () => {
+        const col = await this._drawingsCollection(); if (!col) return { error: 'no col' };
+        let g = null; try { g = col.createRecord('Gallery test'); } catch (e) { return { error: 'create ' + e }; }
+        if (typeof g !== 'string') return { error: 'guid' };
+        const rec = await getRecordPoll(this, g); if (!rec) return { error: 'no rec' };
+        const scene = newScene(); scene.elements.push(makeRect(10, 10, 80, 60, { stroke: '#10b981', fill: FILLS['#10b981'] }));
+        await saveScene(this, rec, scene, new Camera(), { _sceneLine: null }); await sleep(900);
+        const recs = (await col.getAllRecords()) || []; let bannerOk = false;
+        for (const r of recs) { if (r.guid === g) { try { const fv = r.getBanner && r.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) bannerOk = true; } } catch (_e) {} } }
+        return { drawings: recs.length, testGuid: g, bannerFetchOk: bannerOk, ok: recs.length >= 1 && bannerOk };
+      },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
@@ -1649,4 +1690,10 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
 .pxc-host .pxc-empty { min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center; text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
 .pxc-host .pxc-empty small { opacity: .7; }
+.pxc-host .pxc-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; padding: 16px; align-content: start; min-height: calc(100vh - 140px); }
+.pxc-host .pxc-gcard { cursor: pointer; border: 1px solid var(--cards-border-color); border-radius: 10px; overflow: hidden; background: var(--cards-bg); transition: transform .08s, box-shadow .08s; }
+.pxc-host .pxc-gcard:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,.14); }
+.pxc-host .pxc-gthumb { height: 118px; background-color: #f4f4f6; background-position: center; background-size: cover; background-repeat: no-repeat; }
+.pxc-host .pxc-gthumb.pxc-gempty { background-image: repeating-linear-gradient(45deg, #ececf0, #ececf0 8px, #f6f6f9 8px, #f6f6f9 16px); }
+.pxc-host .pxc-gcap { padding: 7px 9px; font-size: 12px; color: var(--color-text-400); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 `;
