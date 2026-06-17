@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.38.0';
+const PLEXUS_VERSION = '0.39.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -626,17 +626,27 @@ class CanvasView {
   // Phase 8: elbow-arrow toggle on the selected arrow/line elements.
   _toggleElbow() { let ch = false, on = null; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = !el.elbowed; on = el.elbowed; ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); } return on; }
   // Phase 8: presentation/view mode — hide chrome, fit the scene, read-only until Esc.
-  _fitToScene() {
-    const live = this.scene.elements.filter((e) => !e.isDeleted); if (!live.length) return;
-    const b = sceneBounds(this.scene), pad = 60;
+  _fitToBounds(b, pad) {
+    pad = pad || 60;
     const zw = this.cssW / (b.w + pad * 2), zh = this.cssH / (b.h + pad * 2);
     this.camera.zoom = Math.min(8, Math.max(0.05, Math.min(zw, zh)));
     this.camera.x = b.x + b.w / 2 - (this.cssW / this.camera.zoom) / 2;
     this.camera.y = b.y + b.h / 2 - (this.cssH / this.camera.zoom) / 2;
     this.dirty = true;
   }
-  _enterPresent() { this._present = true; if (this.wrap) this.wrap.classList.add('pxc-present'); this.selected.clear(); this._fitToScene(); }
-  _exitPresent() { this._present = false; if (this.wrap) this.wrap.classList.remove('pxc-present'); this.dirty = true; }
+  _fitToScene() { const live = this.scene.elements.filter((e) => !e.isDeleted); if (!live.length) return; this._fitToBounds(sceneBounds(this.scene), 60); }
+  // P0.5: frames are slides — ordered by name (natural sort), then by position.
+  _slideFrames() {
+    const fr = this.scene.elements.filter((e) => !e.isDeleted && e.type === 'frame');
+    return fr.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true }) || (a.y - b.y) || (a.x - b.x));
+  }
+  _gotoSlide(i) { if (!this._slides || !this._slides.length) return; this._slideIdx = Math.max(0, Math.min(this._slides.length - 1, i)); const f = this._slides[this._slideIdx]; this._fitToBounds({ x: f.x, y: f.y, w: f.width, h: f.height }, 24); }
+  _enterPresent() {
+    this._present = true; if (this.wrap) this.wrap.classList.add('pxc-present'); this.selected.clear();
+    this._slides = this._slideFrames();
+    if (this._slides.length) { this._slideIdx = 0; this._gotoSlide(0); } else this._fitToScene(); // P0.5: frame-path slideshow, else fit whole scene
+  }
+  _exitPresent() { this._present = false; this._slides = null; if (this.wrap) this.wrap.classList.remove('pxc-present'); this.dirty = true; }
   _drawGrid(ctx) {
     if (!this._gridOn()) return;
     const st = this.plugin._settings || {};
@@ -769,6 +779,7 @@ class CanvasView {
     let rsEl = null, rsHandle = null, rs0 = null, rotEl = null, rotCenter = null, rotStart = 0, rotPtr0 = 0;
     const onDown = (e) => {
       host.focus();
+      if (this._present) { if (e.button === 0 && this._slides && this._slides.length) this._gotoSlide((this._slideIdx || 0) + 1); return; } // P0.5: click advances slides
       const stp = this.plugin._settings || {};
       if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 2 && stp.panRightMouse)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; } // S3: right-mouse pan
       if (e.button !== 0) return;
@@ -858,7 +869,14 @@ class CanvasView {
     const onWheel = (e) => { e.preventDefault(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
-      if (this._present) { if (e.key === 'Escape') { e.preventDefault(); this._exitPresent(); } return; } // present mode: read-only except Esc
+      if (this._present) { // present mode: read-only; Esc exits, arrows/space step through frame-slides (P0.5)
+        if (e.key === 'Escape') { e.preventDefault(); this._exitPresent(); return; }
+        if (this._slides && this._slides.length) {
+          if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); this._gotoSlide((this._slideIdx || 0) + 1); }
+          else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') { e.preventDefault(); this._gotoSlide((this._slideIdx || 0) - 1); }
+        }
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this.redo(); else this.undo(); return; }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); e.stopPropagation(); this.redo(); return; }
       if (e.metaKey || e.ctrlKey) {
