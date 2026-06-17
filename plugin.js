@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.27.0';
+const PLEXUS_VERSION = '0.27.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1382,6 +1382,17 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      // Phase 10 E9 (view-independent): verify the local embedder loads + ranks similar text higher.
+      embedTest: async () => {
+        try {
+          const a = await this._embed('cat dog pet animal companion');
+          const b = await this._embed('puppy kitten pets furry friend');
+          const c = await this._embed('quarterly budget finance revenue spreadsheet');
+          const cos = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += x[i] * y[i]; return s; };
+          const petSim = cos(a, b), petFinSim = cos(a, c);
+          return { dim: a.length, modelLoaded: !!this._embedderP, petSim: +petSim.toFixed(3), petFinSim: +petFinSim.toFixed(3), ok: petSim > petFinSim };
+        } catch (e) { return { error: String(e) }; }
+      },
       views: () => [...this._views].map((v) => ({ record: v.recordGuid, tool: v.tool, elements: v.scene.elements.filter((e) => !e.isDeleted).length, selected: v.selected.size, zoom: +v.camera.zoom.toFixed(3), w: v.cssW, h: v.cssH, lastSave: v._lastSave || null })),
       addShapes: async () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
