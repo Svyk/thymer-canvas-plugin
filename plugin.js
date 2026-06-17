@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.18.0';
+const PLEXUS_VERSION = '0.19.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -227,6 +227,17 @@ function makeImage(x, y, w, h, fileId, style) {
     cropOf: (style && style.cropOf) || null,  // provenance: element id this region was referenced from
   };
 }
+// Phase 9 E1: a LIVE record card — embeds a Thymer record (title + content), repaints on record change.
+function makeRecordCard(x, y, w, h, recordGuid) {
+  return {
+    id: newId(), type: 'record', x, y, width: w, height: h, angle: 0, recordGuid,
+    strokeColor: '#7c5cff', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+function lineTextOf(li) {
+  try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
+}
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
@@ -277,7 +288,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -610,7 +621,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond')) {
+        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -708,6 +719,7 @@ class CanvasView {
     const onDblClick = (e) => {
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
       if (hit && hit.type === 'text') { this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
+      else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
       else if (!hit) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
@@ -798,6 +810,55 @@ class CanvasView {
     const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
+  }
+  // Phase 9 E1: live-record card cache + render. _recFor fetches title + first line items async;
+  // the plugin invalidates this cache on record.updated / lineitem.* so cards repaint live.
+  _recFor(guid) {
+    if (!this._recCache) this._recCache = new Map();
+    const c = this._recCache.get(guid);
+    if (c) return c.ready ? c : null;
+    const entry = { ready: false, title: '', lines: [] }; this._recCache.set(guid, entry);
+    (async () => {
+      try {
+        const rec = await this.plugin.data.getRecord(guid);
+        if (!rec) { entry.title = '(record not found)'; entry.ready = true; this.dirty = true; return; }
+        entry.title = (rec.getName && rec.getName()) || 'Untitled';
+        try { const items = await rec.getLineItems(); entry.lines = (items || []).map(lineTextOf).filter(Boolean).slice(0, 8); } catch (_e) {}
+        entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateRec(guid) { if (this._recCache && this._recCache.has(guid)) { this._recCache.delete(guid); this.dirty = true; } }
+  _clipText(ctx, s, maxW) { s = String(s == null ? '' : s); if (ctx.measureText(s).width <= maxW) return s; while (s.length && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); return s + '…'; }
+  _drawRecordCard(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
+    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#7c5cff'; ctx.stroke();
+    ctx.save(); ctx.clip(); ctx.fillStyle = el.strokeColor || '#7c5cff'; ctx.fillRect(x, y, 4, h); // accent bar
+    const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
+    ctx.textBaseline = 'top';
+    if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
+    ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
+    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; ctx.fillText(this._clipText(ctx, ln, maxW), tx, ty); ty += 16; }
+    ctx.restore(); ctx.restore();
+  }
+  _insertRecordCard(guid, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeRecordCard(this._snap(wx - 130), this._snap(wy - 80), 260, 160, guid);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  async _openRecord(guid) {
+    const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
+    let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
+    if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
+    if (!panel) return;
+    try { panel.navigateTo({ type: 'edit_panel', rootId: guid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] openRecord', e); }
   }
   // Topmost image element whose box overlaps the given world rect (for the crop marquee).
   _topImageIn(rect) {
@@ -896,7 +957,7 @@ class CanvasView {
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else drawElement(sctx, el); }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -912,7 +973,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond')) {
+    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -952,7 +1013,14 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-cards', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
+    // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
+    this._lastRecordGuid = null;
+    const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
+    try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
+    const onRecChange = (e) => { const g = e && e.recordGuid; if (!g) return; for (const v of this._views) v._invalidateRec(g); };
+    try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     let raf = 0;
     const tick = () => {
       for (const v of this._views) { if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; } if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; } }
@@ -966,6 +1034,12 @@ class Plugin extends AppPlugin {
   _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
+  _cmdInsertCard() {
+    const v = this._activeView();
+    if (!v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
+    if (!this._lastRecordGuid) { try { this.ui.addToaster({ title: 'Plexus: open or click a note first, then insert its live card.', dismissible: true }); } catch (_e) {} return; }
+    v._insertRecordCard(this._lastRecordGuid);
+  }
   async _drawingsCollection() {
     if (this._drawingsCol) return this._drawingsCol;
     const cols = await this.data.getAllCollections();
@@ -1227,6 +1301,16 @@ class Plugin extends AppPlugin {
         mk(0, 'apple pie'); mk(100, 'banana bread'); mk(200, 'apple sauce');
         const m = v._searchScene('apple'); if (m.length) v._focusMatch(m[0]);
         return { matchCount: m.length, ok: m.length === 2, focusedOne: v.selected.size === 1 };
+      },
+      // Phase 9 E1 live-record card: insert a card for `guid`, confirm it fetches title + content,
+      // then invalidate (simulating a record.updated) and confirm it re-fetches (the "live" path).
+      recordCardTest: async (guid) => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const el = v._insertRecordCard(guid, 100, 100);
+        let rec = null; for (let i = 0; i < 40; i++) { await sleep(150); rec = v._recCache && v._recCache.get(guid); if (rec && rec.ready) break; }
+        v._invalidateRec(guid);
+        let rec2 = null; for (let i = 0; i < 40; i++) { await sleep(150); rec2 = v._recCache && v._recCache.get(guid); if (rec2 && rec2.ready) break; }
+        return { cardId: el ? el.id : null, type: el ? el.type : null, title: rec ? rec.title : null, lineCount: rec ? rec.lines.length : -1, ready: !!(rec && rec.ready), invalidatedThenReloaded: !!(rec2 && rec2.ready), reloadedTitle: rec2 ? rec2.title : null };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
