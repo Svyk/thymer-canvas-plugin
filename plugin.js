@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.26.0';
+const PLEXUS_VERSION = '0.27.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1052,6 +1052,33 @@ class CanvasView {
     try { const top = await rec.getLineItems(); await walk(root, top, 1); } catch (_e) {}
     this.selected = new Set(created.map((e) => e.id)); this.dirty = true; this.scheduleSave(); return created.length;
   }
+  // Phase 10 E9: semantic ghost-edges — embed each text/card, draw faint links between similar ones.
+  async _semanticTextOf(el) {
+    if (el.type === 'text') return el.text || '';
+    if (el.type === 'query') return el.query || '';
+    if (el.type === 'record' || el.type === 'board') { try { const r = await this.plugin.data.getRecord(el.recordGuid); return (r && r.getName && r.getName()) || ''; } catch (_e) { return ''; } }
+    return '';
+  }
+  async _computeSemantic() {
+    const els = this.scene.elements.filter((e) => !e.isDeleted && (e.type === 'text' || e.type === 'record' || e.type === 'board' || e.type === 'query'));
+    if (els.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: add 2+ cards / text elements first.', dismissible: true }); } catch (_e) {} return 0; }
+    try { this.plugin.ui.addToaster({ title: 'Plexus: embedding locally… (first run downloads a small model)', dismissible: true }); } catch (_e) {}
+    const vecs = [];
+    for (const el of els) { let v = null; try { v = await this.plugin._embed(await this._semanticTextOf(el)); } catch (_e) {} vecs.push(v); }
+    const cos = (a, b) => { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }; // vectors are normalised -> dot = cosine
+    const edges = [];
+    for (let i = 0; i < els.length; i++) for (let j = i + 1; j < els.length; j++) { const s = cos(vecs[i], vecs[j]); if (s > 0.45) edges.push({ a: els[i].id, b: els[j].id, sim: s }); }
+    this._ghostEdges = edges; this._showGhosts = true; this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: edges.length + ' semantic ghost-edge(s) drawn.', dismissible: true }); } catch (_e) {}
+    return edges.length;
+  }
+  _toggleGhosts() { if (this._ghostEdges && this._ghostEdges.length) { this._showGhosts = !this._showGhosts; this.dirty = true; } else this._computeSemantic(); }
+  _drawGhosts(ctx) {
+    if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
+    const z = this.camera.zoom; ctx.save(); ctx.strokeStyle = '#f59e0b'; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.4 / z; ctx.setLineDash([5 / z, 5 / z]);
+    for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.restore();
+  }
   // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
   _promptText(label, def) {
     return new Promise((resolve) => {
@@ -1170,6 +1197,7 @@ class CanvasView {
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
     for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else drawElement(sctx, el); }
+    this._drawGhosts(sctx);
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -1235,6 +1263,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -1254,6 +1283,17 @@ class Plugin extends AppPlugin {
   _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
+  // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
+  _getEmbedder() {
+    if (this._embedderP) return this._embedderP;
+    this._embedderP = (async () => {
+      const t = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
+      try { t.env.allowLocalModels = false; } catch (_e) {}
+      return await t.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    })();
+    return this._embedderP;
+  }
+  async _embed(text) { const pipe = await this._getEmbedder(); const out = await pipe(String(text || '').slice(0, 400), { pooling: 'mean', normalize: true }); return Array.from(out.data); }
   _cmdInsertCard() {
     const v = this._activeView();
     if (!v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
@@ -1633,6 +1673,16 @@ class Plugin extends AppPlugin {
         const recs = (await col.getAllRecords()) || []; let bannerOk = false;
         for (const r of recs) { if (r.guid === g) { try { const fv = r.getBanner && r.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) bannerOk = true; } } catch (_e) {} } }
         return { drawings: recs.length, testGuid: g, bannerFetchOk: bannerOk, ok: recs.length >= 1 && bannerOk };
+      },
+      // Phase 10 E9 semantic ghost-edges: 2 pet-themed texts + 1 finance text -> the pet pair links, not finance.
+      semanticTest: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        const mk = (y, txt) => { const t = makeText(0, y, { fontSize: 16 }); t.text = txt; measureText(t); v.scene.elements.push(t); return t; };
+        const a = mk(0, 'cat dog pet animal companion'); const b = mk(120, 'puppy kitten pets furry friend'); const c = mk(240, 'quarterly budget finance revenue spreadsheet');
+        const n = await v._computeSemantic(); const edges = v._ghostEdges || [];
+        const pair = (x, y) => edges.find((e) => (e.a === x.id && e.b === y.id) || (e.a === y.id && e.b === x.id));
+        const pet = pair(a, b); const petFin = pair(a, c) || pair(b, c);
+        return { ghostCount: n, modelLoaded: !!v.plugin._embedderP, petLinked: !!pet, petSim: pet ? +pet.sim.toFixed(3) : null, petFinSim: petFin ? +petFin.sim.toFixed(3) : 0, ok: !!pet && (!petFin || pet.sim > petFin.sim) };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {

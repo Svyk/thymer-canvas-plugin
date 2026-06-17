@@ -1,6 +1,6 @@
 {
   "name": "Plexus Canvas",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "type": "global_plugin",
   "icon": "ti-pencil",
   "description": "Native Thymer infinite-canvas whiteboard, built from scratch (no @excalidraw). A drawing is a record: scene JSON in a PluginBlob, note half = line items, preview = banner.",
