@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.42.0';
+const PLEXUS_VERSION = '0.43.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -907,6 +907,11 @@ class CanvasView {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
+      const mmSel = this._singleSel(); // P0.2: Tab/Enter grow the mind map when a node is selected
+      if (mmSel && mmSel.mmRoot && mmSel.type === 'text') {
+        if (e.key === 'Tab') { e.preventDefault(); this._mmAddChild(mmSel); return; }
+        if (e.key === 'Enter') { e.preventDefault(); this._mmAddSibling(mmSel); return; }
+      }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
@@ -1196,6 +1201,32 @@ class CanvasView {
     this.scene.elements.push(card); this.selected.clear(); this.selected.add(card.id); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Captured + placed on the canvas.', dismissible: true }); } catch (_e) {}
     return guid;
+  }
+  // ── P0.2: MindMap Builder ── interactive tree. Tab = add child, Enter = add sibling; auto horizontal layout.
+  _mmMakeNode(text, x, y, rootId, parentId) { const el = makeText(x, y, { stroke: '#1e1e1e', fontSize: 18 }); el.text = text; measureText(el); el.mmRoot = rootId; el.mmParent = parentId || null; return el; }
+  _mmNodes(rootId) { return this.scene.elements.filter((e) => !e.isDeleted && e.mmRoot === rootId && e.type === 'text'); }
+  _newMindMap() {
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const root = this._mmMakeNode('Central idea', this._snap(c.x), this._snap(c.y), null, null); root.mmRoot = root.id;
+    this.scene.elements.push(root); this.selected.clear(); this.selected.add(root.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Mind map: Tab = child, Enter = sibling, double-click to rename.', dismissible: true }); } catch (_e) {}
+    return root.id;
+  }
+  _mmAddChild(node) {
+    const rootId = node.mmRoot; if (!rootId) return null;
+    const child = this._mmMakeNode('New idea', node.x + 200, node.y, rootId, node.id); this.scene.elements.push(child);
+    const edge = makeLinear(node.x, node.y, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); edge.mmRoot = rootId; edge.mmEdge = { from: node.id, to: child.id }; this.scene.elements.push(edge);
+    this._mmLayout(rootId); this.selected.clear(); this.selected.add(child.id); this.dirty = true; this.scheduleSave(); return child;
+  }
+  _mmAddSibling(node) { if (!node.mmParent) return this._mmAddChild(node); const p = this._byId(node.mmParent); return p ? this._mmAddChild(p) : null; }
+  _mmLayout(rootId) {
+    const root = this._byId(rootId); if (!root) return;
+    const nodes = this._mmNodes(rootId), HGAP = 200, VGAP = 64; let leaf = 0; const rowOf = {};
+    const place = (id, depth) => { const n = this._byId(id); if (!n) return 0; n._mmDepth = depth; const kids = nodes.filter((e) => e.mmParent === id); if (!kids.length) { rowOf[id] = leaf++; return rowOf[id]; } const rs = kids.map((k) => place(k.id, depth + 1)); rowOf[id] = (rs[0] + rs[rs.length - 1]) / 2; return rowOf[id]; };
+    place(rootId, 0);
+    const baseX = root.x, baseY = root.y, rootRow = rowOf[rootId] || 0;
+    for (const n of nodes) { n.x = baseX + (n._mmDepth || 0) * HGAP; n.y = baseY + ((rowOf[n.id] || 0) - rootRow) * VGAP; measureText(n); }
+    for (const ed of this.scene.elements) { if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue; const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); if (a && b) { ed.points = [[a.x + a.width + 4, a.y + a.height / 2], [b.x - 4, b.y + b.height / 2]]; linearBBox(ed); } }
   }
   // Phase 10 E5: drag-to-restructure (explicit + safe) — write REAL ref relations between selected cards.
   // The first selected record/board card becomes the source; a ref line item is added to its record for
@@ -1504,6 +1535,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
