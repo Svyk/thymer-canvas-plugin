@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.33.0';
+const PLEXUS_VERSION = '0.34.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -20,6 +20,27 @@ const PLEXUS_SETTINGS_KEY = 'plexus_settings';
 const PLEXUS_SETTINGS_DEFAULTS = { bannerPreview: true, darkMode: false };
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
+/* P0.0: encrypted secret store — PBKDF2-600k → AES-256-GCM (same crypto as Smart Connections). The AI key is
+   stored ENCRYPTED at rest (localStorage), unlocked once per session with a passphrase, wiped on pagehide. */
+const pxEnc = new TextEncoder(), pxDec = new TextDecoder();
+const pxB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const pxUnb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const PLEXUS_SECRET_LS = 'plexus_secret_blob';
+async function pxDeriveKey(passphrase, salt) {
+  const pw = await crypto.subtle.importKey('raw', pxEnc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' }, pw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function pxEncryptSecret(plaintext, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await pxDeriveKey(passphrase, salt);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, pxEnc.encode(plaintext));
+  return { v: 1, salt: pxB64(salt), iv: pxB64(iv), ct: pxB64(ct) };
+}
+async function pxDecryptSecret(blob, passphrase) {
+  const key = await pxDeriveKey(passphrase, pxUnb64(blob.salt));
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: pxUnb64(blob.iv) }, key, pxUnb64(blob.ct)); // throws (GCM tag) on wrong passphrase
+  return pxDec.decode(pt);
+}
 const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -459,19 +480,31 @@ async function saveScene(plugin, rec, scene, camera, view) {
   const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
   const blob = await plugin.data.uploadBlob(file);
   if (!blob) return { ok: false, reason: 'uploadBlob null' };
-  // Reuse the view's cached scene line; else find it; else create it. setBlob REPLACES the file.
-  let line = view && view._sceneLine ? view._sceneLine : null;
-  if (!line) { try { line = await findSceneLine(rec); } catch (_e) {} }
-  // createLineItem can fail on a record created <1s ago (writes lag creation, rule 18) — retry briefly.
-  if (!line) { let err = null; for (let i = 0; i < 5 && !line; i++) { try { line = await rec.createLineItem(null, null, 'file', null, null); } catch (e) { err = e; } if (!line) await sleep(150); } if (!line) return { ok: false, reason: 'createLineItem ' + err }; }
-  if (view) view._sceneLine = line;
-  let ok = false;
-  try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
-  // Best-effort legacy metadata (only Plexus Drawings records have these props; silently skipped elsewhere).
+  let ok = false, mode = 'line';
+  // UX-4: prefer the record's `Scene` FILE PROPERTY (clean — not in the note body). prop() is null when the
+  // collection has no such property, in which case we fall back to a body `file` line item.
+  let sceneProp = null; try { sceneProp = rec.prop('Scene'); } catch (_e) {}
+  if (sceneProp && typeof sceneProp.setFileFromBlob === 'function') {
+    try { sceneProp.setFileFromBlob(blob); mode = 'prop'; ok = true; } catch (_e) { mode = 'line'; }
+    if (mode === 'prop') {
+      // Migrate: if the scene was previously stored as a body line item, remove it so the note stays clean.
+      try { const old = (view && view._sceneLine) || await findSceneLine(rec); if (old) { try { await old.delete(); } catch (_e) {} if (view) view._sceneLine = null; } } catch (_e) {}
+    }
+  }
+  if (mode !== 'prop') {
+    // Fallback: a body `file` line item (collections without a Scene property). setBlob REPLACES the file.
+    let line = view && view._sceneLine ? view._sceneLine : null;
+    if (!line) { try { line = await findSceneLine(rec); } catch (_e) {} }
+    // createLineItem can fail on a record created <1s ago (writes lag creation, rule 18) — retry briefly.
+    if (!line) { let err = null; for (let i = 0; i < 5 && !line; i++) { try { line = await rec.createLineItem(null, null, 'file', null, null); } catch (e) { err = e; } if (!line) await sleep(150); } if (!line) return { ok: false, reason: 'createLineItem ' + err }; }
+    if (view) view._sceneLine = line;
+    try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
+  }
+  // Best-effort metadata (Plexus Drawings + any collection with these props; silently skipped elsewhere).
   try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
   // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record). UX-5: gated by setting.
   try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } } catch (_e) {}
-  return { ok, blobGuid: blob.guid, lineGuid: line.guid };
+  return { ok, mode, blobGuid: blob.guid };
 }
 
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
@@ -1100,12 +1133,34 @@ class CanvasView {
     for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); }
     ctx.setLineDash([]); ctx.restore();
   }
-  // Phase 10 E6: AI diagramming — prompt -> (consent + stored key) -> LLM -> JSON shapes -> elements.
+  // P0.0: fetch the OpenAI key from the ENCRYPTED store (unlock once per session; migrate + delete any legacy
+  // plaintext copy). The key never persists in plaintext and is wiped from memory on pagehide.
+  async _aiKey() {
+    const plug = this.plugin;
+    if (plug._secrets && plug._secrets.openai) return plug._secrets.openai;
+    let blob = null; try { blob = JSON.parse(localStorage.getItem(PLEXUS_SECRET_LS) || 'null'); } catch (_e) {}
+    if (blob && blob.ct) {
+      const pass = await this._promptText('Passphrase to unlock your saved OpenAI key:', '');
+      if (!pass) return null;
+      try { plug._secrets = JSON.parse(await pxDecryptSecret(blob, pass)); return plug._secrets.openai || null; }
+      catch (_e) { try { plug.ui.addToaster({ title: 'Plexus: wrong passphrase.', dismissible: true }); } catch (_e2) {} return null; }
+    }
+    // First use: migrate a legacy PLAINTEXT key if present, else collect a new one — then encrypt it.
+    let key = ''; try { key = localStorage.getItem('plexus_llm_key') || ''; } catch (_e) {}
+    if (!key) key = await this._promptText('OpenAI API key (encrypted at rest; sent only to OpenAI):', '');
+    if (!key) return null; key = key.trim();
+    const pass = await this._promptText('Create a passphrase to encrypt your key (re-entered once per session):', '');
+    if (!pass) return null;
+    try { localStorage.setItem(PLEXUS_SECRET_LS, JSON.stringify(await pxEncryptSecret(JSON.stringify({ openai: key }), pass))); } catch (_e) {}
+    try { localStorage.removeItem('plexus_llm_key'); } catch (_e) {} // delete the legacy PLAINTEXT copy
+    plug._secrets = { openai: key };
+    return key;
+  }
+  // Phase 10 E6: AI diagramming — prompt -> (consent + encrypted key) -> LLM -> JSON shapes -> elements.
   async _aiDiagram() {
     const what = await this._promptText('Describe the diagram to generate:', 'a 3-step data pipeline: ingest → transform → store');
     if (!what) return;
-    let key = ''; try { key = localStorage.getItem('plexus_llm_key') || ''; } catch (_e) {}
-    if (!key) { key = await this._promptText('OpenAI API key (stored locally; sent only to OpenAI):', ''); if (!key) return; try { localStorage.setItem('plexus_llm_key', key); } catch (_e) {} }
+    const key = await this._aiKey(); if (!key) return;
     try { this.plugin.ui.addToaster({ title: 'Plexus: asking the model…', dismissible: true }); } catch (_e) {}
     try {
       const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.2, messages: [{ role: 'system', content: 'Output ONLY a JSON array of canvas shapes, no prose. Each item: {"type":"rectangle|ellipse|diamond|text|arrow","x":<num>,"y":<num>,"w":<num>,"h":<num>,"text":"<label>","color":"#7c5cff"}. Lay nodes left-to-right ~190px apart; connect them with arrow shapes. Origin 0,0.' }, { role: 'user', content: String(what) }] }) });
@@ -1211,16 +1266,12 @@ class CanvasView {
     if (this.destroyed) return;
     let fresh = true;
     if (this.rec) {
-      // Universal existence check: a scene exists iff the record has a SCENE_FILENAME file line item.
-      const line = await findSceneLine(this.rec);
-      if (line) {
-        this._sceneLine = line;
-        const loaded = await loadSceneFromLine(line, 10);
-        if (loaded && loaded.elements) { this.scene = loaded; fresh = false; }
-      } else {
-        // Legacy fallback: a pre-0.14 Drawings record with the scene in a `Scene` file-property.
-        let rev = 0; try { rev = this.rec.prop('Scene Rev').number() || 0; } catch (_e) {}
-        if (rev > 0) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+      // UX-4: prefer the `Scene` FILE PROPERTY (clean storage); fall back to a body `file` line item.
+      let sceneProp = null; try { sceneProp = this.rec.prop('Scene'); } catch (_e) {}
+      if (sceneProp) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+      if (fresh) {
+        const line = await findSceneLine(this.rec);
+        if (line) { this._sceneLine = line; const loaded = await loadSceneFromLine(line, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
       }
     }
     const a = this.scene.appState || {};
@@ -1295,6 +1346,9 @@ class Plugin extends AppPlugin {
     const reg = freshRegistry(); this._reg = reg;
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
     this._settings = loadPlexusSettings();
+    this._secrets = null; // P0.0: decrypted AI key cache (session only)
+    this._onPageHide = () => { this._secrets = null; }; // wipe the decrypted key from memory on unload
+    try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
     window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
@@ -1336,7 +1390,7 @@ class Plugin extends AppPlugin {
     window.addEventListener('scroll', onScroll, { passive: true }); reg.add(() => window.removeEventListener('scroll', onScroll));
     if (TEST_HOOKS) this._installTestHooks();
   }
-  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} }
+  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
   // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
@@ -1471,6 +1525,13 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      // P0.0: verify the encrypted-secret round-trip (right passphrase decrypts; wrong one throws — GCM tag).
+      cryptoTest: async () => {
+        const blob = await pxEncryptSecret(JSON.stringify({ openai: 'sk-test-123' }), 'hunter2');
+        const ok = JSON.parse(await pxDecryptSecret(blob, 'hunter2')).openai === 'sk-test-123';
+        let wrongRejected = false; try { await pxDecryptSecret(blob, 'wrong'); } catch (_e) { wrongRejected = true; }
+        return { hasCiphertext: !!blob.ct, isEncrypted: blob.ct !== 'sk-test-123', roundTrip: ok, wrongPassRejected: wrongRejected, plaintextKeyGone: !localStorage.getItem('plexus_llm_key'), ok: ok && wrongRejected };
+      },
       // Phase 10 E9 (view-independent): verify the local embedder loads + ranks similar text higher.
       embedTest: async () => {
         try {
