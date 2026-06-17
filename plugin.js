@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.39.0';
+const PLEXUS_VERSION = '0.40.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1142,6 +1142,46 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // P1.3: Deconstruct / Pizza Slicer — extract the selection (or a frame's contents) into a new standalone
+  // Plexus drawing, leaving a live board-card link behind. Turns whiteboards into reusable modular "bricks".
+  async _deconstructSelection() {
+    let ids = [...this.selected];
+    for (const fr of ids.map((id) => this._byId(id)).filter((e) => e && e.type === 'frame')) for (const c of this._frameChildren(fr)) ids.push(c.id);
+    ids = [...new Set(ids)];
+    const els = ids.map((id) => this._byId(id)).filter(Boolean);
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select elements (or a frame) to extract.', dismissible: true }); } catch (_e) {} return null; }
+    let minx = Infinity, miny = Infinity; for (const e of els) { minx = Math.min(minx, e.x); miny = Math.min(miny, e.y); }
+    const dx = 40 - minx, dy = 40 - miny;
+    const scene = newScene(true);
+    scene.elements = els.map((e) => { const c = JSON.parse(JSON.stringify(e)); c.id = newId(); c.x = (c.x || 0) + dx; c.y = (c.y || 0) + dy; if (c.points) c.points = c.points.map(([px, py]) => [px + dx, py + dy]); return c; });
+    for (const e of scene.elements) if (e.type === 'image' && e.fileId && this.scene.files && this.scene.files[e.fileId]) scene.files[e.fileId] = this.scene.files[e.fileId];
+    const col = await this.plugin._drawingsCollection(); if (!col) return null;
+    let guid = null; try { guid = col.createRecord('Extracted drawing'); } catch (_e) {}
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the drawing.', dismissible: true }); } catch (_e) {} return null; }
+    const rec = await getRecordPoll(this.plugin, guid);
+    if (rec) await saveScene(this.plugin, rec, scene, new Camera(), { _sceneLine: null });
+    for (const e of els) e.isDeleted = true; // remove the originals from this canvas
+    this._insertBoardCard(guid, minx + 150, miny + 110); // drop a live board-card link where the bricks were
+    try { this.plugin.ui.addToaster({ title: 'Extracted ' + els.length + ' element(s) to a new drawing + linked back.', dismissible: true }); } catch (_e) {}
+    return guid;
+  }
+  // P1.4: Capture Note (visual GTD) — create a new note, drop it as a record card on the canvas, and link it
+  // back to this drawing's record. Capture goes into the Captures (or Notes) collection.
+  async _captureNote() {
+    const title = await this._promptText('Capture a note (becomes a card on the canvas):', '');
+    if (!title) return null;
+    let col = null;
+    try { const cols = await this.plugin.data.getAllCollections(); col = (cols || []).find((c) => /^captures$/i.test(c.getName())) || (cols || []).find((c) => /^notes$/i.test(c.getName())); } catch (_e) {}
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no Captures/Notes collection found.', dismissible: true }); } catch (_e) {} return null; }
+    let guid = null; try { guid = col.createRecord(title); } catch (_e) {}
+    if (typeof guid !== 'string') return null;
+    try { const rec = await getRecordPoll(this.plugin, guid); if (rec && this.recordGuid) await rec.createLineItem(null, null, 'ulist', [{ type: 'text', text: '↗ captured from drawing ' }, { type: 'ref', text: { guid: this.recordGuid } }], null); } catch (_e) {} // link back
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const card = makeRecordCard(this._snap(c.x - 150), this._snap(c.y - 70), 300, 140, guid);
+    this.scene.elements.push(card); this.selected.clear(); this.selected.add(card.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Captured + placed on the canvas.', dismissible: true }); } catch (_e) {}
+    return guid;
+  }
   // Phase 10 E5: drag-to-restructure (explicit + safe) — write REAL ref relations between selected cards.
   // The first selected record/board card becomes the source; a ref line item is added to its record for
   // each other selected card. This is the canvas WRITING real ontology, the Brain graph then shows the edge.
@@ -1439,6 +1479,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract selection to a new drawing (Pizza Slicer)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._deconstructSelection(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Capture note (drop a linked card)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._captureNote(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Outline to canvas (mind-map a note)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); const g = this._lastRecordGuid; if (v && g) v._outlineToCanvas(g); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then map its outline.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Link selected cards (write relations)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._linkSelectedCards(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
