@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.47.0';
+const PLEXUS_VERSION = '0.48.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1423,6 +1423,24 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
   }
+  // P2: CSV → bar chart. Paste/enter `label,value` rows; generates editable bars + labels.
+  async _chartFromCsv() {
+    const csv = await this._promptText('Paste CSV (label,value per line):', 'Q1,40\nQ2,65\nQ3,30\nQ4,80');
+    if (!csv) return;
+    const rows = csv.split(/\n/).map((l) => l.split(',')).map((c) => [String(c[0] || '').trim(), parseFloat(c[1])]).filter((r) => r[0] && !isNaN(r[1]));
+    if (!rows.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no label,value rows found.', dismissible: true }); } catch (_e) {} return; }
+    const max = Math.max(...rows.map((r) => r[1])) || 1, c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const BW = 56, GAP = 18, H = 200, x0 = c.x - (rows.length * (BW + GAP)) / 2, y0 = c.y - H / 2, cols = COLOR_SCHEMES.Plexus, els = [];
+    rows.forEach((r, i) => {
+      const bh = Math.max(2, (r[1] / max) * H), bx = this._snap(x0 + i * (BW + GAP)), by = y0 + (H - bh), col = cols[i % cols.length];
+      const bar = makeRect(bx, by, BW, bh, { type: 'rectangle', stroke: col, fill: tintColor(col), fillStyle: 'solid' }); bar.roughness = 0; els.push(bar);
+      const lbl = makeText(bx, y0 + H + 8, { fontSize: 13, stroke: '#1e1e1e' }); lbl.text = r[0]; measureText(lbl); els.push(lbl);
+      const val = makeText(bx, by - 20, { fontSize: 12, stroke: col }); val.text = String(r[1]); measureText(val); els.push(val);
+    });
+    this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Chart: ' + rows.length + ' bars.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 10 E14: re-date a record card's record in place (the in-plugin core of Day-View binding).
   async _scheduleCard() {
     const el = this._singleSel(); if (!el || (el.type !== 'record' && el.type !== 'board')) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a record/board card to schedule.', dismissible: true }); } catch (_e) {} return; }
@@ -1643,6 +1661,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
