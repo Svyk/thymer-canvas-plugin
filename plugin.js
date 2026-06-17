@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.22.1';
+const PLEXUS_VERSION = '0.23.0';
 const PANEL_ID = 'plexus-canvas';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
@@ -255,6 +255,14 @@ function makeQueryNode(x, y, w, h, query) {
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+// Phase 9 E10: a board card — embeds ANOTHER drawing's live preview (its scene banner PNG).
+function makeBoardCard(x, y, w, h, recordGuid) {
+  return {
+    id: newId(), type: 'board', x, y, width: w, height: h, angle: 0, recordGuid,
+    strokeColor: '#10b981', backgroundColor: '#0f1117', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
@@ -305,7 +313,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -683,7 +691,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query')) {
+        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -784,6 +792,7 @@ class CanvasView {
       if (hit && hit.type === 'text') { this.selected.clear(); this.selected.add(hit.id); this._editText(hit); }
       else if (hit && hit.type === 'record') { this._openRecord(hit.recordGuid); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
+      else if (hit && hit.type === 'board') { this.plugin._openPanelFor(hit.recordGuid); }
       else if (!hit) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
@@ -967,6 +976,49 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // Phase 9 E10: board-card cache — fetches another drawing record's banner PNG (its live scene preview).
+  _boardFor(guid) {
+    if (!this._boardCache) this._boardCache = new Map();
+    const c = this._boardCache.get(guid); if (c) return c.ready ? c : null;
+    const entry = { ready: false, img: null, title: '' }; this._boardCache.set(guid, entry);
+    (async () => {
+      try {
+        const rec = await this.plugin.data.getRecord(guid); if (!rec) { entry.title = '(not found)'; entry.ready = true; this.dirty = true; return; }
+        entry.title = (rec.getName && rec.getName()) || 'Drawing';
+        let fv = null; try { fv = rec.getBanner && rec.getBanner(); } catch (_e) {}
+        if (fv) {
+          const blob = await this.plugin.data.getBlobFromPropertyFileValue(fv);
+          if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); const im = new Image(); im.onload = () => { entry.img = im; entry.ready = true; this.dirty = true; }; im.onerror = () => { entry.ready = true; this.dirty = true; }; im.src = url; return; } }
+        }
+        entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateBoard(guid) { if (this._boardCache && this._boardCache.has(guid)) { this._boardCache.delete(guid); this.dirty = true; } }
+  _drawBoardCard(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#0f1117'; ctx.fill(); ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#10b981'; ctx.stroke();
+    ctx.save(); ctx.clip();
+    const b = this._boardFor(el.recordGuid); const head = 22;
+    if (b && b.img) { // cover-fit the preview below the title bar
+      try { const aw = w, ah = h - head, ir = b.img.width / b.img.height, br = aw / ah; let dw, dh; if (ir > br) { dh = ah; dw = ah * ir; } else { dw = aw; dh = aw / ir; } ctx.drawImage(b.img, x + (aw - dw) / 2, y + head + (ah - dh) / 2, dw, dh); } catch (_e) {}
+    } else { ctx.fillStyle = '#6b7280'; ctx.font = '12px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.fillText(b ? '(no preview yet)' : 'Loading…', x + 10, y + h / 2); }
+    // title bar
+    ctx.fillStyle = 'rgba(16,185,129,0.16)'; ctx.fillRect(x, y, w, head);
+    ctx.fillStyle = '#d1fae5'; ctx.font = '600 12px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+    ctx.fillText('▦ ' + this._clipText(ctx, (b && b.title) || 'Drawing', w - 18), x + 8, y + head / 2);
+    ctx.restore(); ctx.restore();
+  }
+  _insertBoardCard(guid, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeBoardCard(this._snap(wx - 150), this._snap(wy - 110), 300, 220, guid);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
   // Reusable in-panel text prompt (window.prompt is dead on desktop, rule 49). Resolves to string|null.
   _promptText(label, def) {
     return new Promise((resolve) => {
@@ -1084,7 +1136,7 @@ class CanvasView {
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId) continue; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else drawElement(sctx, el); }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -1100,7 +1152,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image' || single.type === 'query')) {
+    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -1142,6 +1194,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
@@ -1149,7 +1202,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; for (const v of this._views) { if (g) v._invalidateRec(g); v._invalidateQueries(); } };
+    const onRecChange = (e) => { const g = e && e.recordGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); } v._invalidateQueries(); } };
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     let raf = 0;
     const tick = () => {
@@ -1475,6 +1528,15 @@ class Plugin extends AppPlugin {
         const t = makeText(0, 120, { fontSize: 20 }); t.text = 'hello'; measureText(t); tmp.elements.push(t);
         const svg = exportSvg(tmp); const imp = importSvg(svg, 0, 0);
         return { exportedLen: svg.length, importedCount: imp.length, types: imp.map((e) => e.type), ok: imp.length === 3 };
+      },
+      // Phase 9 E10 board card: a drawing's banner PNG is fetched + embedded; verify title + image load.
+      boardCardTest: async () => {
+        const v = [...this._views].pop(); if (!v) return { error: 'no view' };
+        v.scene.elements.push(makeRect(300, 300, 120, 80, { stroke: '#10b981', fill: FILLS['#10b981'] }));
+        v.dirty = true; await v.saveNow(); await sleep(1200); // saveScene sets the record banner
+        const el = v._insertBoardCard(v.recordGuid, 700, 300);
+        let b = null; for (let i = 0; i < 50; i++) { await sleep(150); b = v._boardCache && v._boardCache.get(v.recordGuid); if (b && b.ready) break; }
+        return { cardId: el ? el.id : null, type: el ? el.type : null, ready: !!(b && b.ready), title: b ? b.title : null, hasImg: !!(b && b.img) };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
