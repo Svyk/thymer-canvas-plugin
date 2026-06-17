@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.34.0';
+const PLEXUS_VERSION = '0.35.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -503,7 +503,7 @@ async function saveScene(plugin, rec, scene, camera, view) {
   // Best-effort metadata (Plexus Drawings + any collection with these props; silently skipped elsewhere).
   try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
   // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record). UX-5: gated by setting.
-  try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } } catch (_e) {}
+  try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {} // UX-5: clear the banner when the preview is disabled
   return { ok, mode, blobGuid: blob.guid };
 }
 
@@ -1291,10 +1291,12 @@ class CanvasView {
   render() {
     if (this.destroyed || !this.staticCv) return;
     this._syncPropPanel();
+    const dark = !!(this.plugin._settings && this.plugin._settings.darkMode); // UX-6: dark mode (canvas + chrome)
+    if (this.wrap) this.wrap.classList.toggle('pxc-dark', dark);
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
     sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.fillStyle = (this.plugin._settings && this.plugin._settings.darkMode) ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); // UX-6 dark mode override (no scene mutation)
+    sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); // UX-6 dark mode override (no scene mutation)
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
     sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     this._drawGrid(sctx);
@@ -1476,7 +1478,7 @@ class Plugin extends AppPlugin {
     const mkToggle = (label, key, hint) => {
       const row = document.createElement('label'); row.className = 'pxc-settings-row';
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!s[key];
-      cb.addEventListener('change', () => { s[key] = cb.checked; savePlexusSettings(s); for (const v of this._views) v.dirty = true; });
+      cb.addEventListener('change', () => { s[key] = cb.checked; savePlexusSettings(s); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } } });
       const span = document.createElement('span'); const b = document.createElement('b'); b.textContent = label; span.appendChild(b);
       if (hint) { span.appendChild(document.createElement('br')); const sm = document.createElement('small'); sm.textContent = hint; span.appendChild(sm); }
       row.appendChild(cb); row.appendChild(span); return row;
@@ -1927,6 +1929,12 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
+/* UX-6: dark-mode chrome — toolbar/props/search go dark to match the dark canvas (theme tokens would stay light). */
+.pxc-host .pxc-root.pxc-dark .pxc-toolbar, .pxc-host .pxc-root.pxc-dark .pxc-props, .pxc-host .pxc-root.pxc-dark .pxc-search { background: #1c1f26; border-color: #2e323b; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+.pxc-host .pxc-root.pxc-dark .pxc-tool, .pxc-host .pxc-root.pxc-dark .pxc-prop-btn, .pxc-host .pxc-root.pxc-dark .pxc-search-input, .pxc-host .pxc-root.pxc-dark .pxc-flipnote { color: #e6e7ea; }
+.pxc-host .pxc-root.pxc-dark .pxc-tool:hover, .pxc-host .pxc-root.pxc-dark .pxc-prop-btn:hover, .pxc-host .pxc-root.pxc-dark .pxc-flipnote:hover { background: #2a2e38; }
+.pxc-host .pxc-root.pxc-dark .pxc-sep, .pxc-host .pxc-root.pxc-dark .pxc-prop-sep { background: #2e323b; }
+.pxc-host .pxc-root.pxc-dark .pxc-prop-label, .pxc-host .pxc-root.pxc-dark .pxc-search-count, .pxc-host .pxc-root.pxc-dark .pxc-hint { color: #9aa0a6; }
 .pxc-host .pxc-empty { min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center; text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
 .pxc-host .pxc-empty small { opacity: .7; }
 .pxc-host .pxc-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; padding: 16px; align-content: start; min-height: calc(100vh - 140px); }
