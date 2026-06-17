@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.32.0';
+const PLEXUS_VERSION = '0.33.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1820,7 +1820,7 @@ const BASE_CSS = `
 /* UX-1: Thymer sets an INLINE empty-message box on the custom-panel host (padding:20px; margin-top:20px;
    display:flex; align-items:center; min-height:100%) — only !important beats an inline style. Neutralize it so
    the canvas fills the panel flush and the toolbar never drifts on scroll. */
-.pxc-host { position: relative; display: block !important; padding: 0 !important; margin: 0 !important; min-height: 0 !important; }
+.pxc-host { position: relative; display: block !important; padding: 40px 0 0 0 !important; margin: 0 !important; min-height: 0 !important; }
 /* Full-bleed: neutralize Thymer's reading-width wrapper so the canvas fills the WHOLE panel (rule 2; self-cleaning
    via :has — reverts to reading width for normal records when no canvas is mounted). */
 .layout-margin:has(.pxc-host) { margin-left: 0 !important; margin-right: 0 !important; width: auto !important; max-width: none !important; }
