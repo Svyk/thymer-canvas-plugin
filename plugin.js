@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.89.0';
+const PLEXUS_VERSION = '0.89.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1304,7 +1304,13 @@ class CanvasView {
     // an <img> copied from a web page (text/html), a remote image URL, or plain text → a text element.
     const onPaste = (e) => {
       if (this.destroyed || this.editingId) return;
-      if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return;
+      // A <canvas> isn't focusable, so the old activeElement check silently blocked every paste.
+      // Handle the paste ONLY when THIS view's panel is the active one (strict — no _activeView() pop()
+      // fallback, which would let a background canvas hijack a paste meant for a note).
+      const ae = document.activeElement;
+      let activePanel = null; try { activePanel = this.plugin.ui.getActivePanel(); } catch (_e) {}
+      const mine = (activePanel && this.panel === activePanel) || ae === host || ae === this.iCv || (this.wrap && this.wrap.contains(ae));
+      if (!mine) return;
       const dt = e.clipboardData; if (!dt) return;
       const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
       const items = [...(dt.items || [])];
@@ -2781,6 +2787,9 @@ class Plugin extends AppPlugin {
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
     const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1: refresh task nodes on external edits
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
+    // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
+    const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
+    try { this.events.on('lineitem.deleted', onLineDeleted); } catch (_e) {}
     let raf = 0;
     const tick = () => {
       for (const v of this._views) { if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; } if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; } }
