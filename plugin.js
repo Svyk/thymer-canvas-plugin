@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.74.0';
+const PLEXUS_VERSION = '0.75.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1420,6 +1420,29 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
   }
+  // CS-7: frames → Slide records — each frame becomes a typed record in a "Slides" collection with Order + a banner
+  // snapshot of the frame. The deck is then queryable + reorderable. Obsidian frames are just rectangles.
+  async _framesToSlides() {
+    const frames = this.scene.elements.filter((e) => !e.isDeleted && e.type === 'frame');
+    if (!frames.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no frames to export as slides.', dismissible: true }); } catch (_e) {} return; }
+    frames.sort((a, b) => (a.name || '').localeCompare(b.name || '') || a.y - b.y || a.x - b.x);
+    let col = null; try { const cols = await this.plugin.data.getAllCollections(); col = (cols || []).find((c) => c.getName && /^slides$/i.test(c.getName())); } catch (_e) {}
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: create a “Slides” collection first, then re-run.', dismissible: true }); } catch (_e) {} return; }
+    let n = 0;
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i]; const kids = this._frameChildren(f);
+      let blob = null; try { blob = await exportPng({ type: 'excalidraw', appState: this.scene.appState, elements: kids, files: this.scene.files }, 2048, { scale: 2, padding: 12, background: true }); } catch (_e) {}
+      let guid = null; try { guid = col.createRecord(f.name || ('Slide ' + (i + 1))); } catch (e) { console.error('[Plexus] slide', e); }
+      if (typeof guid !== 'string') continue;
+      let rec = null; for (let t = 0; t < 5 && !rec; t++) { try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {} if (!rec) await sleep(150); }
+      if (rec) {
+        if (blob) { try { const b = await this.plugin.data.uploadBlob(new File([blob], 'slide.png', { type: 'image/png' })); if (b && rec.setBannerFromBlob) rec.setBannerFromBlob(b); } catch (_e) {} }
+        try { const op = rec.prop('Order'); if (op && op.set) op.set(i + 1); } catch (_e) {}
+      }
+      n++;
+    }
+    try { this.plugin.ui.addToaster({ title: 'Created ' + n + ' slide record(s) with banners.', dismissible: true }); } catch (_e) {}
+  }
   // CS-4: backlink halo & pull-in — for the selected record card, materialize its graph neighbours (incoming
   // backrefs + outbound refs) as bound record cards in a ring, with arrows. A per-record ExcaliBrain by hand.
   async _pullInNeighbours() {
@@ -2301,6 +2324,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pull in neighbours (backlink halo)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
