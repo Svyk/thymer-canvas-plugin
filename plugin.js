@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.99.0';
+const PLEXUS_VERSION = '1.0.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -3089,12 +3089,28 @@ class CanvasView {
   scheduleSave() {
     this._cacheValid = false; this._gridDirty = true; // content changed → rebuild render cache + spatial index lazily
     // edit save: record an undo step (push the prior committed state, snapshot the new one)
-    if (this._committed !== undefined) { this._undo.push(this._committed); if (this._undo.length > 80) this._undo.shift(); this._redo = []; }
+    if (this._committed !== undefined) { this._undo.push(this._committed); this._trimUndo(); this._redo = []; }
     this._committed = this._snapshot();
     if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
     this._scheduleBannerText(); // O(n) banner+text refresh, debounced off the durable-save path
   }
-  async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res; }
+  // Bound undo RAM by BYTES, not a flat count — 80 full-scene snapshots of a 5 MB scene was ~400 MB. Keep the most
+  // recent steps under a memory cap (always keep ≥1 so a single undo always works). Snapshots stay atomic + correct
+  // (whole-scene strings); we deliberately did NOT adopt a cross-blob op-log (it trades the synced blob's atomic
+  // last-writer-wins for a fast-but-non-atomic write — an unproven latency win; see architecture audit).
+  _trimUndo() {
+    const MAX_BYTES = 48 * 1024 * 1024, MAX_STEPS = 200;
+    let bytes = 0; for (const s of this._undo) bytes += (s ? s.length : 0);
+    while (this._undo.length > 1 && (bytes > MAX_BYTES || this._undo.length > MAX_STEPS)) { bytes -= (this._undo[0] ? this._undo[0].length : 0); this._undo.shift(); }
+  }
+  async saveNow() {
+    if (!this.rec || this.destroyed) return null;
+    // Tombstone GC: compact the deleted-element graveyard when it dominates, so n (every scan/snapshot/save) reflects
+    // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
+    // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
+    try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
+    const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
+  }
   destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
