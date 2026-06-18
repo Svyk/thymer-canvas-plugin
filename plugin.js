@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.82.0';
+const PLEXUS_VERSION = '0.83.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1865,6 +1865,29 @@ class CanvasView {
     inp.addEventListener('change', () => { const f = inp.files && inp.files[0]; if (f) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addPdf(f, c.x, c.y); } });
     inp.click();
   }
+  // CP-PDF (model-B-lite): import a SPECIFIC PDF page as one image element (the PDF++ "crop a page as a node"
+  // core) — the daily-felt half of model B without the heavy live doc-proxy/zoom-rerender infrastructure.
+  _importPdfPagePicker() {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+    inp.addEventListener('change', async () => {
+      const file = inp.files && inp.files[0]; if (!file) return;
+      let pdfjs; try { pdfjs = await loadLib(LIB.pdfjs); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: pdf.js failed to load.', dismissible: true }); } catch (_e) {} return; }
+      try { if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs'; } catch (_e) {}
+      let doc; try { doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
+      const pageStr = await this._promptText('Which page? (1–' + doc.numPages + ')', '1'); if (pageStr == null) return;
+      const p = Math.max(1, Math.min(doc.numPages, parseInt(pageStr, 10) || 1));
+      try {
+        const page = await doc.getPage(p), vp = page.getViewport({ scale: (this.plugin._settings && this.plugin._settings.pdfScale) || 2 });
+        const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+        await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+        const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+        const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+        if (blob) await this._addImageFromFile(new File([blob], 'pdf-p' + p + '.png', { type: 'image/png' }), c.x, c.y);
+        try { this.plugin.ui.addToaster({ title: 'PDF page ' + p + ' imported.', dismissible: true }); } catch (_e) {}
+      } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: page render failed.', dismissible: true }); } catch (_e) {} }
+    });
+    inp.click();
+  }
   _mmAddChild(node) {
     const rootId = node.mmRoot; if (!rootId) return null;
     const child = this._mmMakeNode('New idea', node.x + 200, node.y, rootId, node.id); this.scene.elements.push(child);
@@ -2512,6 +2535,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert Mermaid diagram', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._insertMermaid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert LaTeX equation', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._insertLatex(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF (pages → images)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPicker(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF page (choose one)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPagePicker(); } }); // CP-PDF model-B-lite
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
