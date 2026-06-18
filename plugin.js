@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.94.0';
+const PLEXUS_VERSION = '0.95.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -274,16 +274,41 @@ function roughDiamond(ctx, x, y, w, h, opts, seed) {
   roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
   ctx.restore();
 }
+// Per-point stroke radius from local speed (point spacing): slow strokes go THICK, fast strokes go THIN —
+// the natural-ink look (perfect-freehand-lite). Lightly smoothed so width transitions don't stair-step.
+function freedrawRadii(pts, baseW) {
+  const n = pts.length, rad = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    const d = Math.hypot(b[0] - a[0], b[1] - a[1]) / 2;     // local spacing ≈ pen speed
+    const t = Math.min(1, d / 22);                           // 0 (slow) … 1 (fast)
+    rad[i] = Math.max(0.4, (baseW * (1.25 - 0.85 * t)) / 2); // thick when slow, taper when fast
+  }
+  for (let k = 0; k < 2; k++) { const r2 = rad.slice(); for (let i = 1; i < n - 1; i++) rad[i] = (r2[i - 1] + 2 * r2[i] + r2[i + 1]) / 4; }
+  // taper the very tips for a pen-like entry/exit
+  if (n > 3) { rad[0] *= 0.6; rad[1] *= 0.85; rad[n - 1] *= 0.6; rad[n - 2] *= 0.85; }
+  return rad;
+}
 function drawFreedraw(ctx, el) {
   const pts = el.points; if (!pts || !pts.length) return; // points are ABSOLUTE world coords
   ctx.save();
-  ctx.strokeStyle = el.strokeColor || '#1e1e1e'; ctx.lineWidth = el.strokeWidth || 3;
-  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
-  if (pts.length === 1) { ctx.beginPath(); ctx.arc(pts[0][0], pts[0][1], (el.strokeWidth || 3) / 2, 0, 7); ctx.fillStyle = el.strokeColor; ctx.fill(); ctx.restore(); return; }
-  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length - 1; i++) { const x0 = pts[i][0], y0 = pts[i][1], x1 = pts[i + 1][0], y1 = pts[i + 1][1]; ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2); }
-  const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]);
-  ctx.stroke(); ctx.restore();
+  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  const baseW = el.strokeWidth || 3, n = pts.length;
+  if (n === 1) { ctx.beginPath(); ctx.arc(pts[0][0], pts[0][1], baseW / 2, 0, 7); ctx.fill(); ctx.restore(); return; }
+  const rad = freedrawRadii(pts, baseW);
+  // Build ONE path: a filled trapezoid per segment + a round dot per point (rounded joins/caps), filled once.
+  ctx.beginPath();
+  for (let i = 0; i < n - 1; i++) {
+    const p = pts[i], q = pts[i + 1], rp = rad[i], rq = rad[i + 1];
+    let nx = -(q[1] - p[1]), ny = (q[0] - p[0]); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
+    ctx.moveTo(p[0] + nx * rp, p[1] + ny * rp);
+    ctx.lineTo(q[0] + nx * rq, q[1] + ny * rq);
+    ctx.lineTo(q[0] - nx * rq, q[1] - ny * rq);
+    ctx.lineTo(p[0] - nx * rp, p[1] - ny * rp);
+    ctx.closePath();
+  }
+  for (let i = 0; i < n; i++) { ctx.moveTo(pts[i][0] + rad[i], pts[i][1]); ctx.arc(pts[i][0], pts[i][1], rad[i], 0, 7); }
+  ctx.fill('nonzero'); ctx.restore();
 }
 let PLEXUS_DEFAULT_FONT = 'system-ui, sans-serif'; // S7/P0.6: user-chosen default font (set from settings on load + change)
 function textFont(el) { return (el.fontSize || 24) + 'px ' + ((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT); }
