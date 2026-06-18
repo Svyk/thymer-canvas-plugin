@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.63.0';
+const PLEXUS_VERSION = '0.64.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1987,7 +1987,9 @@ class Plugin extends AppPlugin {
     this._secrets = null; // P0.0: decrypted AI key cache (session only)
     this._onPageHide = () => { this._secrets = null; }; // wipe the decrypted key from memory on unload
     try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
-    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown() };
+    // IO-5/TS-1: cross-plugin seam — Templater (or any plugin) calls window.__plexusCanvas.attachScene(guid)
+    // to flip a freshly-created record into a drawing ("every note born hybrid"). Returns the panel promise.
+    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown(), attachScene: (guid, blank) => this._openPanelFor(guid, { blank: blank !== false }) };
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
