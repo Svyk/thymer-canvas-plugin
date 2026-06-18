@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.85.0';
+const PLEXUS_VERSION = '0.86.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2199,6 +2199,29 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Edited image inserted.', dismissible: true }); } catch (_e) {}
     } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: image edit failed (' + e + ').', dismissible: true }); } catch (_e) {} }
   }
+  // Phase 6: wireframe → working app — AI generates a single self-contained HTML doc and runs it LIVE in a
+  // sandboxed iframe (allow-scripts only; no same-origin). Uses vision when a drawing exists, else a text prompt.
+  async _aiWireframe() {
+    const what = await this._promptText('Describe the app to build (your drawing is sent as the wireframe):', 'a working tip calculator: bill input, tip % slider, live total');
+    if (what == null) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: generating the app…', dismissible: true }); } catch (_e) {}
+    const SYS = 'Output ONLY a single self-contained HTML document (inline CSS + JS, no external resources/CDNs) implementing the requested UI as a working mini-app. No markdown fences, no prose.';
+    let html = null;
+    try {
+      const hasDrawing = this.scene.elements.some((e) => !e.isDeleted);
+      if (hasDrawing) { let blob = null; try { blob = await exportPng(this.scene, 1600, { scale: 1.4, padding: 12, background: true }); } catch (_e) {} if (blob) { const durl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result || '')); fr.onerror = () => r(''); fr.readAsDataURL(blob); }); if (durl) html = await this._aiVision(SYS, 'Build a working web app from this wireframe. ' + String(what), durl); } }
+      if (!html) html = await this._aiComplete(SYS, String(what));
+    } catch (_e) {}
+    if (!html) { try { this.plugin.ui.addToaster({ title: 'Plexus: no code returned (check the AI provider + key).', dismissible: true }); } catch (_e) {} return; }
+    html = String(html).replace(/^```(html)?/i, '').replace(/```$/, '').trim();
+    const ov = document.createElement('div'); ov.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box'; box.style.width = '82vw'; box.style.height = '82vh'; box.style.maxWidth = '1040px';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'AI Wireframe → live app (sandboxed)'; box.appendChild(title);
+    const frame = document.createElement('iframe'); frame.setAttribute('sandbox', 'allow-scripts'); frame.srcdoc = html; frame.style.cssText = 'width:100%;height:calc(100% - 86px);border:1px solid var(--cards-border-color);border-radius:8px;background:#fff'; box.appendChild(frame);
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Close'; close.addEventListener('click', () => ov.remove()); box.appendChild(close);
+    ov.appendChild(box); ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+  }
   // Phase 6: per-session AI token meter — accumulate usage across providers (OpenAI/xAI total_tokens,
   // Anthropic input+output, Gemini usageMetadata) into the plugin so the user can see what a session cost.
   _addAiUsage(data) {
@@ -2556,6 +2579,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI edit selected image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiEditImage(); } }); // Phase 6: image edit
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI wireframe → live app', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiWireframe(); } }); // Phase 6: wireframe→code
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
