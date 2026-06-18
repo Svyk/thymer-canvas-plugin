@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.93.0';
+const PLEXUS_VERSION = '0.94.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1095,11 +1095,16 @@ class CanvasView {
     return null;
   }
   _updateBindings() {
+    // PERF (architecture review 80/20): this runs on EVERY pointermove during a drag and used to call the O(n)
+    // _byId twice per arrow → O(arrows × n) per frame — the only per-frame super-linear cost in the codebase.
+    // Build a local id→element Map ONCE (lazily, only if a bound arrow exists) → O(n + arrows). No global state.
+    let idMap = null;
+    const lookup = (id) => { if (!idMap) { idMap = new Map(); for (const e of this.scene.elements) if (!e.isDeleted) idMap.set(e.id, e); } return idMap.get(id) || null; };
     for (const el of this.scene.elements) {
       if (el.isDeleted || (el.type !== 'arrow' && el.type !== 'line') || !el.points || el.points.length < 2) continue;
       let changed = false;
-      if (el.startBinding) { const s = this._byId(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(s, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; }
-      if (el.endBinding) { const s = this._byId(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(s, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
+      if (el.startBinding) { const s = lookup(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(s, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; }
+      if (el.endBinding) { const s = lookup(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(s, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
       if (changed) linearBBox(el);
     }
   }
@@ -2757,6 +2762,9 @@ class CanvasView {
       // open (saveScene writes the property + deletes the body line). Auto-cleans existing flipped notes.
       if (!fresh && this._sceneLine && sceneProp) { setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 500); }
     }
+    // PERF (architecture review): deletes are soft tombstones (isDeleted), never spliced — so n grows unbounded
+    // over years and EVERY scan pays for the graveyard. Undo history is empty on load, so compact it away here.
+    try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
     const a = this.scene.appState || {};
     this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
     const st = this.plugin._settings || {};
@@ -3235,7 +3243,14 @@ class Plugin extends AppPlugin {
   /* ── Cross-reference index — note line guid → {drawing, el, region, label}. localStorage so it
    *    survives reloads; rebuilt onto each open drawing view as a per-element badge map. ───────── */
   _loadXref() { try { return JSON.parse(localStorage.getItem('plexus_xref') || '{}'); } catch (_e) { return {}; } }
-  _saveXref(x) { try { localStorage.setItem('plexus_xref', JSON.stringify(x)); } catch (_e) {} }
+  _saveXref(x) {
+    try { localStorage.setItem('plexus_xref', JSON.stringify(x)); }
+    catch (_e) {
+      // localStorage ~5 MB quota hit — evict the OLDEST half by timestamp and retry. Safe: the cross-ref is
+      // also encoded in each image's synced blob filename, so evicted entries rebuild on note open.
+      try { const ents = Object.entries(x).sort((a, b) => (a[1] && a[1].t || 0) - (b[1] && b[1].t || 0)); const keep = {}; for (const [k, v] of ents.slice(Math.floor(ents.length / 2))) keep[k] = v; localStorage.setItem('plexus_xref', JSON.stringify(keep)); } catch (_e2) {}
+    }
+  }
   _lookupXref(lineGuid) { const x = this._loadXref(); return x[lineGuid] || null; }
   _registerXref(lineGuid, data) {
     if (!lineGuid || !data || !data.drawing) return;
