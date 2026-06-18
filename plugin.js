@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.64.0';
+const PLEXUS_VERSION = '0.65.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -70,6 +70,17 @@ function loadPlexusOntology() {
   return o;
 }
 function hexToRgba(hex, a) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16); return 'rgba(' + (r || 124) + ',' + (g || 92) + ',' + (b || 255) + ',' + a + ')'; }
+// CS-8: ENUM_COLORS index → hex (per the SDK EnumColors table) + a record skin from its OWN typed properties —
+// Status choice → border colour, Priority → 1.4×/0.9× scale, Due-past → urgency ring. "CSS for the graph", live.
+const ENUM_COLOR_HEX = ['#ef4444', '#f97316', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899', '#d946ef', '#f43f5e', '#78716c', '#14b8a6', '#0ea5e9', '#6366f1', '#71717a', '#eab308'];
+function recordSkin(rec) {
+  const skin = { color: null, scale: 1, urgent: false };
+  if (!rec || !rec.prop) return skin;
+  try { const sp = rec.prop('Status') || rec.prop('State'); if (sp && sp.choice) { const sel = sp.choice(); const opts = (sp.choices && sp.choices()) || []; const opt = (opts || []).find((o) => o && o.id === sel); if (opt && opt.color != null && ENUM_COLOR_HEX[+opt.color]) skin.color = ENUM_COLOR_HEX[+opt.color]; } } catch (_e) {}
+  try { const pp = rec.prop('Priority'); if (pp) { const L = String((pp.choiceLabel && pp.choiceLabel()) || (pp.text && pp.text()) || '').toLowerCase(); if (/high|urgent|critical|\bp0\b|\bp1\b/.test(L)) skin.scale = 1.4; else if (/low|\bp3\b|\bp4\b/.test(L)) skin.scale = 0.9; } } catch (_e) {}
+  try { const dp = rec.prop('Due') || rec.prop('Due Date') || rec.prop('Deadline'); if (dp && dp.date) { const d = dp.date(); if (d && d.getTime() < Date.now()) skin.urgent = true; } } catch (_e) {}
+  return skin;
+}
 // P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
 function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
 const COLOR_SCHEMES = {
@@ -1196,6 +1207,7 @@ class CanvasView {
         if (!rec) { entry.title = '(record not found)'; entry.ready = true; this.dirty = true; return; }
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
+        try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
         try { const items = await rec.getLineItems(); entry.lines = (items || []).map(lineTextOf).filter(Boolean).slice(0, 8); } catch (_e) {}
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
@@ -1208,9 +1220,11 @@ class CanvasView {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    const sk = (this._recCache && this._recCache.get(el.recordGuid) || {}).skin || {}; // CS-8: property-conditional style
+    if (sk.urgent) { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x - 3, y - 3, w + 6, h + 6, rad + 3); else ctx.rect(x - 3, y - 3, w + 6, h + 6); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ef4444'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.8; ctx.stroke(); ctx.restore(); } // Due-past urgency ring
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
-    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#7c5cff'; ctx.stroke();
+    ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = sk.color || el.strokeColor || '#7c5cff'; ctx.stroke();
     ctx.save(); ctx.clip();
     const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
     const _la = (this.plugin._settings && this.plugin._settings.linkOpacity != null ? this.plugin._settings.linkOpacity : 100) / 100, _ga = ctx.globalAlpha; ctx.globalAlpha = _ga * _la; // S10: dim the link/accent stripe only
