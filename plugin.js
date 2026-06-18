@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.66.0';
+const PLEXUS_VERSION = '0.67.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1624,8 +1624,45 @@ class CanvasView {
     };
     place(rootId, 0);
     const baseX = root.x, baseY = root.y, rootRow = rowOf[rootId] || 0;
-    for (const n of nodes) { if (n.mmHidden) continue; n.x = baseX + (n._mmDepth || 0) * HGAP; n.y = baseY + ((rowOf[n.id] || 0) - rootRow) * VGAP; measureText(n); }
-    for (const ed of this.scene.elements) { if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue; const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); ed.mmHidden = !!(a && b && (a.mmHidden || b.mmHidden)); if (a && b && !ed.mmHidden) { ed.points = [[a.x + a.width + 4, a.y + a.height / 2], [b.x - 4, b.y + b.height / 2]]; linearBBox(ed); } }
+    const mode = root.mmLayoutMode || 'right', total = Math.max(1, leaf); // CP-3 v3b: right | down | up | left | radial
+    for (const n of nodes) {
+      if (n.mmHidden || n.mmPinned) continue; // pinned nodes keep their manual position (excluded from auto-layout)
+      const d = n._mmDepth || 0, row = (rowOf[n.id] || 0) - rootRow;
+      if (mode === 'down') { n.x = baseX + row * (HGAP * 0.9); n.y = baseY + d * VGAP; }
+      else if (mode === 'up') { n.x = baseX + row * (HGAP * 0.9); n.y = baseY - d * VGAP; }
+      else if (mode === 'left') { n.x = baseX - d * HGAP; n.y = baseY + row * VGAP; }
+      else if (mode === 'radial') { const ang = ((rowOf[n.id] || 0) / total) * Math.PI * 2 - Math.PI / 2, R = d * 175; n.x = baseX + Math.cos(ang) * R; n.y = baseY + Math.sin(ang) * R; }
+      else { n.x = baseX + d * HGAP; n.y = baseY + row * VGAP; }
+      measureText(n);
+    }
+    for (const ed of this.scene.elements) {
+      if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue;
+      const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); ed.mmHidden = !!(a && b && (a.mmHidden || b.mmHidden));
+      if (a && b && !ed.mmHidden) {
+        let p0, p1;
+        if (mode === 'down') { p0 = [a.x + a.width / 2, a.y + a.height]; p1 = [b.x + b.width / 2, b.y]; }
+        else if (mode === 'up') { p0 = [a.x + a.width / 2, a.y]; p1 = [b.x + b.width / 2, b.y + b.height]; }
+        else if (mode === 'left') { p0 = [a.x - 4, a.y + a.height / 2]; p1 = [b.x + b.width + 4, b.y + b.height / 2]; }
+        else if (mode === 'radial') { p0 = [a.x + a.width / 2, a.y + a.height / 2]; p1 = [b.x + b.width / 2, b.y + b.height / 2]; }
+        else { p0 = [a.x + a.width + 4, a.y + a.height / 2]; p1 = [b.x - 4, b.y + b.height / 2]; }
+        ed.points = [p0, p1]; linearBBox(ed);
+      }
+    }
+  }
+  // CP-3 v3b: cycle the mind-map layout direction (right → down → radial → up → left → right) and re-lay out.
+  _mmCycleLayout(node) {
+    const rootId = node && node.mmRoot; const root = rootId && this._byId(rootId); if (!root) return;
+    const order = ['right', 'down', 'radial', 'up', 'left']; const i = order.indexOf(root.mmLayoutMode || 'right');
+    root.mmLayoutMode = order[(i + 1) % order.length];
+    this._mmLayout(rootId); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Mind-map layout: ' + root.mmLayoutMode, dismissible: true }); } catch (_e) {}
+  }
+  // CP-3 v3b: pin/unpin a node — a pinned node is excluded from auto-layout (keeps its dragged position).
+  _mmTogglePin(node) {
+    if (!node || !node.mmRoot) return;
+    node.mmPinned = !node.mmPinned;
+    this._mmLayout(node.mmRoot); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: node.mmPinned ? 'Node pinned (won’t auto-arrange).' : 'Node unpinned.', dismissible: true }); } catch (_e) {}
   }
   // P0.4/P0.4b: apply a colour to the selection (stroke + tinted fill if the element is filled).
   _applyColorToSelection(color) {
@@ -2075,6 +2112,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
