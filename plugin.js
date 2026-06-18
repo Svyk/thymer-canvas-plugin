@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.1.0';
+const PLEXUS_VERSION = '1.1.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -208,6 +208,17 @@ class SpatialGrid {
     for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) { const a = this.map.get(cx + ':' + cy); if (!a) continue; for (const el of a) if (!seen.has(el)) { seen.add(el); out.push(el); } }
     return out;
   }
+}
+// Axis-aligned bounds of a bbox rotated by `angle` about its centre — a rotated shape's footprint exceeds its
+// un-rotated bbox, and hit-testing un-rotates the click, so the index must bucket the rotated extent or it misses.
+function rotatedAABB(bb, angle) {
+  const cx = bb.x + bb.w / 2, cy = bb.y + bb.h / 2, ca = Math.cos(angle), sa = Math.sin(angle);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [px, py] of [[bb.x, bb.y], [bb.x + bb.w, bb.y], [bb.x + bb.w, bb.y + bb.h], [bb.x, bb.y + bb.h]]) {
+    const dx = px - cx, dy = py - cy, rx = cx + dx * ca - dy * sa, ry = cy + dx * sa + dy * ca;
+    if (rx < x0) x0 = rx; if (ry < y0) y0 = ry; if (rx > x1) x1 = rx; if (ry > y1) y1 = ry;
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 // Even-arclength resample of a polyline [[x,y]…] down to <=maxN points (so a freehand lasso fits the synced filename).
 function resamplePoly(pts, maxN) {
@@ -927,7 +938,8 @@ class CanvasView {
     let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
     for (let i = 0; i < els.length; i++) {
       const el = els[i]; zi.set(el.id, i); if (el.isDeleted) continue;
-      const bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
+      let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
+      if (el.angle) bb = rotatedAABB(bb, el.angle); // index the rotated footprint so rotated shapes stay hittable
       g.insert(el, bb);
       if (bb.x < bx0) bx0 = bb.x; if (bb.y < by0) by0 = bb.y; if (bb.x + bb.w > bx1) bx1 = bb.x + bb.w; if (bb.y + bb.h > by1) by1 = bb.y + bb.h;
     }
@@ -1277,8 +1289,9 @@ class CanvasView {
   }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom, labelH = 18 / this.camera.zoom;
-    // Grid candidates near the point (expanded up by labelH so a frame's title band above its bbox is hittable), top-first.
-    for (const el of this._gridTopFirst(wx - tol, wy - tol - labelH, tol * 2, tol * 2 + labelH)) {
+    // Grid candidates near the point, expanded DOWN by labelH: a frame's title band sits ABOVE its bbox, so when the
+    // click is in the band the frame's cells are BELOW the click → reach down to them (expanding up misses the frame).
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2 + labelH)) {
       if (el.isDeleted || el.mmHidden) continue;
       if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; }
       if (hitElement(el, wx, wy, tol)) return el;
@@ -3800,6 +3813,7 @@ class Plugin extends AppPlugin {
           v.scene.elements.push(makeRect(gx, gy, 40, 30, { type: types[i % 3], stroke: '#7c5cff', fill: 'transparent' }));
           if (i % 7 === 0 && i > 0) { const a = makeLinear(gx, gy, 'arrow', { stroke: '#0ea5e9', strokeWidth: 2 }); a.points[1] = [gx - 30, gy - 30]; linearBBox(a); v.scene.elements.push(a); }
         }
+        v._gridDirty = true; v._cacheValid = false; // seeded elements changed geometry → rebuild index before the timed hit-tests
         const live = v.scene.elements.filter((e) => !e.isDeleted).length, seedMs = performance.now() - t0;
         const time = (fn, reps) => { reps = reps || 1; const s = performance.now(); for (let i = 0; i < reps; i++) fn(); return +((performance.now() - s) / reps).toFixed(3); };
         const byId = time(() => { const els = v.scene.elements; for (let i = 0; i < 200; i++) v._byId(els[(i * 53) % els.length].id); });
@@ -3810,7 +3824,7 @@ class Plugin extends AppPlugin {
         const snap = time(() => v._snapshot(), 3), snapKB = Math.round(v._snapshot().length / 1024);
         return { n: live, seedMs: +seedMs.toFixed(1), byId200Ms: byId, updateBindingsMs: bind, renderMs: render, hitTest50Ms: hit, sceneBoundsMs: bounds, snapshotMs: snap, snapshotKB: snapKB };
       },
-      benchReset: () => { const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' }; const before = v.scene.elements.length; v.scene.elements = []; v.selected.clear(); v._cacheValid = false; v.dirty = true; return { cleared: before }; },
+      benchReset: () => { const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' }; const before = v.scene.elements.length; v.scene.elements = []; v.selected.clear(); v._cacheValid = false; v._gridDirty = true; v.dirty = true; return { cleared: before }; },
       // P1.0: a frame owns the elements whose centre is inside it (move-together unit).
       frameTest: () => {
         const v = this._activeView(); if (!v) return { ok: false, reason: 'no view' };
