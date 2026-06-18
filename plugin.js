@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.73.0';
+const PLEXUS_VERSION = '0.74.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1420,6 +1420,29 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
   }
+  // CS-4: backlink halo & pull-in — for the selected record card, materialize its graph neighbours (incoming
+  // backrefs + outbound refs) as bound record cards in a ring, with arrows. A per-record ExcaliBrain by hand.
+  async _pullInNeighbours() {
+    const card = this._singleSel();
+    if (!card || card.type !== 'record') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single record card.', dismissible: true }); } catch (_e) {} return; }
+    const guid = card.recordGuid; let rec = null; try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
+    if (!rec) return;
+    const nb = new Set();
+    try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid) nb.add(r.guid); } } catch (_e) {}
+    try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid) nb.add(s.text.guid); } catch (_e) {}
+    const have = new Set(this.scene.elements.filter((e) => !e.isDeleted && e.type === 'record').map((e) => e.recordGuid));
+    const add = [...nb].filter((g) => g && g !== guid && !have.has(g)).slice(0, 16);
+    if (!add.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no new neighbours to pull in.', dismissible: true }); } catch (_e) {} return; }
+    const cx = card.x + card.width / 2, cy = card.y + card.height / 2, R = 300, CW = 240, CH = 150;
+    this.selected.clear();
+    add.forEach((g, i) => {
+      const a = (i / add.length) * Math.PI * 2 - Math.PI / 2, nx = this._snap(cx + Math.cos(a) * R - CW / 2), ny = this._snap(cy + Math.sin(a) * R - CH / 2);
+      const el = makeRecordCard(nx, ny, CW, CH, g); this.scene.elements.push(el); this.selected.add(el.id);
+      const ar = makeLinear(cx, cy, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); ar.points = [[cx, cy], [nx + CW / 2, ny + CH / 2]]; ar.startBinding = { elementId: card.id }; ar.endBinding = { elementId: el.id }; linearBBox(ar); this.scene.elements.push(ar);
+    });
+    this._updateBindings(); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Pulled in ' + add.length + ' neighbour(s).', dismissible: true }); } catch (_e) {}
+  }
   // CS-5: collection stencil stamp — CREATE a new typed record in a chosen collection and drop a live card bound
   // to it. Turns the canvas into a record factory ("stamp a Person / Sampling Site"). Obsidian stamps inert shapes.
   async _stampRecord() {
@@ -2277,6 +2300,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Pull in neighbours (backlink halo)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
