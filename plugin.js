@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.70.0';
+const PLEXUS_VERSION = '0.71.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -956,6 +956,32 @@ class CanvasView {
     const r = (n) => Math.round(n); const ang = els.length === 1 && els[0].angle ? '  angle ' + r(els[0].angle * 180 / Math.PI) + '°' : '';
     try { this.plugin.ui.addToaster({ title: els.length + ' selected · x ' + r(minX) + ' y ' + r(minY) + ' · w ' + r(maxX - minX) + ' h ' + r(maxY - minY) + ang, dismissible: true }); } catch (_e) {}
   }
+  // CP-7/C-CF6: set an external URL link on the selected element(s) — double-click opens it (non-text elements).
+  async _setLink() {
+    const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an element first.', dismissible: true }); } catch (_e) {} return; }
+    const cur = els[0].link || '';
+    const url = await this._promptText('External link URL (blank to clear):', cur);
+    if (url == null) return;
+    const u = url.trim();
+    for (const el of els) { if (u) el.link = u; else delete el.link; }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: u ? 'Link set — double-click the element to open it.' : 'Link cleared.', dismissible: true }); } catch (_e) {}
+  }
+  // CP-7/C-CF4: copy the selection (or whole drawing) to the system clipboard as a PNG.
+  async _copyPngToClipboard() {
+    let blob = null;
+    try {
+      const ids = this.selected.size ? [...this.selected] : null;
+      const sub = ids ? { type: 'excalidraw', appState: this.scene.appState, elements: this.scene.elements.filter((e) => ids.includes(e.id) && !e.isDeleted), files: this.scene.files } : this.scene;
+      blob = await exportPng(sub, 4096, { scale: (this.plugin._settings && this.plugin._settings.pngScale) || 2, padding: 24, background: false });
+    } catch (_e) {}
+    if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to copy.', dismissible: true }); } catch (_e) {} return; }
+    try {
+      if (navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); try { this.plugin.ui.addToaster({ title: 'Copied as PNG to the clipboard.', dismissible: true }); } catch (_e) {} }
+      else throw new Error('no clipboard');
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: clipboard image write blocked here — use Export as PNG.', dismissible: true }); } catch (_e) {} }
+  }
   // CP-4: eyedropper — the next click samples the pixel under the cursor from the rendered scene → stroke colour.
   _eyedropper() { this._eyedrop = true; try { this.wrap.style.cursor = 'crosshair'; } catch (_e) {} try { this.plugin.ui.addToaster({ title: 'Eyedropper: click any pixel to sample its colour.', dismissible: true }); } catch (_e) {} }
   _sampleAt(e) {
@@ -1076,7 +1102,7 @@ class CanvasView {
       if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
       if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
-      if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this.dirty = true; return; }
+      if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
@@ -1115,7 +1141,7 @@ class CanvasView {
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; rsEl = null; rotEl = null; this.dirty = true;
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this.dirty = true;
     };
     const onWheel = (e) => { e.preventDefault(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
     const onKey = (e) => {
@@ -1155,6 +1181,7 @@ class CanvasView {
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
+      if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record (S10: honors openInNewPanel)
       else if (hit && hit.type === 'record') { this._openCard(hit); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -2117,6 +2144,13 @@ class CanvasView {
       ictx.strokeRect(r.x, r.y, r.w, r.h); ictx.setLineDash([]);
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
+      const s = this._bindHover;
+      ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 2 / z; ictx.setLineDash([7 / z, 4 / z]);
+      ictx.strokeRect(Math.min(s.x, s.x + s.width) - 3, Math.min(s.y, s.y + s.height) - 3, Math.abs(s.width) + 6, Math.abs(s.height) + 6);
+      ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
     if (this._laser && this._laser.length) { // S6: fading laser trail (transient, not saved)
       const st = this.plugin._settings || {}, now = Date.now(), decay = st.laserDecay || 1400;
       this._laser = this._laser.filter((p) => now - p.t < decay);
@@ -2207,6 +2241,8 @@ class Plugin extends AppPlugin {
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Eyedropper (sample a colour)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._eyedropper(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Set external link on element', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._setLink(); } }); // CP-7/C-CF6
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy as PNG (clipboard)', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._copyPngToClipboard(); } }); // CP-7/C-CF4
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
