@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.72.0';
+const PLEXUS_VERSION = '0.73.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1420,6 +1420,20 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
   }
+  // CS-5: collection stencil stamp — CREATE a new typed record in a chosen collection and drop a live card bound
+  // to it. Turns the canvas into a record factory ("stamp a Person / Sampling Site"). Obsidian stamps inert shapes.
+  async _stampRecord() {
+    const name = await this._promptText('Stamp a new record — collection:', (this.plugin._ontology && this.plugin._ontology.entityCollections && this.plugin._ontology.entityCollections[0]) || 'People');
+    if (!name) return;
+    const title = await this._promptText('Title for the new record:', 'Untitled');
+    if (title == null) return;
+    let col = null; try { const cols = await this.plugin.data.getAllCollections(); col = (cols || []).find((c) => c.getName && c.getName().toLowerCase() === name.trim().toLowerCase()); } catch (_e) {}
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no collection named “' + name + '”.', dismissible: true }); } catch (_e) {} return; }
+    let guid = null; try { guid = col.createRecord(title.trim() || 'Untitled'); } catch (e) { console.error('[Plexus] stamp', e); }
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the record.', dismissible: true }); } catch (_e) {} return; }
+    this.plugin._lastRecordGuid = guid; this._insertRecordCard(guid);
+    try { this.plugin.ui.addToaster({ title: 'Stamped a new ' + name + ' record.', dismissible: true }); } catch (_e) {}
+  }
   // CS-10: datetime smart connector — label a selected arrow (bound to two record cards) with the day-delta between
   // their date props ("+3d"). A live mini-Gantt from typed dates — Excalidraw can't read typed record dates.
   async _recordDate(guid) {
@@ -2262,6 +2276,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
