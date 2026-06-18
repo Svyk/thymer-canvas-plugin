@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.65.0';
+const PLEXUS_VERSION = '0.66.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -874,7 +874,7 @@ class CanvasView {
   }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom, labelH = 18 / this.camera.zoom;
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted) continue; if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; } if (hitElement(el, wx, wy, tol)) return el; }
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted || el.mmHidden) continue; if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; } if (hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
@@ -1483,6 +1483,38 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Mind map: Tab = child, Enter = sibling, double-click to rename.', dismissible: true }); } catch (_e) {}
     return root.id;
   }
+  // CP-3 (v3a): build a mind map from a NOTE's headings — H1/H2/H3 become nested child nodes, each remembering its
+  // source line (mmSourceLine) for a jump-back. The root references the note. This is Nicole's md-import workflow.
+  async _mmFromNote(guid) {
+    if (!guid) { try { this.plugin.ui.addToaster({ title: 'Plexus: open or click a note first, then build a mind map from it.', dismissible: true }); } catch (_e) {} return null; }
+    let rec = null; try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
+    if (!rec) return null;
+    let items = null; try { items = await rec.getLineItems(); } catch (_e) {}
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const root = this._mmMakeNode((rec.getName && rec.getName()) || 'Note', this._snap(c.x), this._snap(c.y), null, null);
+    root.mmRoot = root.id; root.refGuid = guid; root.isRef = true; this.scene.elements.push(root);
+    const lastAtLevel = { 0: root }; let made = 0;
+    for (const li of (items || [])) {
+      let hs = 0; try { hs = (li.getHeadingSize && li.getHeadingSize()) || 0; } catch (_e) {}
+      if (!hs) continue; // only headings become nodes
+      const text = lineTextOf(li) || '(heading)';
+      let parent = root; for (let lvl = hs - 1; lvl >= 0; lvl--) { if (lastAtLevel[lvl]) { parent = lastAtLevel[lvl]; break; } }
+      const node = this._mmMakeNode(text, parent.x + 200, parent.y, root.id, parent.id);
+      node.mmSourceLine = li.guid; this.scene.elements.push(node);
+      const edge = makeLinear(parent.x, parent.y, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); edge.mmRoot = root.id; edge.mmEdge = { from: parent.id, to: node.id }; this.scene.elements.push(edge);
+      lastAtLevel[hs] = node; for (let lvl = hs + 1; lvl <= 6; lvl++) delete lastAtLevel[lvl]; made++;
+    }
+    this._mmLayout(root.id); this.selected.clear(); this.selected.add(root.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: made ? ('Mind map: ' + made + ' nodes from headings.') : 'Note has no headings — added a central node.', dismissible: true }); } catch (_e) {}
+    return root.id;
+  }
+  // CP-3 (v3a): fold/unfold a node — hides/shows its whole subtree (and connecting edges) and re-lays out.
+  _mmToggleFold(node) {
+    if (!node || !node.mmRoot) return;
+    node.mmFolded = !node.mmFolded;
+    this._mmLayout(node.mmRoot); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: node.mmFolded ? 'Branch folded.' : 'Branch unfolded.', dismissible: true }); } catch (_e) {}
+  }
   // P1.6 (v1): insert an @@ REFERENCE NODE — a clickable text chip linked to a record (double-click opens it).
   async _insertRef() {
     const q = await this._promptText('Reference a record — search:', '');
@@ -1580,11 +1612,20 @@ class CanvasView {
   _mmLayout(rootId) {
     const root = this._byId(rootId); if (!root) return;
     const nodes = this._mmNodes(rootId), HGAP = 200, VGAP = 64; let leaf = 0; const rowOf = {};
-    const place = (id, depth) => { const n = this._byId(id); if (!n) return 0; n._mmDepth = depth; const kids = nodes.filter((e) => e.mmParent === id); if (!kids.length) { rowOf[id] = leaf++; return rowOf[id]; } const rs = kids.map((k) => place(k.id, depth + 1)); rowOf[id] = (rs[0] + rs[rs.length - 1]) / 2; return rowOf[id]; };
+    // CP-3: clear hidden flags, then a folded node hides its whole subtree (marked mmHidden, skipped in placement).
+    for (const n of nodes) n.mmHidden = false;
+    const hideSubtree = (id) => { for (const k of nodes.filter((e) => e.mmParent === id)) { k.mmHidden = true; hideSubtree(k.id); } };
+    const place = (id, depth) => {
+      const n = this._byId(id); if (!n) return 0; n._mmDepth = depth;
+      const kids = nodes.filter((e) => e.mmParent === id);
+      if (n.mmFolded) { hideSubtree(id); rowOf[id] = leaf++; return rowOf[id]; } // folded → treat as leaf, hide descendants
+      if (!kids.length) { rowOf[id] = leaf++; return rowOf[id]; }
+      const rs = kids.map((k) => place(k.id, depth + 1)); rowOf[id] = (rs[0] + rs[rs.length - 1]) / 2; return rowOf[id];
+    };
     place(rootId, 0);
     const baseX = root.x, baseY = root.y, rootRow = rowOf[rootId] || 0;
-    for (const n of nodes) { n.x = baseX + (n._mmDepth || 0) * HGAP; n.y = baseY + ((rowOf[n.id] || 0) - rootRow) * VGAP; measureText(n); }
-    for (const ed of this.scene.elements) { if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue; const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); if (a && b) { ed.points = [[a.x + a.width + 4, a.y + a.height / 2], [b.x - 4, b.y + b.height / 2]]; linearBBox(ed); } }
+    for (const n of nodes) { if (n.mmHidden) continue; n.x = baseX + (n._mmDepth || 0) * HGAP; n.y = baseY + ((rowOf[n.id] || 0) - rootRow) * VGAP; measureText(n); }
+    for (const ed of this.scene.elements) { if (ed.isDeleted || ed.mmRoot !== rootId || !ed.mmEdge) continue; const a = this._byId(ed.mmEdge.from), b = this._byId(ed.mmEdge.to); ed.mmHidden = !!(a && b && (a.mmHidden || b.mmHidden)); if (a && b && !ed.mmHidden) { ed.points = [[a.x + a.width + 4, a.y + a.height / 2], [b.x - 4, b.y + b.height / 2]]; linearBBox(ed); } }
   }
   // P0.4/P0.4b: apply a colour to the selection (stroke + tinted fill if the element is filled).
   _applyColorToSelection(color) {
@@ -1935,7 +1976,7 @@ class CanvasView {
     const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
     let drawn = 0;
     for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
     this._drawnCount = drawn;
     this._drawGhosts(sctx);
     // interactive layer — selection + transform handles
@@ -2032,6 +2073,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
