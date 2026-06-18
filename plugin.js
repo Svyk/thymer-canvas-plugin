@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.71.0';
+const PLEXUS_VERSION = '0.72.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1420,6 +1420,30 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
   }
+  // CS-10: datetime smart connector — label a selected arrow (bound to two record cards) with the day-delta between
+  // their date props ("+3d"). A live mini-Gantt from typed dates — Excalidraw can't read typed record dates.
+  async _recordDate(guid) {
+    try { const rec = await this.plugin.data.getRecord(guid); if (!rec || !rec.prop) return null; for (const k of ['Scheduled', 'Date', 'Due', 'Due Date', 'Start', 'Deadline']) { const p = rec.prop(k); if (p && p.date) { const d = p.date(); if (d) return d; } } } catch (_e) {}
+    return null;
+  }
+  async _datetimeConnectors() {
+    const arrows = [...this.selected].map((id) => this._byId(id)).filter((e) => e && (e.type === 'arrow' || e.type === 'line'));
+    if (!arrows.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an arrow bound to two record cards.', dismissible: true }); } catch (_e) {} return; }
+    let done = 0;
+    for (const ar of arrows) {
+      const a = ar.startBinding && this._byId(ar.startBinding.elementId), b = ar.endBinding && this._byId(ar.endBinding.elementId);
+      if (!a || !b || a.type !== 'record' || b.type !== 'record') continue;
+      const da = await this._recordDate(a.recordGuid), db = await this._recordDate(b.recordGuid);
+      if (!da || !db) continue;
+      const days = Math.round((db.getTime() - da.getTime()) / 86400000);
+      const p0 = ar.points[0], p1 = ar.points[ar.points.length - 1], mx = (p0[0] + p1[0]) / 2, my = (p0[1] + p1[1]) / 2;
+      const old = this.scene.elements.find((e) => !e.isDeleted && e.dtConnectorFor === ar.id && e.type === 'text'); if (old) old.isDeleted = true;
+      const lbl = makeText(this._snap(mx - 16), this._snap(my - 22), { fontSize: 14, stroke: '#f59e0b' }); lbl.text = (days >= 0 ? '+' : '') + days + 'd'; lbl.dtConnectorFor = ar.id; measureText(lbl);
+      this.scene.elements.push(lbl); done++;
+    }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: done ? ('Labelled ' + done + ' connector(s) with their date delta.') : 'No arrows bound to two dated record cards.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 9 E10: board-card cache — fetches another drawing record's banner PNG (its live scene preview).
   _boardFor(guid) {
     if (!this._boardCache) this._boardCache = new Map();
@@ -2237,6 +2261,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
