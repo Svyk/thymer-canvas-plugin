@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.79.0';
+const PLEXUS_VERSION = '0.80.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2061,6 +2061,27 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Analysis added as a note.', dismissible: true }); } catch (_e) {}
   }
+  // Phase 6: AI image generation — DALL-E via the secure key layer, returned as b64 (no 30-min URL expiry) and
+  // dropped as a canvas image element. (OpenAI provider; other providers toast a hint.)
+  async _aiImage() {
+    const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
+    if (provider !== 'openai') { try { this.plugin.ui.addToaster({ title: 'Plexus: image generation needs the OpenAI provider (Settings → AI).', dismissible: true }); } catch (_e) {} return; }
+    const what = await this._promptText('Describe the image to generate:', 'a minimalist flat icon of a data pipeline');
+    if (!what) return;
+    const key = await this._aiKey('openai'); if (!key) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: generating image…', dismissible: true }); } catch (_e) {}
+    try {
+      const res = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: 'dall-e-3', prompt: String(what), n: 1, size: '1024x1024', response_format: 'b64_json' }) });
+      const data = await res.json();
+      const b64 = data && data.data && data.data[0] && data.data[0].b64_json;
+      if (!b64) { try { this.plugin.ui.addToaster({ title: 'Plexus: no image returned (' + ((data && data.error && data.error.message) || 'check key/quota') + ').', dismissible: true }); } catch (_e) {} return; }
+      const bin = atob(b64); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const file = new File([arr], 'ai-image.png', { type: 'image/png' });
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      await this._addImageFromFile(file, c.x, c.y);
+      try { this.plugin.ui.addToaster({ title: 'AI image inserted.', dismissible: true }); } catch (_e) {}
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: image generation failed (' + e + ').', dismissible: true }); } catch (_e) {} }
+  }
   // Phase 6: per-session AI token meter — accumulate usage across providers (OpenAI/xAI total_tokens,
   // Anthropic input+output, Gemini usageMetadata) into the plugin so the user can see what a session cost.
   _addAiUsage(data) {
@@ -2414,6 +2435,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
