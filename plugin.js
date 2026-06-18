@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.86.0';
+const PLEXUS_VERSION = '0.87.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -752,6 +752,64 @@ class CanvasView {
     this.dirty = true;
   }
   _fitToScene() { const live = this.scene.elements.filter((e) => !e.isDeleted); if (!live.length) return; this._fitToBounds(sceneBounds(this.scene), 60); }
+  /* ── Cross-reference navigate-and-flash (note ⇄ canvas) ──────────────────────────────────
+   * A note line that cites a region/element flashes that exact spot here; a cited element
+   * double-clicks back to the citing note. Index lives in localStorage (plexus_xref). */
+  _rrect(ctx, x, y, w, h, r) { if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); return; } ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+  _elBBox(el) {
+    if (!el) return null;
+    const w = el.width, h = el.height;
+    if ((w == null || h == null) && el.points && el.points.length) { let a = Infinity, b = Infinity, c = -Infinity, dd = -Infinity; for (const p of el.points) { a = Math.min(a, p[0]); b = Math.min(b, p[1]); c = Math.max(c, p[0]); dd = Math.max(dd, p[1]); } if (isFinite(a)) return { x: a, y: b, w: c - a, h: dd - b }; }
+    const x = Math.min(el.x, el.x + (w || 0)), y = Math.min(el.y, el.y + (h || 0));
+    return { x, y, w: Math.abs(w || 0), h: Math.abs(h || 0) };
+  }
+  // Center the target if it isn't already comfortably on screen (gentle zoom cap), then mark dirty.
+  _revealBounds(b) {
+    if (!b || !isFinite(b.x)) return;
+    const m = 48;
+    const tl = this.camera.worldToScreen(b.x, b.y), br = this.camera.worldToScreen(b.x + b.w, b.y + b.h);
+    const onScreen = tl.x >= m && tl.y >= m && br.x <= this.cssW - m && br.y <= this.cssH - m;
+    const bigEnough = (br.x - tl.x) >= 28 && (br.y - tl.y) >= 28;
+    if (onScreen && bigEnough) { this.dirty = true; return; }
+    const pad = 90, zw = this.cssW / (Math.max(1, b.w) + pad * 2), zh = this.cssH / (Math.max(1, b.h) + pad * 2);
+    this.camera.zoom = Math.min(2.4, Math.max(0.1, Math.min(zw, zh)));
+    this.camera.x = b.x + b.w / 2 - (this.cssW / this.camera.zoom) / 2;
+    this.camera.y = b.y + b.h / 2 - (this.cssH / this.camera.zoom) / 2;
+    this.dirty = true;
+  }
+  // Reveal + a fast, attention-grabbing double-pulse ring on the referenced element/region.
+  _flashAnchor(anchor) {
+    let bbox = null;
+    if (anchor && anchor.el) { const el = this._byId(anchor.el); if (el) bbox = this._elBBox(el); }
+    if (!bbox && anchor && anchor.region && isFinite(anchor.region.x)) bbox = anchor.region;
+    if (!bbox) { try { bbox = sceneBounds(this.scene); } catch (_e) {} }
+    if (!bbox || !isFinite(bbox.x)) return;
+    this._revealBounds(bbox);
+    this._flash = { bbox, start: (typeof performance !== 'undefined' ? performance.now() : Date.now()), dur: 950 };
+    this.dirty = true;
+  }
+  // Build the per-element citation map for THIS drawing from the global index (drives the ↗ badge + dbl-click jump).
+  _buildXrefIndex() {
+    const idx = {}; let x = {};
+    try { x = this.plugin._loadXref(); } catch (_e) {}
+    for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label }); }
+    this._xrefByEl = idx;
+  }
+  // Canvas → note: open the citing note in a side panel and highlight the exact line (Nav plugin pulses it).
+  async _jumpToCiting(lineGuid) {
+    if (!lineGuid) return;
+    let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
+    if (!panel) { try { panel = this.plugin.ui.getActivePanel(); } catch (_e) {} }
+    if (!panel) return;
+    try { const ok = await panel.navigateTo({ itemGuid: lineGuid, highlight: true }); if (!ok) { try { this.plugin.ui.addToaster({ title: 'Plexus: the citing note line could not be found (it may have been deleted).', dismissible: true }); } catch (_e) {} } } catch (e) { console.error('[Plexus] jumpToCiting', e); }
+  }
+  async _jumpFromSelection() {
+    let target = null;
+    for (const id of this.selected) { const arr = this._xrefByEl && this._xrefByEl[id]; if (arr && arr.length) { target = arr; break; } }
+    if (!target) { try { this.plugin.ui.addToaster({ title: 'Plexus: this element isn’t cited in a note yet — use “Cite selection”, then paste in a note.', dismissible: true }); } catch (_e) {} return; }
+    if (target.length > 1) { try { this.plugin.ui.addToaster({ title: 'Cited in ' + target.length + ' notes — opening the first.', dismissible: true }); } catch (_e) {} }
+    await this._jumpToCiting(target[0].lineGuid);
+  }
   // P0.5: frames are slides — ordered by name (natural sort), then by position.
   _slideFrames() {
     const fr = this.scene.elements.filter((e) => !e.isDeleted && e.type === 'frame');
@@ -1192,6 +1250,7 @@ class CanvasView {
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
+      if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && hit.refGuid) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
       if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record (S10: honors openInNewPanel)
       else if (hit && hit.type === 'record') { this._openCard(hit); }
@@ -2382,7 +2441,7 @@ class CanvasView {
     if (el && el.type === 'image') {
       const png = await this._snapshotElement(el);
       if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image (still loading?).', dismissible: true }); } catch (_e) {} return false; }
-      this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)) };
+      this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)), region: this._elBBox(el) };
       try { this.plugin.ui.addToaster({ title: 'Image reference copied — run “Plexus: Paste image reference” inside a note.', dismissible: true }); } catch (_e) {}
       return true;
     }
@@ -2394,7 +2453,7 @@ class CanvasView {
     const pad = 10, b = { x: minx - pad, y: miny - pad, w: (maxx - minx) + pad * 2, h: (maxy - miny) + pad * 2 };
     let png = null; try { const dataURL = this._renderRegionPng(b, 2); png = await (await fetch(dataURL)).blob(); } catch (_e) {}
     if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the selection.', dismissible: true }); } catch (_e) {} return false; }
-    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: sel[0].id, crop: null, w: Math.round(b.w), h: Math.round(b.h) };
+    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: sel[0].id, crop: null, w: Math.round(b.w), h: Math.round(b.h), region: { x: minx, y: miny, w: maxx - minx, h: maxy - miny } };
     try { this.plugin.ui.addToaster({ title: sel.length + ' element(s) copied as a reference — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
@@ -2420,6 +2479,7 @@ class CanvasView {
     this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
     this.dirty = true; if (fresh && this.rec) this.saveNow();
+    try { this._buildXrefIndex(); } catch (_e) {} // cross-ref ↗ badges for elements cited by notes
     if (!fresh && st.zoomToFitOnOpen) this._fitToScene(); // S3
     if (st.openMode === 'present') setTimeout(() => { if (!this.destroyed) this._enterPresent(); }, 50); // S1
   }
@@ -2480,6 +2540,39 @@ class CanvasView {
       }
       if (this._laser.length) this.dirty = true; // keep animating the fade
     }
+    // Cross-ref affordance: a small ↗ badge at the top-right of any element a note cites.
+    if (this._xrefByEl) {
+      const keys = Object.keys(this._xrefByEl);
+      if (keys.length) {
+        ictx.setTransform(1, 0, 0, 1, 0, 0);
+        for (const id of keys) { const el = this._byId(id); if (!el || el.isDeleted) continue; const bb = this._elBBox(el); if (!bb) continue; const p = this.camera.worldToScreen(bb.x + bb.w, bb.y); const cx = p.x * d, cy = p.y * d, rr = 8.5 * d; ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.92)'; ictx.fill(); ictx.fillStyle = '#fff'; ictx.font = (11 * d) + 'px system-ui, sans-serif'; ictx.textAlign = 'center'; ictx.textBaseline = 'middle'; ictx.fillText('↗', cx, cy); }
+        ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
+      }
+    }
+    // Flash pulse — fast, attention-grabbing double-ring + glow on a navigated cross-ref target.
+    if (this._flash) {
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const t = (now - this._flash.start) / this._flash.dur;
+      if (t >= 1) { this._flash = null; }
+      else {
+        const bb = this._flash.bbox;
+        const tl = this.camera.worldToScreen(bb.x, bb.y), br = this.camera.worldToScreen(bb.x + bb.w, bb.y + bb.h);
+        const x = tl.x * d, y = tl.y * d, w = (br.x - tl.x) * d, h = (br.y - tl.y) * d;
+        const pulses = 2, tp = (t * pulses) % 1, ease = 1 - Math.pow(1 - tp, 3);
+        ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.save();
+        const base = 7 * d, rad = 9 * d;
+        const fillA = Math.max(0, 0.26 * (1 - t * 2.2));
+        if (fillA > 0) { ictx.fillStyle = 'rgba(124,92,255,' + fillA + ')'; this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.fill(); }
+        const grow = ease * 18 * d, ringA = Math.max(0, (1 - tp) * (1 - t * 0.3)), pad = base + grow;
+        ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = 3 * d;
+        ictx.shadowColor = 'rgba(124,92,255,0.95)'; ictx.shadowBlur = 22 * d * (1 - tp);
+        this._rrect(ictx, x - pad, y - pad, w + pad * 2, h + pad * 2, rad + grow * 0.5); ictx.stroke();
+        ictx.shadowBlur = 0; ictx.lineWidth = 2.2 * d; ictx.strokeStyle = 'rgba(190,170,255,' + Math.max(0, 0.95 * (1 - t)) + ')';
+        this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.stroke();
+        ictx.restore();
+        this.dirty = true;
+      }
+    }
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
@@ -2534,7 +2627,9 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: "Plexus: Open today's whiteboard", icon: 'ti-calendar', onSelected: () => this._openTodayWhiteboard() }); // IO-2
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Add task', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._addTaskNode(); } }); // IO-1
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Cite selection (copy reference)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._copyImageRefToClip(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as PNG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportPngFile(); } });
@@ -2608,6 +2703,20 @@ class Plugin extends AppPlugin {
     raf = requestAnimationFrame(tick); reg.add(() => cancelAnimationFrame(raf));
     const onScroll = () => { if (window.scrollX !== 0) window.scrollTo({ left: 0, top: window.scrollY, behavior: 'instant' }); };
     window.addEventListener('scroll', onScroll, { passive: true }); reg.add(() => window.removeEventListener('scroll', onScroll));
+    // Note → canvas: intercept a click on a cited "↗ source/region of drawing" ref → open the drawing + flash.
+    // Capture phase + gated on our own xref index, so it only ever fires for lines WE registered.
+    const onDocClick = (e) => {
+      try {
+        const t = e.target; if (!t || !t.closest) return;
+        if (!t.closest('.lineitem-ref, .lineitem-linkobj, .lineitem-link')) return;
+        const row = t.closest('.listitem'); if (!row) return;
+        const lineGuid = row.getAttribute('data-guid'); if (!lineGuid) return;
+        const entry = this._lookupXref(lineGuid); if (!entry) return;
+        e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        this._navToCanvasAnchor(entry);
+      } catch (_e) {}
+    };
+    document.addEventListener('click', onDocClick, true); reg.add(() => document.removeEventListener('click', onDocClick, true));
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
@@ -2737,7 +2846,10 @@ class Plugin extends AppPlugin {
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     const label = clip.crop ? '↗ region of drawing' : '↗ source drawing';
     let refLine = null; try { refLine = await rec.createLineItem(null, imgLine, 'ulist', [{ type: 'text', text: label + ' ' }, { type: 'ref', text: { guid: clip.sourceRecordGuid } }], null); } catch (_e) {}
-    try { this.ui.addToaster({ title: 'Image reference pasted into the note.', dismissible: true }); } catch (_e) {}
+    // Register the bidirectional cross-ref: clicking this note line flashes the source element/region on the
+    // canvas, and that element gets a ↗ badge + double-click-back to this line.
+    if (refLine && refLine.guid) { try { this._registerXref(refLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: label }); } catch (_e) {} }
+    try { this.ui.addToaster({ title: 'Reference pasted — click it to fly back to the drawing and flash the spot.', dismissible: true }); } catch (_e) {}
     return { ok: !!(imgLine && refLine), imgLineGuid: imgLine ? imgLine.guid : null, refLineGuid: refLine ? refLine.guid : null, recordGuid: rec.guid };
   }
   async _openPanelFor(recordGuid, opts) {
@@ -2748,6 +2860,26 @@ class Plugin extends AppPlugin {
     const panel = await this.ui.createPanel(here ? { afterPanel: here } : undefined);
     if (!panel) { this._pendingQueue.pop(); return null; }
     panel.navigateToCustomType(PANEL_ID); return panel;
+  }
+  /* ── Cross-reference index — note line guid → {drawing, el, region, label}. localStorage so it
+   *    survives reloads; rebuilt onto each open drawing view as a per-element badge map. ───────── */
+  _loadXref() { try { return JSON.parse(localStorage.getItem('plexus_xref') || '{}'); } catch (_e) { return {}; } }
+  _saveXref(x) { try { localStorage.setItem('plexus_xref', JSON.stringify(x)); } catch (_e) {} }
+  _lookupXref(lineGuid) { const x = this._loadXref(); return x[lineGuid] || null; }
+  _registerXref(lineGuid, data) {
+    if (!lineGuid || !data || !data.drawing) return;
+    const x = this._loadXref(); x[lineGuid] = Object.assign({ t: Date.now() }, data); this._saveXref(x);
+    for (const v of this._views) { if (v.rec && v.rec.guid === data.drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
+  }
+  // Note → canvas: open the cited drawing (or reuse an already-open view) and flash the cited element/region.
+  async _navToCanvasAnchor(entry) {
+    if (!entry || !entry.drawing) return;
+    let view = [...this._views].find((v) => v.rec && v.rec.guid === entry.drawing && v.scene);
+    if (!view) {
+      try { await this._openPanelFor(entry.drawing, {}); } catch (_e) {}
+      for (let i = 0; i < 30 && !view; i++) { view = [...this._views].find((v) => v.rec && v.rec.guid === entry.drawing && v.scene); if (view) break; await sleep(120); }
+    }
+    if (view) { try { view._flashAnchor(entry); } catch (e) { console.error('[Plexus] navToAnchor', e); } }
   }
   // UX-5/UX-6: lightweight settings modal (banner-preview toggle + dark canvas). Persisted to localStorage.
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
