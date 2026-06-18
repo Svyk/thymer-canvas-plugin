@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.87.1';
+const PLEXUS_VERSION = '0.88.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -780,8 +780,13 @@ class CanvasView {
   // Reveal + a fast, attention-grabbing double-pulse ring on the referenced element/region.
   _flashAnchor(anchor) {
     let bbox = null;
-    if (anchor && anchor.el) { const el = this._byId(anchor.el); if (el) bbox = this._elBBox(el); }
-    if (!bbox && anchor && anchor.region && isFinite(anchor.region.x)) bbox = anchor.region;
+    const el = (anchor && anchor.el) ? this._byId(anchor.el) : null;
+    const elB = el ? this._elBBox(el) : null;
+    const reg = (anchor && anchor.region && isFinite(anchor.region.x)) ? anchor.region : null;
+    // A region that's a real SUB-area of the element (e.g. Oregon on a US-map image) → zoom the region;
+    // a whole-element cite → the LIVE element bbox (robust if the element later moved).
+    if (reg && elB) bbox = ((reg.w * reg.h) < (elB.w * elB.h) * 0.7) ? reg : elB;
+    else bbox = reg || elB;
     if (!bbox) { try { bbox = sceneBounds(this.scene); } catch (_e) {} }
     if (!bbox || !isFinite(bbox.x)) return;
     this._revealBounds(bbox);
@@ -795,11 +800,15 @@ class CanvasView {
     for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label }); }
     this._xrefByEl = idx;
   }
-  // Canvas → note: open the citing note in a side panel and highlight the exact line (Nav plugin pulses it).
+  // Canvas → note: page-flip THIS panel to the citing note and highlight the exact line (Nav plugin pulses it).
+  // In place (no new panel) so the drawing↔text toggle feels like flipping the same page. itemGuid auto-resolves
+  // the record + workspace, so this lands on the RIGHT page even when _flipToNote's edit_panel/ws path is flaky.
   async _jumpToCiting(lineGuid) {
     if (!lineGuid) return;
+    const here = this.panel || (this.plugin.ui.getActivePanel && this.plugin.ui.getActivePanel());
+    if (here) { try { const ok = await here.navigateTo({ itemGuid: lineGuid, highlight: true }); if (ok) return; } catch (_e) {} }
+    // Fallback: a fresh side panel if the in-place flip didn't resolve the line.
     let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
-    if (!panel) { try { panel = this.plugin.ui.getActivePanel(); } catch (_e) {} }
     if (!panel) return;
     try { const ok = await panel.navigateTo({ itemGuid: lineGuid, highlight: true }); if (!ok) { try { this.plugin.ui.addToaster({ title: 'Plexus: the citing note line could not be found (it may have been deleted).', dismissible: true }); } catch (_e) {} } } catch (e) { console.error('[Plexus] jumpToCiting', e); }
   }
@@ -1090,6 +1099,11 @@ class CanvasView {
     const onDown = (e) => {
       host.focus();
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
+      // Cross-ref ↗ chip (top-right of a cited element) → page-flip to the citing note. Single click, before drawing.
+      if (this._xrefByEl && (e.button === 0 || e.button === -1) && !this._present) {
+        const w0 = this._worldAt(e), tol = 13 / this.camera.zoom;
+        for (const id in this._xrefByEl) { const el = this._byId(id); if (!el || el.isDeleted) continue; const bb = this._elBBox(el); if (!bb) continue; if (Math.abs(w0.x - (bb.x + bb.w)) <= tol && Math.abs(w0.y - bb.y) <= tol) { const arr = this._xrefByEl[id]; if (arr && arr.length) { try { e.preventDefault(); } catch (_e) {} this._jumpToCiting(arr[0].lineGuid); return; } } }
+      }
       // S4: pen/touch routing — a pen draws freedraw without picking the Pen tool; a single finger pans.
       if (!this._present && this._penActive() && (e.button === 0 || e.button === -1)) {
         const stp4 = this.plugin._settings || {};
@@ -2437,11 +2451,17 @@ class CanvasView {
   // pasted as a block reference into any note. Stores a PNG snapshot + the source record + element id.
   async _copyImageRefToClip(el) {
     el = el || this._singleSel();
+    if (!((el && el.type === 'image') || this.selected.size)) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image, a region, or element(s) to cite first.', dismissible: true }); } catch (_e) {} return false; }
+    // Ask for a chip label (the inline-chip text in the note, e.g. "Oregon"). Default = a nearby text label or the drawing name.
+    const recName = (this.rec && this.rec.getName && this.rec.getName()) || 'drawing';
+    const selText = [...this.selected].map((id) => this._byId(id)).find((e) => e && e.type === 'text' && e.text);
+    const defLabel = (el && el.type === 'text' && el.text) ? el.text : (selText ? selText.text : recName);
+    let label = defLabel; try { const t = await this._promptText('Chip label (the inline-chip text, e.g. “Oregon”):', String(defLabel).slice(0, 40)); if (t === null) return false; label = (t.trim() || defLabel); } catch (_e) {}
     // A single image → snapshot it (preserves crop). Anything else → snapshot the whole SELECTION area.
     if (el && el.type === 'image') {
       const png = await this._snapshotElement(el);
       if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image (still loading?).', dismissible: true }); } catch (_e) {} return false; }
-      this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)), region: this._elBBox(el) };
+      this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: el.id, crop: el.crop || null, w: Math.round(Math.abs(el.width)), h: Math.round(Math.abs(el.height)), region: this._elBBox(el), label };
       try { this.plugin.ui.addToaster({ title: 'Image reference copied — run “Plexus: Paste image reference” inside a note.', dismissible: true }); } catch (_e) {}
       return true;
     }
@@ -2453,7 +2473,7 @@ class CanvasView {
     const pad = 10, b = { x: minx - pad, y: miny - pad, w: (maxx - minx) + pad * 2, h: (maxy - miny) + pad * 2 };
     let png = null; try { const dataURL = this._renderRegionPng(b, 2); png = await (await fetch(dataURL)).blob(); } catch (_e) {}
     if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the selection.', dismissible: true }); } catch (_e) {} return false; }
-    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: sel[0].id, crop: null, w: Math.round(b.w), h: Math.round(b.h), region: { x: minx, y: miny, w: maxx - minx, h: maxy - miny } };
+    this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: sel[0].id, crop: null, w: Math.round(b.w), h: Math.round(b.h), region: { x: minx, y: miny, w: maxx - minx, h: maxy - miny }, label };
     try { this.plugin.ui.addToaster({ title: sel.length + ' element(s) copied as a reference — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
@@ -2844,12 +2864,14 @@ class Plugin extends AppPlugin {
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], 'plexus-image-ref.png', { type: 'image/png' })); } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
-    const label = clip.crop ? '↗ region of drawing' : '↗ source drawing';
-    let refLine = null; try { refLine = await rec.createLineItem(null, imgLine, 'ulist', [{ type: 'text', text: label + ' ' }, { type: 'ref', text: { guid: clip.sourceRecordGuid } }], null); } catch (_e) {}
-    // Register the bidirectional cross-ref: clicking this note line flashes the source element/region on the
-    // canvas, and that element gets a ↗ badge + double-click-back to this line.
-    if (refLine && refLine.guid) { try { this._registerXref(refLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: label }); } catch (_e) {} }
-    try { this.ui.addToaster({ title: 'Reference pasted — click it to fly back to the drawing and flash the spot.', dismissible: true }); } catch (_e) {}
+    // Inline CHIP (org-remark style): a single ref segment titled with the label → renders as a compact,
+    // clickable chip in the note. Clicking it page-flips to the drawing and zooms the region.
+    const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
+    let refLine = null; try { refLine = await rec.createLineItem(null, imgLine, 'ulist', [{ type: 'ref', text: { guid: clip.sourceRecordGuid, title: '📍 ' + chipLabel } }], null); } catch (_e) {}
+    // Register the bidirectional cross-ref: clicking this chip flashes the source element/region on the
+    // canvas, and that element wears a ↗ chip + single-click-back to this line.
+    if (refLine && refLine.guid) { try { this._registerXref(refLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel }); } catch (_e) {} }
+    try { this.ui.addToaster({ title: 'Inline chip “📍 ' + chipLabel + '” added — click it to fly to the drawing and zoom in.', dismissible: true }); } catch (_e) {}
     return { ok: !!(imgLine && refLine), imgLineGuid: imgLine ? imgLine.guid : null, refLineGuid: refLine ? refLine.guid : null, recordGuid: rec.guid };
   }
   async _openPanelFor(recordGuid, opts) {
@@ -2878,7 +2900,8 @@ class Plugin extends AppPlugin {
     const find = () => [...this._views].filter((v) => v.recordGuid === entry.drawing).pop();
     let view = find();
     if (!view) {
-      try { await this._openPanelFor(entry.drawing, {}); } catch (_e) {}
+      // Page-flip IN PLACE — flip the active (note) panel to the drawing, no new side panel.
+      try { await this._openPanelFor(entry.drawing, { inPlace: true }); } catch (_e) {}
       for (let i = 0; i < 40 && !view; i++) { await sleep(100); view = find(); }
     }
     if (!view) return;
