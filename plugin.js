@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.91.0';
+const PLEXUS_VERSION = '0.92.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -183,6 +183,19 @@ function pointInPoly(x, y, poly) {
     if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
   }
   return inside;
+}
+// Even-arclength resample of a polyline [[x,y]…] down to <=maxN points (so a freehand lasso fits the synced filename).
+function resamplePoly(pts, maxN) {
+  if (!pts || pts.length <= maxN) return pts ? pts.map((p) => p.slice()) : [];
+  let total = 0; for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  if (!(total > 0)) return [pts[0].slice()];
+  const step = total / maxN, out = [pts[0].slice()]; let acc = 0, next = step;
+  for (let i = 1; i < pts.length && out.length < maxN; i++) {
+    const dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1], seg = Math.hypot(dx, dy);
+    while (acc + seg >= next && out.length < maxN) { const f = seg > 0 ? (next - acc) / seg : 0; out.push([pts[i - 1][0] + dx * f, pts[i - 1][1] + dy * f]); next += step; }
+    acc += seg;
+  }
+  return out;
 }
 
 /* ───────────────────────── hot-reload singleton ───────────────────────── */
@@ -741,7 +754,7 @@ class CanvasView {
     if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) { h = Math.max(160, h - (scroller.scrollHeight - scroller.clientHeight)); this.wrap.style.height = h + 'px'; }
     const w = this.wrap.clientWidth || this.host.clientWidth || 600;
     for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
-    this.cssW = w; this.cssH = h;
+    this.cssW = w; this.cssH = h; this._cacheValid = false; // canvas resized → cache stale (rebuilt on next crisp render)
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
@@ -798,11 +811,23 @@ class CanvasView {
     const ca = Math.cos(a), sa = Math.sin(a);
     return pts.map(([px, py]) => { const dx = px - cx, dy = py - cy; return { x: cx + dx * ca - dy * sa, y: cy + dx * sa + dy * ca }; });
   }
+  // Map a fraction-polygon [{fx,fy}…] to live world points (rotation-aware) — the freehand region shape.
+  _imgRegionPolyWorld(el, fracPoly) {
+    const b = this._elBBox(el); if (!b || !fracPoly || !fracPoly.length) return null;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, a = el.angle || 0, ca = Math.cos(a), sa = Math.sin(a);
+    return fracPoly.map((p) => { let x = b.x + p.fx * b.w, y = b.y + p.fy * b.h; if (a) { const dx = x - cx, dy = y - cy; x = cx + dx * ca - dy * sa; y = cy + dx * sa + dy * ca; } return { x, y }; });
+  }
+  // The region's world outline — the freehand polygon if present, else the rectangle quad.
+  _regionShapeWorld(el, frac, fracPoly) { return (fracPoly && fracPoly.length >= 3) ? this._imgRegionPolyWorld(el, fracPoly) : this._imgRegionQuad(el, frac); }
+  _polyBBox(pts) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); } return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
-  _setPendingImgRegion(img, rect) {
+  // `poly` (optional, world coords) = the freehand lasso loop → cited as the exact shape, not just its bbox.
+  _setPendingImgRegion(img, rect, poly) {
     const frac = this._imgRegionFrac(img, rect); if (!frac) return false;
-    this._pendingImgRegion = { imgId: img.id, frac, rect: this._imgRegionWorld(img, frac) };
+    let fracPoly = null;
+    if (poly && poly.length >= 3) { const b = this._elBBox(img); fracPoly = resamplePoly(poly, 16).map(([px, py]) => ({ fx: Math.max(0, Math.min(1, (px - b.x) / b.w)), fy: Math.max(0, Math.min(1, (py - b.y) / b.h)) })); }
+    this._pendingImgRegion = { imgId: img.id, frac, fracPoly, rect: this._imgRegionWorld(img, frac) };
     this.selected.clear(); this.dirty = true;
     try { this.plugin.ui.addToaster({ title: 'Region marked on the image — click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {}
     return true;
@@ -829,7 +854,7 @@ class CanvasView {
     // CURRENT geometry (moved/resized/rotated). Spotlight that exact sub-region in place — no crop copy.
     if (anchor && anchor.inImage && anchor.frac && el) {
       const world = this._imgRegionWorld(el, anchor.frac);
-      if (world && isFinite(world.x)) { this._revealBounds(world); this._flash = { bbox: world, inImage: true, elId: el.id, frac: anchor.frac, start: now(), dur: 1050 }; this.dirty = true; return; }
+      if (world && isFinite(world.x)) { this._revealThenFlash(world, () => { this._flash = { bbox: world, inImage: true, elId: el.id, frac: anchor.frac, fracPoly: anchor.fracPoly, start: now(), dur: 1200 }; this.dirty = true; }); return; }
     }
     if (anchor && anchor.inImage && !el) { try { this.plugin.ui.addToaster({ title: 'Plexus: the source image for this reference was removed.', dismissible: true }); } catch (_e) {} }
     let bbox = null;
@@ -841,15 +866,73 @@ class CanvasView {
     else bbox = reg || elB;
     if (!bbox) { try { bbox = sceneBounds(this.scene); } catch (_e) {} }
     if (!bbox || !isFinite(bbox.x)) return;
-    this._revealBounds(bbox);
-    this._flash = { bbox, start: now(), dur: 950 };
-    this.dirty = true;
+    this._revealThenFlash(bbox, () => { this._flash = { bbox, start: now(), dur: 950 }; this.dirty = true; });
   }
+  _now() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
+  // True if b is already comfortably framed on-screen (don't bother animating).
+  _isFramed(b) {
+    if (!b || !isFinite(b.x)) return true;
+    const m = 48, tl = this.camera.worldToScreen(b.x, b.y), br = this.camera.worldToScreen(b.x + b.w, b.y + b.h);
+    return (tl.x >= m && tl.y >= m && br.x <= this.cssW - m && br.y <= this.cssH - m) && (br.x - tl.x) >= 28 && (br.y - tl.y) >= 28;
+  }
+  // The camera that frames bounds b (matches _revealBounds' fit, gentle zoom cap) — returned, not applied.
+  _revealTarget(b) {
+    const pad = 90, zw = this.cssW / (Math.max(1, b.w) + pad * 2), zh = this.cssH / (Math.max(1, b.h) + pad * 2);
+    const zoom = Math.min(2.4, Math.max(0.1, Math.min(zw, zh)));
+    return { zoom, x: b.x + b.w / 2 - (this.cssW / zoom) / 2, y: b.y + b.h / 2 - (this.cssH / zoom) / 2 };
+  }
+  // If b isn't already framed, fly there cinematically (establish → zoom in) then run onArrive (the flash);
+  // else flash immediately. The flash recomputes its region from the live element, so it lands true.
+  _revealThenFlash(b, onArrive) {
+    if (this._isFramed(b)) { onArrive(); return; }
+    this._animateCameraTo(this._revealTarget(b), 720, onArrive);
+  }
+  // Cinematic 2-segment camera tween: current → a wide establishing framing (ease-out), then wide → target
+  // (ease-in-out). Zoom interpolated geometrically (log space). Aborts on user input. onArrive fires on landing.
+  _animateCameraTo(target, dur, onArrive) {
+    const c0 = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom };
+    const curCx = c0.x + (this.cssW / c0.zoom) / 2, curCy = c0.y + (this.cssH / c0.zoom) / 2;
+    const tgtCx = target.x + (this.cssW / target.zoom) / 2, tgtCy = target.y + (this.cssH / target.zoom) / 2;
+    const hw = (this.cssW / target.zoom) / 2, hh = (this.cssH / target.zoom) / 2;
+    const wideBox = { x: Math.min(curCx, tgtCx - hw), y: Math.min(curCy, tgtCy - hh), w: 0, h: 0 };
+    wideBox.w = Math.max(curCx, tgtCx + hw) - wideBox.x; wideBox.h = Math.max(curCy, tgtCy + hh) - wideBox.y;
+    const wide = this._revealTarget(wideBox);
+    this._camAnim = { c0, wide, target, start: this._now(), dur: Math.max(220, dur || 700), onArrive };
+    this._fastMove = true; this.dirty = true;
+  }
+  _lerpCam(p, q, u) {
+    const lerp = (a, b) => a + (b - a) * u, gl = (a, b) => Math.exp(Math.log(a) + (Math.log(b) - Math.log(a)) * u);
+    const pcx = p.x + (this.cssW / p.zoom) / 2, pcy = p.y + (this.cssH / p.zoom) / 2;
+    const qcx = q.x + (this.cssW / q.zoom) / 2, qcy = q.y + (this.cssH / q.zoom) / 2;
+    const z = gl(p.zoom, q.zoom), cx = lerp(pcx, qcx), cy = lerp(pcy, qcy);
+    return { zoom: z, x: cx - (this.cssW / z) / 2, y: cy - (this.cssH / z) / 2 };
+  }
+  _stepCamAnim() {
+    const a = this._camAnim; if (!a) return;
+    const t = Math.min(1, (this._now() - a.start) / a.dur);
+    const easeOut = (u) => 1 - Math.pow(1 - u, 3), easeInOut = (u) => u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    const cam = (t < 0.35) ? this._lerpCam(a.c0, a.wide, easeOut(t / 0.35)) : this._lerpCam(a.wide, a.target, easeInOut((t - 0.35) / 0.65));
+    this.camera.x = cam.x; this.camera.y = cam.y; this.camera.zoom = cam.zoom;
+    this._fastMove = true; this.dirty = true;
+    if (t >= 1) { this._camAnim = null; this._fastMove = false; this._cacheValid = false; this._saveCamera(); const cb = a.onArrive; if (cb) { try { cb(); } catch (_e) {} } } // crisp arrival
+  }
+  _abortCamAnim() { if (this._camAnim) { this._camAnim = null; this._fastMove = false; this.dirty = true; } }
+  // Snapshot the freshly-rendered static layer into the offscreen cache (+ the camera it was drawn at).
+  _refreshCache() {
+    try {
+      if (!this._cacheCv) this._cacheCv = document.createElement('canvas');
+      if (this._cacheCv.width !== this.staticCv.width || this._cacheCv.height !== this.staticCv.height) { this._cacheCv.width = this.staticCv.width; this._cacheCv.height = this.staticCv.height; }
+      const cctx = this._cacheCv.getContext('2d'); cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height); cctx.drawImage(this.staticCv, 0, 0);
+      this._cacheCam = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom }; this._cacheValid = true;
+    } catch (_e) { this._cacheValid = false; }
+  }
+  // One crisp re-render shortly after motion stops (debounced) — fills any blank edges + restores sharpness.
+  _scheduleSettle() { if (this._settleT) clearTimeout(this._settleT); this._settleT = setTimeout(() => { this._settleT = null; if (!this.destroyed) this.dirty = true; }, 130); }
   // Build the per-element citation map for THIS drawing from the global index (drives the ↗ badge + dbl-click jump).
   _buildXrefIndex() {
     const idx = {}; let x = {};
     try { x = this.plugin._loadXref(); } catch (_e) {}
-    for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label, inImage: e.inImage, frac: e.frac }); }
+    for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label, inImage: e.inImage, frac: e.frac, fracPoly: e.fracPoly }); }
     this._xrefByEl = idx;
   }
   // Canvas → note: page-flip THIS panel to the citing note and highlight the exact line (Nav plugin pulses it).
@@ -919,12 +1002,14 @@ class CanvasView {
     return blob.size;
   }
   // P1.5: render a world-bounds region to a PNG dataURL (shapes/text/images; cards via drawElement fallback).
-  _renderRegionPng(b, scale) {
+  // clipPoly (optional, WORLD coords) → render only inside that freehand shape (transparent outside) for the chip thumbnail.
+  _renderRegionPng(b, scale, clipPoly) {
     const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(b.w * scale)); cv.height = Math.max(1, Math.round(b.h * scale));
     const ctx = cv.getContext('2d');
-    ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.setTransform(scale, 0, 0, scale, -b.x * scale, -b.y * scale);
-    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images now render; cards skipped (async). outside-bounds clip to canvas
+    if (clipPoly && clipPoly.length >= 3) { ctx.beginPath(); ctx.moveTo(clipPoly[0].x, clipPoly[0].y); for (let i = 1; i < clipPoly.length; i++) ctx.lineTo(clipPoly[i].x, clipPoly[i].y); ctx.closePath(); ctx.clip(); }
+    ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(b.x, b.y, b.w, b.h); // bg inside clip only
+    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images render; cards skipped (async)
     return cv.toDataURL('image/png');
   }
   // P1.5: Printable Layout — named frames become ordered pages; opens a print view (Save as PDF).
@@ -1150,6 +1235,7 @@ class CanvasView {
     let lpTimer = null; const clearLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }; // S10 long-press
     const onDown = (e) => {
       host.focus();
+      if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
       // last frame (screen-space CSS coords), so an in-image region pin is clickable right on its spot.
@@ -1227,15 +1313,15 @@ class CanvasView {
     const onMove = (e) => {
       if (!mode) return; moved = true; clearLP(); // S10: any drag cancels a pending long-press open
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
-      if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this.dirty = true; return; }
+      if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._lastCamChange = this._now(); this.dirty = true; return; }
       const w = this._worldAt(e);
       if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
-      if (mode === 'pen' && created) { created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
+      if (mode === 'pen' && created) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); created.points.push([cw.x, cw.y]); } } else created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
-      if (mode === 'lasso') { if (this._lasso) this._lasso.push([w.x, w.y]); this.dirty = true; return; }
+      if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
@@ -1278,7 +1364,7 @@ class CanvasView {
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
           for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
           const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-          if (rect.w > 4 && rect.h > 4) { const img = this._topImageIn(rect); if (img) this._setPendingImgRegion(img, rect); }
+          if (rect.w > 4 && rect.h > 4) { const img = this._topImageIn(rect); if (img) this._setPendingImgRegion(img, rect, poly); }
         }
         this.tool = 'select'; this._syncToolbar();
       }
@@ -1290,7 +1376,7 @@ class CanvasView {
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
       mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this.dirty = true;
     };
-    const onWheel = (e) => { e.preventDefault(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
+    const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if (this._present) { // present mode: read-only; Esc exits, arrows/space step through frame-slides (P0.5)
@@ -2608,9 +2694,10 @@ class CanvasView {
       const pr = this._pendingImgRegion; const img = this._byId(pr.imgId);
       if (img) {
         let label = 'region'; try { const t = await this._promptText('Chip label (the inline-chip text, e.g. “Oregon”):', label); if (t === null) return false; label = (t.trim() || 'region'); } catch (_e) {}
-        let png = null; try { const du = this._renderRegionPng(pr.rect, 2); png = await (await fetch(du)).blob(); } catch (_e) {}
+        const clipPoly = pr.fracPoly ? this._imgRegionPolyWorld(img, pr.fracPoly) : null; // freehand thumbnail = just the shape
+        let png = null; try { const du = this._renderRegionPng(pr.rect, 2, clipPoly); png = await (await fetch(du)).blob(); } catch (_e) {}
         if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the region.', dismissible: true }); } catch (_e) {} return false; }
-        this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: pr.imgId, crop: null, inImage: true, frac: pr.frac, region: pr.rect, w: Math.round(pr.rect.w), h: Math.round(pr.rect.h), label };
+        this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: pr.imgId, crop: null, inImage: true, frac: pr.frac, fracPoly: pr.fracPoly, region: pr.rect, w: Math.round(pr.rect.w), h: Math.round(pr.rect.h), label };
         this._pendingImgRegion = null; this.dirty = true;
         try { this.plugin.ui.addToaster({ title: 'Region cited — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
         return true;
@@ -2673,14 +2760,16 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
+    this._cacheValid = false; this._pendingImgRegion = null; // undo/redo replaced the scene → cache stale
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
   }
   undo() { if (!this._undo.length) return; this._redo.push(this._snapshot()); this._restore(this._undo.pop()); }
   redo() { if (!this._redo.length) return; this._undo.push(this._snapshot()); this._restore(this._redo.pop()); }
-  _saveCamera() { this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom; if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
+  _saveCamera() { this._lastCamChange = this._now(); this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom; if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
   render() {
     if (this.destroyed || !this.staticCv) return;
+    if (this._camAnim) this._stepCamAnim(); // advance the cinematic camera tween before drawing this frame
     this._syncPropPanel();
     const dark = !!(this.plugin._settings && this.plugin._settings.darkMode); // UX-6: dark mode (canvas + chrome)
     if (this.wrap) this.wrap.classList.toggle('pxc-dark', dark);
@@ -2689,16 +2778,30 @@ class CanvasView {
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); // UX-6 dark mode override (no scene mutation)
     sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
-    sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-    this._drawGrid(sctx);
-    // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
-    const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
-    const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
-    let drawn = 0;
-    for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
-    for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
-    this._drawnCount = drawn;
-    this._drawGhosts(sctx);
+    // PERF: during camera MOTION (the zoom animation, or a fresh pan/zoom), BLIT the cached scene bitmap
+    // transformed instead of re-rendering every element — O(1). A debounced settle does one crisp render
+    // when motion stops (filling any blank edges). Cache is invalidated on any element edit.
+    const cc = this._cacheCam, moving = !!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110);
+    const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
+    // Blit only when scaling UP (zoom-in or pan): a viewport cache can't cover area revealed by zooming OUT,
+    // so zoom-out frames render crisp (which also re-caches at the wider zoom). Avoids blank edges on the establish.
+    if (moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
+      const s = z / cc.zoom, tx = (cc.x - this.camera.x) * z * d, ty = (cc.y - this.camera.y) * z * d;
+      sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
+      this._scheduleSettle();
+    } else {
+      sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      this._drawGrid(sctx);
+      // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
+      const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
+      const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
+      let drawn = 0;
+      for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
+      for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
+      this._drawnCount = drawn;
+      this._drawGhosts(sctx);
+      this._refreshCache();
+    }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
@@ -2722,8 +2825,8 @@ class CanvasView {
     if (this._pendingImgRegion) { // a region marked for citing — live accent quad over the image (rotation-aware)
       const pimg = this._byId(this._pendingImgRegion.imgId);
       if (pimg && !pimg.isDeleted) {
-        const q = this._imgRegionQuad(pimg, this._pendingImgRegion.frac);
-        if (q) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < 4; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(124,92,255,0.14)'; ictx.fill(); ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.8 / z; ictx.setLineDash([7 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0); }
+        const q = this._regionShapeWorld(pimg, this._pendingImgRegion.frac, this._pendingImgRegion.fracPoly);
+        if (q && q.length) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(124,92,255,0.14)'; ictx.fill(); ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.8 / z; ictx.setLineDash([7 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0); }
       } else { this._pendingImgRegion = null; }
     }
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
@@ -2753,7 +2856,7 @@ class CanvasView {
         const el = this._byId(id); if (!el || el.isDeleted) continue;
         for (const entry of this._xrefByEl[id]) {
           let wp = null;
-          if (entry.inImage && entry.frac) { const q = this._imgRegionQuad(el, entry.frac); if (q) wp = q[1]; } // region's top-right corner
+          if (entry.inImage && entry.frac) { const q = this._regionShapeWorld(el, entry.frac, entry.fracPoly); if (q && q.length) { const rb = this._polyBBox(q); wp = { x: rb.x + rb.w, y: rb.y }; } } // region's top-right corner
           if (!wp) { const bb = this._elBBox(el); if (!bb) continue; wp = { x: bb.x + bb.w, y: bb.y }; }
           const p = this.camera.worldToScreen(wp.x, wp.y), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
           ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.94)'; ictx.fill();
@@ -2774,17 +2877,18 @@ class CanvasView {
         const pulses = 2, tp = (t * pulses) % 1, ease = 1 - Math.pow(1 - tp, 3);
         ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.save();
         const fEl = this._flash.inImage ? this._byId(this._flash.elId) : null;
-        const quad = (this._flash.inImage && fEl && this._flash.frac) ? this._imgRegionQuad(fEl, this._flash.frac) : null;
-        if (quad) {
-          const sq = quad.map((pt) => { const s = this.camera.worldToScreen(pt.x, pt.y); return { x: s.x * d, y: s.y * d }; });
-          const path = () => { ictx.beginPath(); ictx.moveTo(sq[0].x, sq[0].y); for (let i = 1; i < 4; i++) ictx.lineTo(sq[i].x, sq[i].y); ictx.closePath(); };
-          // SPOTLIGHT: dim the whole viewport, punch out the region (rises fast, fades out by ~70%)
-          const dimA = 0.55 * Math.min(1, t * 5) * (1 - Math.max(0, (t - 0.35) / 0.65));
+        const shape = (this._flash.inImage && fEl && this._flash.frac) ? this._regionShapeWorld(fEl, this._flash.frac, this._flash.fracPoly) : null;
+        if (shape && shape.length) {
+          const sq = shape.map((pt) => { const s = this.camera.worldToScreen(pt.x, pt.y); return { x: s.x * d, y: s.y * d }; });
+          const path = () => { ictx.beginPath(); ictx.moveTo(sq[0].x, sq[0].y); for (let i = 1; i < sq.length; i++) ictx.lineTo(sq[i].x, sq[i].y); ictx.closePath(); };
+          // SPOTLIGHT: dim the rest of the image, punch out the region. Deeper + lingers a touch longer.
+          const dimA = 0.62 * Math.min(1, t * 5) * (1 - Math.max(0, (t - 0.45) / 0.55));
           if (dimA > 0.01) { ictx.save(); ictx.fillStyle = 'rgba(13,15,23,' + dimA + ')'; ictx.fillRect(0, 0, this.iCv.width, this.iCv.height); ictx.globalCompositeOperation = 'destination-out'; path(); ictx.fill(); ictx.restore(); }
-          // glowing accent ring on the region quad, 2 quick pulses
-          const ringA = Math.max(0, (1 - tp) * (1 - t * 0.25));
-          path(); ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = (3 + ease * 2) * d; ictx.shadowColor = 'rgba(124,92,255,0.95)'; ictx.shadowBlur = 26 * d * (1 - tp); ictx.stroke();
-          ictx.shadowBlur = 0; ictx.lineWidth = 2 * d; ictx.strokeStyle = 'rgba(205,190,255,' + Math.max(0, 0.92 * (1 - t)) + ')'; path(); ictx.stroke();
+          // GLOW: an outer soft bloom ring + an inner accent ring + a crisp highlight, 2 quick pulses.
+          const ringA = Math.max(0, (1 - tp) * (1 - t * 0.2));
+          path(); ictx.strokeStyle = 'rgba(124,92,255,' + (ringA * 0.55) + ')'; ictx.lineWidth = (7 + ease * 6) * d; ictx.shadowColor = 'rgba(124,92,255,1)'; ictx.shadowBlur = 34 * d * (1 - tp * 0.6); ictx.stroke();
+          path(); ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = (3 + ease * 2) * d; ictx.shadowBlur = 22 * d * (1 - tp); ictx.stroke();
+          ictx.shadowBlur = 0; ictx.lineWidth = 2 * d; ictx.strokeStyle = 'rgba(210,196,255,' + Math.max(0, 0.95 * (1 - t)) + ')'; path(); ictx.stroke();
         } else {
           const bb = this._flash.bbox;
           const tl = this.camera.worldToScreen(bb.x, bb.y), br = this.camera.worldToScreen(bb.x + bb.w, bb.y + bb.h);
@@ -2821,13 +2925,14 @@ class CanvasView {
     }
   }
   scheduleSave() {
+    this._cacheValid = false; // content changed → the render cache must be rebuilt (next crisp render does it)
     // edit save: record an undo step (push the prior committed state, snapshot the new one)
     if (this._committed !== undefined) { this._undo.push(this._committed); if (this._undo.length > 80) this._undo.shift(); this._redo = []; }
     this._committed = this._snapshot();
     if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
   }
   async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res; }
-  destroy() { this.destroyed = true; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -3087,12 +3192,12 @@ class Plugin extends AppPlugin {
     // Encode the whole cross-reference into the image's BLOB FILENAME (synced metadata that travels to every
     // client — web AND desktop), so the ↗ chip + navigation reconstruct anywhere, not just where it was made.
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
-    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac });
+    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly });
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
-    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac }); } catch (_e) {} }
+    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly }); } catch (_e) {} }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
     return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
@@ -3145,7 +3250,9 @@ class Plugin extends AppPlugin {
     const enc = (s) => encodeURIComponent(String(s == null ? '' : s)).replace(/~/g, '%7E');
     const reg = (d.region && isFinite(d.region.x)) ? [d.region.x, d.region.y, d.region.w, d.region.h].map((n) => Math.round(n)).join('_') : '';
     const frac = (d.inImage && d.frac) ? 'F' + [d.frac.rx, d.frac.ry, d.frac.rw, d.frac.rh].map((n) => (+n).toFixed(4)).join('_') : '';
-    return 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + enc(d.label) + '~' + frac + '.png';
+    // Freehand shape as integers ×1000 (compact, keeps the filename < 255): P<fx_fy_fx_fy…>
+    const poly = (d.fracPoly && d.fracPoly.length >= 3) ? 'P' + d.fracPoly.map((p) => Math.round(p.fx * 1000) + '_' + Math.round(p.fy * 1000)).join('_') : '';
+    return 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + enc(d.label) + '~' + frac + '~' + poly + '.png';
   }
   _parseRefFilename(fn) {
     if (!fn || fn.indexOf('plexusref~') !== 0) return null;
@@ -3156,6 +3263,7 @@ class Plugin extends AppPlugin {
     let region = null; if (parts[3]) { const p = parts[3].split('_').map(Number); if (p.length === 4 && p.every((n) => !isNaN(n))) region = { x: p[0], y: p[1], w: p[2], h: p[3] }; }
     const out = { drawing, el, region, label: dec(parts[4]) || 'region', image: true };
     if (parts[5] && parts[5][0] === 'F') { const p = parts[5].slice(1).split('_').map(Number); if (p.length === 4 && p.every((n) => !isNaN(n))) { out.inImage = true; out.frac = { rx: p[0], ry: p[1], rw: p[2], rh: p[3] }; } }
+    if (parts[6] && parts[6][0] === 'P') { const nums = parts[6].slice(1).split('_').map(Number); if (nums.length >= 6 && nums.length % 2 === 0 && nums.every((n) => !isNaN(n))) { out.fracPoly = []; for (let i = 0; i < nums.length; i += 2) out.fracPoly.push({ fx: nums[i] / 1000, fy: nums[i + 1] / 1000 }); } }
     return out;
   }
   // On opening a note, rebuild the local index from the synced image-blob filenames, so the ↗ chips appear
