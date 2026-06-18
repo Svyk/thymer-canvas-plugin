@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.83.0';
+const PLEXUS_VERSION = '0.84.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1474,6 +1474,29 @@ class CanvasView {
     this._updateBindings(); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Pulled in ' + add.length + ' neighbour(s).', dismissible: true }); } catch (_e) {}
   }
+  // CS-6: milestone snapshots — save the current drawing state and restore an earlier one (replay its evolution).
+  // Quota-safe: capped at 8 per drawing in localStorage, skipped if a scene is too large to store.
+  _saveMilestone() {
+    if (!this.rec || !this.rec.guid) return;
+    try {
+      const json = JSON.stringify({ elements: this.scene.elements, files: this.scene.files, appState: this.scene.appState });
+      if (json.length > 600000) { try { this.plugin.ui.addToaster({ title: 'Plexus: drawing too large to snapshot.', dismissible: true }); } catch (_e) {} return; }
+      const key = 'plexus_milestones_' + this.rec.guid; let hist = []; try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_e) {}
+      hist.push({ at: Date.now(), scene: json }); while (hist.length > 8) hist.shift();
+      localStorage.setItem(key, JSON.stringify(hist));
+      try { this.plugin.ui.addToaster({ title: 'Milestone ' + hist.length + ' saved.', dismissible: true }); } catch (_e) {}
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: snapshot failed (storage quota).', dismissible: true }); } catch (_e) {} }
+  }
+  async _restoreMilestone() {
+    if (!this.rec || !this.rec.guid) return;
+    const key = 'plexus_milestones_' + this.rec.guid; let hist = []; try { hist = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_e) {}
+    if (!hist.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no milestones saved for this drawing.', dismissible: true }); } catch (_e) {} return; }
+    const labels = hist.map((h, i) => (i + 1) + ') ' + (h.at ? new Date(h.at).toLocaleString() : '?')).join('\n');
+    const s = await this._promptText('Restore which milestone?\n' + labels + '\nEnter #:', String(hist.length));
+    if (s == null) return;
+    const i = Math.max(1, Math.min(hist.length, parseInt(s, 10) || hist.length)) - 1;
+    try { const sc = JSON.parse(hist[i].scene); this.scene.elements = sc.elements || []; if (sc.files) this.scene.files = sc.files; if (sc.appState) this.scene.appState = Object.assign(this.scene.appState || {}, sc.appState); this.selected.clear(); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Restored milestone ' + (i + 1) + '.', dismissible: true }); } catch (_e) {} } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: restore failed.', dismissible: true }); } catch (_e) {} }
+  }
   // CS-5: collection stencil stamp — CREATE a new typed record in a chosen collection and drop a live card bound
   // to it. Turns the canvas into a record factory ("stamp a Person / Sampling Site"). Obsidian stamps inert shapes.
   async _stampRecord() {
@@ -2508,6 +2531,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Save milestone snapshot', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._saveMilestone(); } }); // CS-6
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Restore milestone (time-lapse)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._restoreMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pull in neighbours (backlink halo)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
