@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.80.0';
+const PLEXUS_VERSION = '0.81.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1173,6 +1173,14 @@ class CanvasView {
       if (mmSel && mmSel.mmRoot && mmSel.type === 'text') {
         if (e.key === 'Tab') { e.preventDefault(); this._mmAddChild(mmSel); return; }
         if (e.key === 'Enter') { e.preventDefault(); this._mmAddSibling(mmSel); return; }
+        if (e.altKey) { // CP-3 v3c: Alt-key branch ops + spatial nav
+          const k = e.key.toLowerCase();
+          if (k === 'c') { e.preventDefault(); this._mmCopyBranch(mmSel); return; }
+          if (k === 'x') { e.preventDefault(); this._mmCutBranch(mmSel); return; }
+          if (k === 'v') { e.preventDefault(); this._mmPasteBranch(mmSel); return; }
+          if (k === 'b') { e.preventDefault(); this._mmToggleBoundary(mmSel); return; }
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase()); return; }
+        }
       }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
@@ -1708,6 +1716,44 @@ class CanvasView {
     this._mmLayout(root.id); this.selected.clear(); this.selected.add(root.id); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: made ? ('Mind map: ' + made + ' nodes from headings.') : 'Note has no headings — added a central node.', dismissible: true }); } catch (_e) {}
     return root.id;
+  }
+  // CP-3 v3c: the subtree under a node (node + descendants), branch copy/cut/paste, boundary box, spatial nav.
+  _mmSubtree(rootNode) {
+    const all = this._mmNodes(rootNode.mmRoot), out = []; const visit = (id) => { const n = all.find((e) => e.id === id); if (!n) return; out.push(n); for (const k of all.filter((e) => e.mmParent === id)) visit(k.id); }; visit(rootNode.id); return out;
+  }
+  _mmCopyBranch(node) {
+    const sub = this._mmSubtree(node); const ids = new Set(sub.map((n) => n.id));
+    this._mmClip = sub.map((n) => ({ id: n.id, text: n.text, dx: n.x - node.x, dy: n.y - node.y, parent: (n.mmParent && ids.has(n.mmParent)) ? n.mmParent : null }));
+    try { this.plugin.ui.addToaster({ title: 'Branch copied (' + sub.length + ' node' + (sub.length === 1 ? '' : 's') + ').', dismissible: true }); } catch (_e) {}
+  }
+  _mmCutBranch(node) {
+    if (node.id === node.mmRoot) { try { this.plugin.ui.addToaster({ title: 'Plexus: can’t cut the central node.', dismissible: true }); } catch (_e) {} return; }
+    this._mmCopyBranch(node); const sub = new Set(this._mmSubtree(node).map((n) => n.id));
+    for (const e of this.scene.elements) { if (e.isDeleted) continue; if (sub.has(e.id)) e.isDeleted = true; if (e.mmEdge && (sub.has(e.mmEdge.from) || sub.has(e.mmEdge.to))) e.isDeleted = true; }
+    this._mmLayout(node.mmRoot); this.selected.clear(); this.dirty = true; this.scheduleSave();
+  }
+  _mmPasteBranch(target) {
+    if (!this._mmClip || !this._mmClip.length || !target || !target.mmRoot) { try { this.plugin.ui.addToaster({ title: 'Plexus: copy a branch first (Alt+C).', dismissible: true }); } catch (_e) {} return; }
+    const idMap = {};
+    for (const c of this._mmClip) { const el = this._mmMakeNode(c.text, target.x + 200 + c.dx, target.y + c.dy, target.mmRoot, null); idMap[c.id] = el; this.scene.elements.push(el); }
+    for (const c of this._mmClip) { const el = idMap[c.id]; const par = c.parent ? idMap[c.parent] : target; el.mmParent = par.id; const edge = makeLinear(par.x, par.y, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); edge.mmRoot = target.mmRoot; edge.mmEdge = { from: par.id, to: el.id }; this.scene.elements.push(edge); }
+    this._mmLayout(target.mmRoot); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Branch pasted.', dismissible: true }); } catch (_e) {}
+  }
+  _mmToggleBoundary(node) {
+    const existing = this.scene.elements.find((e) => !e.isDeleted && e.mmBoundaryFor === node.id);
+    if (existing) { existing.isDeleted = true; this.dirty = true; this.scheduleSave(); return; }
+    const sub = this._mmSubtree(node).filter((n) => !n.mmHidden); if (!sub.length) return;
+    const minx = Math.min(...sub.map((n) => n.x)) - 14, miny = Math.min(...sub.map((n) => n.y)) - 14, maxx = Math.max(...sub.map((n) => n.x + n.width)) + 14, maxy = Math.max(...sub.map((n) => n.y + n.height)) + 14;
+    const rect = makeRect(minx, miny, maxx - minx, maxy - miny, { type: 'rectangle', stroke: '#7c5cff', fill: 'transparent', fillStyle: 'solid' }); rect.roughness = 0; rect.mmBoundaryFor = node.id; rect.mmRoot = node.mmRoot;
+    this.scene.elements.unshift(rect); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Boundary added (Alt+B to remove).', dismissible: true }); } catch (_e) {}
+  }
+  _mmNav(node, dir) {
+    const all = this._mmNodes(node.mmRoot).filter((n) => !n.mmHidden && n.id !== node.id); const cx = node.x + node.width / 2, cy = node.y + node.height / 2;
+    let best = null, bestD = Infinity;
+    for (const n of all) { const dx = (n.x + n.width / 2) - cx, dy = (n.y + n.height / 2) - cy; const ok = dir === 'left' ? dx < -10 : dir === 'right' ? dx > 10 : dir === 'up' ? dy < -10 : dy > 10; if (!ok) continue; const d = Math.hypot(dx, dy); if (d < bestD) { bestD = d; best = n; } }
+    if (best) { this.selected.clear(); this.selected.add(best.id); this.dirty = true; }
   }
   // CP-3 (v3a): fold/unfold a node — hides/shows its whole subtree (and connecting edges) and re-lays out.
   _mmToggleFold(node) {
