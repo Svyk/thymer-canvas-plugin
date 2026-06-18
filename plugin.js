@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.87.0';
+const PLEXUS_VERSION = '0.87.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2869,17 +2869,21 @@ class Plugin extends AppPlugin {
   _registerXref(lineGuid, data) {
     if (!lineGuid || !data || !data.drawing) return;
     const x = this._loadXref(); x[lineGuid] = Object.assign({ t: Date.now() }, data); this._saveXref(x);
-    for (const v of this._views) { if (v.rec && v.rec.guid === data.drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
+    for (const v of this._views) { if (v.recordGuid === data.drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
   }
   // Note → canvas: open the cited drawing (or reuse an already-open view) and flash the cited element/region.
+  // Match views by recordGuid (set at construction) — NOT rec.guid (async-loaded, unreliable); the codebase pattern.
   async _navToCanvasAnchor(entry) {
     if (!entry || !entry.drawing) return;
-    let view = [...this._views].find((v) => v.rec && v.rec.guid === entry.drawing && v.scene);
+    const find = () => [...this._views].filter((v) => v.recordGuid === entry.drawing).pop();
+    let view = find();
     if (!view) {
       try { await this._openPanelFor(entry.drawing, {}); } catch (_e) {}
-      for (let i = 0; i < 30 && !view; i++) { view = [...this._views].find((v) => v.rec && v.rec.guid === entry.drawing && v.scene); if (view) break; await sleep(120); }
+      for (let i = 0; i < 40 && !view; i++) { await sleep(100); view = find(); }
     }
-    if (view) { try { view._flashAnchor(entry); } catch (e) { console.error('[Plexus] navToAnchor', e); } }
+    if (!view) return;
+    for (let j = 0; j < 25 && !view.rec; j++) await sleep(100); // let the scene load so the bbox is real before fitting
+    try { view._flashAnchor(entry); } catch (e) { console.error('[Plexus] navToAnchor', e); }
   }
   // UX-5/UX-6: lightweight settings modal (banner-preview toggle + dark canvas). Persisted to localStorage.
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
