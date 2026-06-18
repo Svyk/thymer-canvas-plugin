@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.90.1';
+const PLEXUS_VERSION = '0.91.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -773,6 +773,40 @@ class CanvasView {
     const x = Math.min(el.x, el.x + (w || 0)), y = Math.min(el.y, el.y + (h || 0));
     return { x, y, w: Math.abs(w || 0), h: Math.abs(h || 0) };
   }
+  /* ── In-image region anchoring ─────────────────────────────────────────────────────────────
+   * A region reference is stored as a FRACTION of the image element's display bbox, so it tracks
+   * the image when it moves/resizes/reframes (the world rect is recomputed live every draw).
+   * el.crop only changes the SOURCE rect in _drawImage; the dest is always the element bbox, so
+   * the fraction is crop-independent. Rotation (el.angle) rotates the region quad about the center. */
+  _imgRegionFrac(el, rect) {
+    const b = this._elBBox(el); if (!b || !(b.w > 0) || !(b.h > 0)) return null;
+    let rx = (rect.x - b.x) / b.w, ry = (rect.y - b.y) / b.h, rw = rect.w / b.w, rh = rect.h / b.h;
+    rx = Math.max(0, Math.min(1, rx)); ry = Math.max(0, Math.min(1, ry));
+    rw = Math.max(0.01, Math.min(1 - rx, rw)); rh = Math.max(0.01, Math.min(1 - ry, rh));
+    return { rx, ry, rw, rh };
+  }
+  _imgRegionWorld(el, frac) {
+    const b = this._elBBox(el); if (!b || !frac) return null;
+    return { x: b.x + frac.rx * b.w, y: b.y + frac.ry * b.h, w: frac.rw * b.w, h: frac.rh * b.h };
+  }
+  // 4 world corners of the region (rotated by el.angle about the element centre — matches _drawImage's rotation).
+  _imgRegionQuad(el, frac) {
+    const r = this._imgRegionWorld(el, frac); if (!r) return null;
+    const b = this._elBBox(el), cx = b.x + b.w / 2, cy = b.y + b.h / 2, a = el.angle || 0;
+    const pts = [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
+    if (!a) return pts.map(([px, py]) => ({ x: px, y: py }));
+    const ca = Math.cos(a), sa = Math.sin(a);
+    return pts.map(([px, py]) => { const dx = px - cx, dy = py - cy; return { x: cx + dx * ca - dy * sa, y: cy + dx * sa + dy * ca }; });
+  }
+  // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
+  // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
+  _setPendingImgRegion(img, rect) {
+    const frac = this._imgRegionFrac(img, rect); if (!frac) return false;
+    this._pendingImgRegion = { imgId: img.id, frac, rect: this._imgRegionWorld(img, frac) };
+    this.selected.clear(); this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: 'Region marked on the image — click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {}
+    return true;
+  }
   // Center the target if it isn't already comfortably on screen (gentle zoom cap), then mark dirty.
   _revealBounds(b) {
     if (!b || !isFinite(b.x)) return;
@@ -789,8 +823,16 @@ class CanvasView {
   }
   // Reveal + a fast, attention-grabbing double-pulse ring on the referenced element/region.
   _flashAnchor(anchor) {
-    let bbox = null;
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const el = (anchor && anchor.el) ? this._byId(anchor.el) : null;
+    // EMBEDDED in-image region: recompute the live world rect from the fraction so it tracks the image's
+    // CURRENT geometry (moved/resized/rotated). Spotlight that exact sub-region in place — no crop copy.
+    if (anchor && anchor.inImage && anchor.frac && el) {
+      const world = this._imgRegionWorld(el, anchor.frac);
+      if (world && isFinite(world.x)) { this._revealBounds(world); this._flash = { bbox: world, inImage: true, elId: el.id, frac: anchor.frac, start: now(), dur: 1050 }; this.dirty = true; return; }
+    }
+    if (anchor && anchor.inImage && !el) { try { this.plugin.ui.addToaster({ title: 'Plexus: the source image for this reference was removed.', dismissible: true }); } catch (_e) {} }
+    let bbox = null;
     const elB = el ? this._elBBox(el) : null;
     const reg = (anchor && anchor.region && isFinite(anchor.region.x)) ? anchor.region : null;
     // A region that's a real SUB-area of the element (e.g. Oregon on a US-map image) → zoom the region;
@@ -800,14 +842,14 @@ class CanvasView {
     if (!bbox) { try { bbox = sceneBounds(this.scene); } catch (_e) {} }
     if (!bbox || !isFinite(bbox.x)) return;
     this._revealBounds(bbox);
-    this._flash = { bbox, start: (typeof performance !== 'undefined' ? performance.now() : Date.now()), dur: 950 };
+    this._flash = { bbox, start: now(), dur: 950 };
     this.dirty = true;
   }
   // Build the per-element citation map for THIS drawing from the global index (drives the ↗ badge + dbl-click jump).
   _buildXrefIndex() {
     const idx = {}; let x = {};
     try { x = this.plugin._loadXref(); } catch (_e) {}
-    for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label }); }
+    for (const k in x) { const e = x[k]; if (e && e.drawing === this.recordGuid && e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label, inImage: e.inImage, frac: e.frac }); }
     this._xrefByEl = idx;
   }
   // Canvas → note: page-flip THIS panel to the citing note and highlight the exact line (Nav plugin pulses it).
@@ -1109,10 +1151,11 @@ class CanvasView {
     const onDown = (e) => {
       host.focus();
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
-      // Cross-ref ↗ chip (top-right of a cited element) → page-flip to the citing note. Single click, before drawing.
-      if (this._xrefByEl && (e.button === 0 || e.button === -1) && !this._present) {
-        const w0 = this._worldAt(e), tol = 13 / this.camera.zoom;
-        for (const id in this._xrefByEl) { const el = this._byId(id); if (!el || el.isDeleted) continue; const bb = this._elBBox(el); if (!bb) continue; if (Math.abs(w0.x - (bb.x + bb.w)) <= tol && Math.abs(w0.y - bb.y) <= tol) { const arr = this._xrefByEl[id]; if (arr && arr.length) { try { e.preventDefault(); } catch (_e) {} this._jumpToCiting(arr[0].lineGuid); return; } } }
+      // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
+      // last frame (screen-space CSS coords), so an in-image region pin is clickable right on its spot.
+      if (this._xrefPins && this._xrefPins.length && (e.button === 0 || e.button === -1) && !this._present) {
+        const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top;
+        for (const pin of this._xrefPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} this._jumpToCiting(pin.lineGuid); return; } }
       }
       // S4: pen/touch routing — a pen draws freedraw without picking the Pen tool; a single finger pans.
       if (!this._present && this._penActive() && (e.button === 0 || e.button === -1)) {
@@ -1221,7 +1264,7 @@ class CanvasView {
       } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
-        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._referenceRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
+        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
       }
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
@@ -1235,7 +1278,7 @@ class CanvasView {
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
           for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
           const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-          if (rect.w > 4 && rect.h > 4) { const img = this._topImageIn(rect); if (img) { const crop = this._referenceRegion(img, rect); if (crop) { try { this.plugin.ui.addToaster({ title: 'Region selected — now click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {} } } }
+          if (rect.w > 4 && rect.h > 4) { const img = this._topImageIn(rect); if (img) this._setPendingImgRegion(img, rect); }
         }
         this.tool = 'select'; this._syncToolbar();
       }
@@ -1288,7 +1331,7 @@ class CanvasView {
       }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
-      if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
@@ -2560,6 +2603,20 @@ class CanvasView {
   // Copy the selected image (or a given element) onto the plugin's image-ref clipboard, so it can be
   // pasted as a block reference into any note. Stores a PNG snapshot + the source record + element id.
   async _copyImageRefToClip(el) {
+    // EMBEDDED in-image region (from crop/lasso over an image) — cite the region IN PLACE, no crop copy.
+    if (this._pendingImgRegion) {
+      const pr = this._pendingImgRegion; const img = this._byId(pr.imgId);
+      if (img) {
+        let label = 'region'; try { const t = await this._promptText('Chip label (the inline-chip text, e.g. “Oregon”):', label); if (t === null) return false; label = (t.trim() || 'region'); } catch (_e) {}
+        let png = null; try { const du = this._renderRegionPng(pr.rect, 2); png = await (await fetch(du)).blob(); } catch (_e) {}
+        if (!png) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the region.', dismissible: true }); } catch (_e) {} return false; }
+        this.plugin._imgRefClip = { png, sourceRecordGuid: this.recordGuid, elementId: pr.imgId, crop: null, inImage: true, frac: pr.frac, region: pr.rect, w: Math.round(pr.rect.w), h: Math.round(pr.rect.h), label };
+        this._pendingImgRegion = null; this.dirty = true;
+        try { this.plugin.ui.addToaster({ title: 'Region cited — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
+        return true;
+      }
+      this._pendingImgRegion = null;
+    }
     el = el || this._singleSel();
     if (!((el && el.type === 'image') || this.selected.size)) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image, a region, or element(s) to cite first.', dismissible: true }); } catch (_e) {} return false; }
     // Ask for a chip label (the inline-chip text in the note, e.g. "Oregon"). Default = a nearby text label or the drawing name.
@@ -2662,6 +2719,13 @@ class CanvasView {
       ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.5 / z; ictx.setLineDash([6 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]);
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    if (this._pendingImgRegion) { // a region marked for citing — live accent quad over the image (rotation-aware)
+      const pimg = this._byId(this._pendingImgRegion.imgId);
+      if (pimg && !pimg.isDeleted) {
+        const q = this._imgRegionQuad(pimg, this._pendingImgRegion.frac);
+        if (q) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < 4; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(124,92,255,0.14)'; ictx.fill(); ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.8 / z; ictx.setLineDash([7 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0); }
+      } else { this._pendingImgRegion = null; }
+    }
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -2679,35 +2743,61 @@ class CanvasView {
       }
       if (this._laser.length) this.dirty = true; // keep animating the fade
     }
-    // Cross-ref affordance: a small ↗ badge at the top-right of any element a note cites.
+    // Cross-ref ↗ pins — one per cited line. An in-image region pin sits ON its region (tracks the image as it
+    // moves/resizes/rotates); a whole-element cite sits at the element corner. Hit-targets stored for click-to-note.
+    this._xrefPins = [];
     if (this._xrefByEl) {
-      const keys = Object.keys(this._xrefByEl);
-      if (keys.length) {
-        ictx.setTransform(1, 0, 0, 1, 0, 0);
-        for (const id of keys) { const el = this._byId(id); if (!el || el.isDeleted) continue; const bb = this._elBBox(el); if (!bb) continue; const p = this.camera.worldToScreen(bb.x + bb.w, bb.y); const cx = p.x * d, cy = p.y * d, rr = 8.5 * d; ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.92)'; ictx.fill(); ictx.fillStyle = '#fff'; ictx.font = (11 * d) + 'px system-ui, sans-serif'; ictx.textAlign = 'center'; ictx.textBaseline = 'middle'; ictx.fillText('↗', cx, cy); }
-        ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+      ictx.font = (11 * d) + 'px system-ui, sans-serif'; ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
+      for (const id of Object.keys(this._xrefByEl)) {
+        const el = this._byId(id); if (!el || el.isDeleted) continue;
+        for (const entry of this._xrefByEl[id]) {
+          let wp = null;
+          if (entry.inImage && entry.frac) { const q = this._imgRegionQuad(el, entry.frac); if (q) wp = q[1]; } // region's top-right corner
+          if (!wp) { const bb = this._elBBox(el); if (!bb) continue; wp = { x: bb.x + bb.w, y: bb.y }; }
+          const p = this.camera.worldToScreen(wp.x, wp.y), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
+          ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.94)'; ictx.fill();
+          ictx.lineWidth = 1.5 * d; ictx.strokeStyle = 'rgba(255,255,255,0.85)'; ictx.stroke();
+          ictx.fillStyle = '#fff'; ictx.fillText('↗', cx, cy);
+          this._xrefPins.push({ x: p.x, y: p.y, r: 11, lineGuid: entry.lineGuid });
+        }
       }
+      ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
     }
-    // Flash pulse — fast, attention-grabbing double-ring + glow on a navigated cross-ref target.
+    // Flash — a fast, attention-grabbing pulse on a navigated cross-ref target. For an in-image region:
+    // SPOTLIGHT (dim the rest, region stays lit) + a glowing accent ring, recomputed LIVE so it tracks the image.
     if (this._flash) {
-      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-      const t = (now - this._flash.start) / this._flash.dur;
+      const fnow = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const t = (fnow - this._flash.start) / this._flash.dur;
       if (t >= 1) { this._flash = null; }
       else {
-        const bb = this._flash.bbox;
-        const tl = this.camera.worldToScreen(bb.x, bb.y), br = this.camera.worldToScreen(bb.x + bb.w, bb.y + bb.h);
-        const x = tl.x * d, y = tl.y * d, w = (br.x - tl.x) * d, h = (br.y - tl.y) * d;
         const pulses = 2, tp = (t * pulses) % 1, ease = 1 - Math.pow(1 - tp, 3);
         ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.save();
-        const base = 7 * d, rad = 9 * d;
-        const fillA = Math.max(0, 0.26 * (1 - t * 2.2));
-        if (fillA > 0) { ictx.fillStyle = 'rgba(124,92,255,' + fillA + ')'; this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.fill(); }
-        const grow = ease * 18 * d, ringA = Math.max(0, (1 - tp) * (1 - t * 0.3)), pad = base + grow;
-        ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = 3 * d;
-        ictx.shadowColor = 'rgba(124,92,255,0.95)'; ictx.shadowBlur = 22 * d * (1 - tp);
-        this._rrect(ictx, x - pad, y - pad, w + pad * 2, h + pad * 2, rad + grow * 0.5); ictx.stroke();
-        ictx.shadowBlur = 0; ictx.lineWidth = 2.2 * d; ictx.strokeStyle = 'rgba(190,170,255,' + Math.max(0, 0.95 * (1 - t)) + ')';
-        this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.stroke();
+        const fEl = this._flash.inImage ? this._byId(this._flash.elId) : null;
+        const quad = (this._flash.inImage && fEl && this._flash.frac) ? this._imgRegionQuad(fEl, this._flash.frac) : null;
+        if (quad) {
+          const sq = quad.map((pt) => { const s = this.camera.worldToScreen(pt.x, pt.y); return { x: s.x * d, y: s.y * d }; });
+          const path = () => { ictx.beginPath(); ictx.moveTo(sq[0].x, sq[0].y); for (let i = 1; i < 4; i++) ictx.lineTo(sq[i].x, sq[i].y); ictx.closePath(); };
+          // SPOTLIGHT: dim the whole viewport, punch out the region (rises fast, fades out by ~70%)
+          const dimA = 0.55 * Math.min(1, t * 5) * (1 - Math.max(0, (t - 0.35) / 0.65));
+          if (dimA > 0.01) { ictx.save(); ictx.fillStyle = 'rgba(13,15,23,' + dimA + ')'; ictx.fillRect(0, 0, this.iCv.width, this.iCv.height); ictx.globalCompositeOperation = 'destination-out'; path(); ictx.fill(); ictx.restore(); }
+          // glowing accent ring on the region quad, 2 quick pulses
+          const ringA = Math.max(0, (1 - tp) * (1 - t * 0.25));
+          path(); ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = (3 + ease * 2) * d; ictx.shadowColor = 'rgba(124,92,255,0.95)'; ictx.shadowBlur = 26 * d * (1 - tp); ictx.stroke();
+          ictx.shadowBlur = 0; ictx.lineWidth = 2 * d; ictx.strokeStyle = 'rgba(205,190,255,' + Math.max(0, 0.92 * (1 - t)) + ')'; path(); ictx.stroke();
+        } else {
+          const bb = this._flash.bbox;
+          const tl = this.camera.worldToScreen(bb.x, bb.y), br = this.camera.worldToScreen(bb.x + bb.w, bb.y + bb.h);
+          const x = tl.x * d, y = tl.y * d, w = (br.x - tl.x) * d, h = (br.y - tl.y) * d, base = 7 * d, rad = 9 * d;
+          const fillA = Math.max(0, 0.26 * (1 - t * 2.2));
+          if (fillA > 0) { ictx.fillStyle = 'rgba(124,92,255,' + fillA + ')'; this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.fill(); }
+          const grow = ease * 18 * d, ringA = Math.max(0, (1 - tp) * (1 - t * 0.3)), pad = base + grow;
+          ictx.strokeStyle = 'rgba(124,92,255,' + ringA + ')'; ictx.lineWidth = 3 * d;
+          ictx.shadowColor = 'rgba(124,92,255,0.95)'; ictx.shadowBlur = 22 * d * (1 - tp);
+          this._rrect(ictx, x - pad, y - pad, w + pad * 2, h + pad * 2, rad + grow * 0.5); ictx.stroke();
+          ictx.shadowBlur = 0; ictx.lineWidth = 2.2 * d; ictx.strokeStyle = 'rgba(190,170,255,' + Math.max(0, 0.95 * (1 - t)) + ')';
+          this._rrect(ictx, x - base, y - base, w + base * 2, h + base * 2, rad); ictx.stroke();
+        }
         ictx.restore();
         this.dirty = true;
       }
@@ -2997,12 +3087,12 @@ class Plugin extends AppPlugin {
     // Encode the whole cross-reference into the image's BLOB FILENAME (synced metadata that travels to every
     // client — web AND desktop), so the ↗ chip + navigation reconstruct anywhere, not just where it was made.
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
-    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel });
+    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac });
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
-    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true }); } catch (_e) {} }
+    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac }); } catch (_e) {} }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
     return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
@@ -3054,7 +3144,8 @@ class Plugin extends AppPlugin {
   _encodeRefFilename(d) {
     const enc = (s) => encodeURIComponent(String(s == null ? '' : s)).replace(/~/g, '%7E');
     const reg = (d.region && isFinite(d.region.x)) ? [d.region.x, d.region.y, d.region.w, d.region.h].map((n) => Math.round(n)).join('_') : '';
-    return 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + enc(d.label) + '.png';
+    const frac = (d.inImage && d.frac) ? 'F' + [d.frac.rx, d.frac.ry, d.frac.rw, d.frac.rh].map((n) => (+n).toFixed(4)).join('_') : '';
+    return 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + enc(d.label) + '~' + frac + '.png';
   }
   _parseRefFilename(fn) {
     if (!fn || fn.indexOf('plexusref~') !== 0) return null;
@@ -3063,7 +3154,9 @@ class Plugin extends AppPlugin {
     const drawing = dec(parts[1]); if (!drawing) return null;
     const el = dec(parts[2]) || null;
     let region = null; if (parts[3]) { const p = parts[3].split('_').map(Number); if (p.length === 4 && p.every((n) => !isNaN(n))) region = { x: p[0], y: p[1], w: p[2], h: p[3] }; }
-    return { drawing, el, region, label: dec(parts[4]) || 'region', image: true };
+    const out = { drawing, el, region, label: dec(parts[4]) || 'region', image: true };
+    if (parts[5] && parts[5][0] === 'F') { const p = parts[5].slice(1).split('_').map(Number); if (p.length === 4 && p.every((n) => !isNaN(n))) { out.inImage = true; out.frac = { rx: p[0], ry: p[1], rw: p[2], rh: p[3] }; } }
+    return out;
   }
   // On opening a note, rebuild the local index from the synced image-blob filenames, so the ↗ chips appear
   // on THIS client even if the reference was created elsewhere (the web↔desktop parity fix).

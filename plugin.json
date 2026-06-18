@@ -1,8 +1,8 @@
 {
   "name": "Plexus Canvas",
-  "version": "0.90.1",
+  "version": "0.91.0",
   "type": "global_plugin",
   "icon": "ti-pencil",
-  "description": "Native Thymer infinite-canvas whiteboard, built from scratch (no @excalidraw). A drawing is a record. Bidirectional cross-references: cite a region/element into a note, click to fly back and flash it; cited elements show a ↗ badge and double-click back to the note.",
+  "description": "Native Thymer infinite-canvas whiteboard (no @excalidraw). A drawing is a record. Embedded in-image region references: cite a region of an image, click the note chip to fly back and SPOTLIGHT the exact spot in place (no crop copy); anchored to the image element so it survives moves/resizes/rotation; on-image ↗ pins; web+desktop synced via blob filename.",
   "__source_repo": "Svyk/thymer-canvas-plugin"
 }
