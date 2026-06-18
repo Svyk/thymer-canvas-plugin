@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.0.0';
+const PLEXUS_VERSION = '1.1.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -747,7 +747,89 @@ class Canvas2DRenderer {
   ghosts() { this.view._drawGhosts(this.ctx); }
   end() {}
 }
-function makeRenderer(view) { /* RENDERER_BACKEND === 'webgl' ? new WebGLRenderer(view) : */ return new Canvas2DRenderer(view); }
+// #RRGGBB → [r,g,b] in 0..1 (for GL clear/uniform colours). Falls back to white on a bad value.
+function hexToRgb01(hex) { const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex || '').trim()); if (!m) return [1, 1, 1]; return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255]; }
+// World (wx,wy) → WebGL clip space, given the camera + CSS-px viewport (DPR is handled by gl.viewport, not here).
+// Mirrors Camera.worldToScreen then maps the CSS-px screen box to NDC (y flipped). node-tested against worldToScreen.
+function worldToClip(wx, wy, cam, cssW, cssH) {
+  const sx = (wx - cam.x) * cam.zoom, sy = (wy - cam.y) * cam.zoom; // screen px (top-left origin)
+  return { x: (sx / cssW) * 2 - 1, y: 1 - (sy / cssH) * 2 };
+}
+const TEX_VS = `#version 300 es
+in vec2 a_quad; uniform vec4 u_rect; uniform vec4 u_uv; uniform vec3 u_cam; uniform vec2 u_vp; out vec2 v_uv;
+void main(){ vec2 w = u_rect.xy + a_quad * u_rect.zw; vec2 s = (w - u_cam.xy) * u_cam.z; vec2 clip = vec2((s.x/u_vp.x)*2.0-1.0, 1.0-(s.y/u_vp.y)*2.0); v_uv = u_uv.xy + a_quad * u_uv.zw; gl_Position = vec4(clip,0.0,1.0); }`;
+const TEX_FS = `#version 300 es
+precision mediump float; in vec2 v_uv; uniform sampler2D u_tex; uniform float u_alpha; out vec4 o;
+void main(){ vec4 c = texture(u_tex, v_uv); o = vec4(c.rgb, c.a*u_alpha); }`;
+// EXPERIMENTAL WebGL hybrid backend (Task 8) behind the renderer seam. GPU-renders IMAGES as textured quads (the
+// heaviest, cleanest GPU win); EVERY other element type — and ANY GL failure — delegates to the existing Canvas2D
+// painters on a transparent overlay layered over the GL canvas. So an imperfect/failed GPU path degrades to correct
+// 2D rendering. DEFAULT OFF (RENDERER_BACKEND); the seam is the shipping path. Promote to default only after live
+// verification (shaders/DPR/compositing need a real GPU). Next iteration: tessellate rough.js shapes onto the GL layer.
+class WebGLRenderer {
+  constructor(view) { this.view = view; this.kind = 'webgl'; this.ctx = null; this.gl = null; this._init = false; this._tex = new Map(); }
+  _ensureGL() {
+    if (this._init) return this.gl;
+    this._init = true;
+    try {
+      const sc = this.view.staticCv; if (!sc || !sc.parentElement) return null;
+      const cv = document.createElement('canvas'); cv.className = 'pxc-gl'; cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0';
+      sc.parentElement.insertBefore(cv, sc); // GL layer BEHIND the 2D overlay (which carries shapes/text/cards)
+      const gl = cv.getContext('webgl2', { alpha: true, premultipliedAlpha: false }); if (!gl) return null;
+      this.glCv = cv; this.gl = gl;
+      const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.warn('[Plexus GL]', gl.getShaderInfoLog(s)); return null; } return s; };
+      const vs = compile(gl.VERTEX_SHADER, TEX_VS), fs = compile(gl.FRAGMENT_SHADER, TEX_FS); if (!vs || !fs) { this.gl = null; return null; }
+      const p = gl.createProgram(); gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { this.gl = null; return null; }
+      this.prog = p; this.loc = { quad: gl.getAttribLocation(p, 'a_quad'), rect: gl.getUniformLocation(p, 'u_rect'), uv: gl.getUniformLocation(p, 'u_uv'), cam: gl.getUniformLocation(p, 'u_cam'), vp: gl.getUniformLocation(p, 'u_vp'), tex: gl.getUniformLocation(p, 'u_tex'), alpha: gl.getUniformLocation(p, 'u_alpha') };
+      this.quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      return gl;
+    } catch (_e) { this.gl = null; return null; }
+  }
+  begin(sctx, camera, dpr) {
+    this.ctx = sctx; this.camera = camera; this.dpr = dpr; this._images = [];
+    sctx.setTransform(camera.zoom * dpr, 0, 0, camera.zoom * dpr, -camera.x * camera.zoom * dpr, -camera.y * camera.zoom * dpr);
+    const gl = this._ensureGL(); if (!gl) return;
+    const W = this.view.staticCv.width, H = this.view.staticCv.height;
+    if (this.glCv.width !== W || this.glCv.height !== H) { this.glCv.width = W; this.glCv.height = H; }
+    gl.viewport(0, 0, W, H);
+    const dark = !!(this.view.plugin._settings && this.view.plugin._settings.darkMode);
+    const bg = dark ? [0.059, 0.067, 0.09] : hexToRgb01((this.view.scene.appState && this.view.scene.appState.viewBackgroundColor) || '#ffffff');
+    gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  grid() { this.view._drawGrid(this.ctx); }   // grid + frames + ghosts stay on the 2D overlay (cheap, hand-drawn)
+  frame(el) { this.view._drawFrame(this.ctx, el); }
+  element(el) {
+    const v = this.view, ctx = this.ctx, t = el.type;
+    if (this.gl && t === 'image' && !el.angle && !el.isDeleted) { const img = v._imgFor && v._imgFor(el.fileId); if (img && img.complete && img.naturalWidth) { this._images.push({ el, img }); return; } }
+    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
+  }
+  ghosts() { this.view._drawGhosts(this.ctx); }
+  end() {
+    const gl = this.gl; if (!gl || !this._images.length) return;
+    try {
+      gl.useProgram(this.prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf); gl.enableVertexAttribArray(this.loc.quad); gl.vertexAttribPointer(this.loc.quad, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform3f(this.loc.cam, this.camera.x, this.camera.y, this.camera.zoom);
+      gl.uniform2f(this.loc.vp, this.view.cssW, this.view.cssH); gl.uniform1i(this.loc.tex, 0); // vp in CSS px (DPR handled by gl.viewport)
+      for (const { el, img } of this._images) {
+        const tex = this._texFor(gl, el.fileId, img); if (!tex) continue;
+        const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height), w = Math.abs(el.width), h = Math.abs(el.height);
+        gl.uniform4f(this.loc.rect, x, y, w, h);
+        const c = el.crop, uv = (c && img.naturalWidth) ? [c.x / img.naturalWidth, c.y / img.naturalHeight, c.w / img.naturalWidth, c.h / img.naturalHeight] : [0, 0, 1, 1];
+        gl.uniform4f(this.loc.uv, uv[0], uv[1], uv[2], uv[3]); gl.uniform1f(this.loc.alpha, el.opacity == null ? 1 : el.opacity);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    } catch (_e) {}
+  }
+  _texFor(gl, fileId, img) {
+    let t = this._tex.get(fileId); if (t) return t;
+    try { t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); this._tex.set(fileId, t); return t; } catch (_e) { return null; }
+  }
+  dispose() { try { if (this.glCv && this.glCv.parentElement) this.glCv.parentElement.removeChild(this.glCv); } catch (_e) {} this.gl = null; this._tex.clear(); }
+}
+function makeRenderer(view) { return RENDERER_BACKEND === 'webgl' ? new WebGLRenderer(view) : new Canvas2DRenderer(view); }
 
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
 class CanvasView {
@@ -2941,13 +3023,15 @@ class CanvasView {
     if (this.wrap) this.wrap.classList.toggle('pxc-dark', dark);
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
-    sctx.setTransform(1, 0, 0, 1, 0, 0);
-    sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); // UX-6 dark mode override (no scene mutation)
-    sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height);
+    const glMode = this.renderer && this.renderer.kind === 'webgl'; // WebGL backend: the GL canvas BEHIND paints the
+    sctx.setTransform(1, 0, 0, 1, 0, 0);                            // background + images; staticCv is a TRANSPARENT overlay.
+    if (glMode) { sctx.clearRect(0, 0, this.staticCv.width, this.staticCv.height); }
+    else { sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height); }
     // PERF: during camera MOTION (the zoom animation, or a fresh pan/zoom), BLIT the cached scene bitmap
     // transformed instead of re-rendering every element — O(1). A debounced settle does one crisp render
-    // when motion stops (filling any blank edges). Cache is invalidated on any element edit.
-    const cc = this._cacheCam, moving = !!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110);
+    // when motion stops (filling any blank edges). Cache is invalidated on any element edit. (Disabled in GL mode —
+    // the GL layer re-renders each frame; the 2D blit can't represent the separate GL canvas. Optimise later.)
+    const cc = this._cacheCam, moving = !glMode && (!!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110));
     const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
     // Blit only when scaling UP (zoom-in or pan): a viewport cache can't cover area revealed by zooming OUT,
     // so zoom-out frames render crisp (which also re-caches at the wider zoom). Avoids blank edges on the establish.
@@ -3111,7 +3195,7 @@ class CanvasView {
     try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
     const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
