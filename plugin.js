@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.69.0';
+const PLEXUS_VERSION = '0.70.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -921,6 +921,54 @@ class CanvasView {
   _bringForward() { this._stepZ(1); }
   _sendBackward() { this._stepZ(-1); }
   _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
+  // CP-4: align / distribute the selection to its bounding box (Excalidraw parity precision tools).
+  _align(mode) {
+    const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type !== 'frame');
+    if (els.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ elements to align.', dismissible: true }); } catch (_e) {} return; }
+    const box = (el) => ({ x: Math.min(el.x, el.x + (el.width || 0)), y: Math.min(el.y, el.y + (el.height || 0)), w: Math.abs(el.width || 0), h: Math.abs(el.height || 0) });
+    const moveTo = (el, nx, ny) => { const b = box(el); const dx = nx - b.x, dy = ny - b.y; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); };
+    const boxes = els.map(box);
+    const minX = Math.min(...boxes.map((b) => b.x)), maxX = Math.max(...boxes.map((b) => b.x + b.w));
+    const minY = Math.min(...boxes.map((b) => b.y)), maxY = Math.max(...boxes.map((b) => b.y + b.h));
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    if (mode === 'disth' || mode === 'distv') {
+      const horiz = mode === 'disth';
+      const order = els.map((el, i) => ({ el, b: boxes[i] })).sort((a, b) => horiz ? a.b.x - b.b.x : a.b.y - b.b.y);
+      const first = order[0].b, last = order[order.length - 1].b;
+      const span = (horiz ? last.x - first.x : last.y - first.y), sizes = order.reduce((s, o) => s + (horiz ? o.b.w : o.b.h), 0) - (horiz ? last.w : last.h) - (horiz ? first.w : first.h);
+      const inner = order.slice(1, -1); const gap = (span - sizes - inner.reduce((s, o) => s + (horiz ? o.b.w : o.b.h), 0)) / (order.length - 1);
+      let cur = (horiz ? first.x + first.w : first.y + first.h) + gap;
+      for (const o of inner) { if (horiz) moveTo(o.el, cur, o.b.y); else moveTo(o.el, o.b.x, cur); cur += (horiz ? o.b.w : o.b.h) + gap; }
+    } else {
+      for (let i = 0; i < els.length; i++) { const el = els[i], b = boxes[i];
+        if (mode === 'left') moveTo(el, minX, b.y); else if (mode === 'right') moveTo(el, maxX - b.w, b.y); else if (mode === 'hcenter') moveTo(el, cx - b.w / 2, b.y);
+        else if (mode === 'top') moveTo(el, b.x, minY); else if (mode === 'bottom') moveTo(el, b.x, maxY - b.h); else if (mode === 'vmiddle') moveTo(el, b.x, cy - b.h / 2);
+      }
+    }
+    this._updateBindings && this._updateBindings(); this.dirty = true; this.scheduleSave();
+  }
+  // CP-4: selection stats — count + bounding box (x/y/w/h) + single-element angle, shown as a toaster.
+  _selectionStats() {
+    const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing selected.', dismissible: true }); } catch (_e) {} return; }
+    const minX = Math.min(...els.map((e) => Math.min(e.x, e.x + (e.width || 0)))), maxX = Math.max(...els.map((e) => Math.max(e.x, e.x + (e.width || 0))));
+    const minY = Math.min(...els.map((e) => Math.min(e.y, e.y + (e.height || 0)))), maxY = Math.max(...els.map((e) => Math.max(e.y, e.y + (e.height || 0))));
+    const r = (n) => Math.round(n); const ang = els.length === 1 && els[0].angle ? '  angle ' + r(els[0].angle * 180 / Math.PI) + '°' : '';
+    try { this.plugin.ui.addToaster({ title: els.length + ' selected · x ' + r(minX) + ' y ' + r(minY) + ' · w ' + r(maxX - minX) + ' h ' + r(maxY - minY) + ang, dismissible: true }); } catch (_e) {}
+  }
+  // CP-4: eyedropper — the next click samples the pixel under the cursor from the rendered scene → stroke colour.
+  _eyedropper() { this._eyedrop = true; try { this.wrap.style.cursor = 'crosshair'; } catch (_e) {} try { this.plugin.ui.addToaster({ title: 'Eyedropper: click any pixel to sample its colour.', dismissible: true }); } catch (_e) {} }
+  _sampleAt(e) {
+    try {
+      const r = this.wrap.getBoundingClientRect(), dpr = this.dpr || window.devicePixelRatio || 1;
+      const px = Math.round((e.clientX - r.left) * dpr), py = Math.round((e.clientY - r.top) * dpr);
+      const d = this.staticCv.getContext('2d').getImageData(px, py, 1, 1).data;
+      const hex = '#' + [d[0], d[1], d[2]].map((c) => c.toString(16).padStart(2, '0')).join('');
+      this.strokeColor = hex; this._syncToolbar && this._syncToolbar();
+      try { this.plugin.ui.addToaster({ title: 'Sampled ' + hex + ' → stroke colour.', dismissible: true }); } catch (_e) {}
+    } catch (_e) {}
+    this._eyedrop = false; try { this.wrap.style.cursor = ''; } catch (_e) {}
+  }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // S4: is pen mode on? Drives whether a pen pointer draws freedraw without picking the Pen tool.
   _penActive() {
@@ -954,6 +1002,7 @@ class CanvasView {
     let lpTimer = null; const clearLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }; // S10 long-press
     const onDown = (e) => {
       host.focus();
+      if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
       // S4: pen/touch routing — a pen draws freedraw without picking the Pen tool; a single finger pans.
       if (!this._present && this._penActive() && (e.button === 0 || e.button === -1)) {
         const stp4 = this.plugin._settings || {};
@@ -2154,6 +2203,10 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
+    // CP-4: align / distribute / stats / eyedropper (precision tools).
+    for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Eyedropper (sample a colour)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._eyedropper(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
