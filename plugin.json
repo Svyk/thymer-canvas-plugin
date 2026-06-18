@@ -1,6 +1,6 @@
 {
   "name": "Plexus Canvas",
-  "version": "0.89.1",
+  "version": "0.90.0",
   "type": "global_plugin",
   "icon": "ti-pencil",
   "description": "Native Thymer infinite-canvas whiteboard, built from scratch (no @excalidraw). A drawing is a record. Bidirectional cross-references: cite a region/element into a note, click to fly back and flash it; cited elements show a ↗ badge and double-click back to the note.",

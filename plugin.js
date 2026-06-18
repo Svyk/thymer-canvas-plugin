@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.89.1';
+const PLEXUS_VERSION = '0.90.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1299,36 +1299,45 @@ class CanvasView {
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
-    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
+    const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._addSvgAsImage(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
     // Paste many formats onto the board: image files (PNG/JPG/GIF/WebP), SVG (as a file OR as copied markup),
     // an <img> copied from a web page (text/html), a remote image URL, or plain text → a text element.
     const onPaste = (e) => {
       if (this.destroyed || this.editingId) return;
-      // A <canvas> isn't focusable, so the old activeElement check silently blocked every paste.
-      // Handle the paste ONLY when THIS view's panel is the active one (strict — no _activeView() pop()
-      // fallback, which would let a background canvas hijack a paste meant for a note).
+      // A <canvas> can't hold focus, so the old activeElement check blocked every paste. Decide ownership:
+      // strict = this panel is active / focus is in our wrap; lenient = this canvas is just visible and the
+      // user isn't typing in a note. Images/SVG/URLs accept the lenient path; plain-text needs strict (so we
+      // never steal a text paste meant for a note). A dedupe guard makes only ONE view handle a given paste.
       const ae = document.activeElement;
+      const typing = ae && (ae.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName || ''));
       let activePanel = null; try { activePanel = this.plugin.ui.getActivePanel(); } catch (_e) {}
-      const mine = (activePanel && this.panel === activePanel) || ae === host || ae === this.iCv || (this.wrap && this.wrap.contains(ae));
-      if (!mine) return;
+      const strict = (activePanel && this.panel === activePanel) || ae === host || ae === this.iCv || (this.wrap && this.wrap.contains(ae));
+      const visible = this.wrap && this.wrap.offsetParent !== null && this.wrap.getBoundingClientRect().width > 60;
+      const lenient = strict || (!typing && visible);
+      if (!lenient) return;
       const dt = e.clipboardData; if (!dt) return;
-      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
       const items = [...(dt.items || [])];
-      // 1) image FILE (incl. svg file) — highest fidelity
+      const plain = (dt.getData && dt.getData('text/plain')) || '';
+      const html = (dt.getData && dt.getData('text/html')) || '';
       const imgFile = items.find((it) => it.kind === 'file' && it.type && it.type.startsWith('image/'));
-      if (imgFile) { const f = imgFile.getAsFile(); if (f) { e.preventDefault(); if (f.type === 'image/svg+xml') { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), c.x, c.y); r.readAsText(f); } else this._addImageFromFile(f, c.x, c.y); return; } }
-      // 2) SVG markup copied as text
       const svgItem = items.find((it) => it.kind === 'string' && it.type === 'image/svg+xml');
-      if (svgItem) { e.preventDefault(); svgItem.getAsString((s) => { if (s) this._importSvgText(s, c.x, c.y); }); return; }
-      const plain = dt.getData && dt.getData('text/plain');
-      const html = dt.getData && dt.getData('text/html');
-      if (plain && /^\s*<svg[\s>]/i.test(plain)) { e.preventDefault(); this._importSvgText(plain, c.x, c.y); return; }
-      // 3) an <img> inside copied HTML (e.g. dragging/copying a picture from a web page)
-      if (html && /<img\b/i.test(html)) { const m = html.match(/<img[^>]+src=["']([^"']+)["']/i); if (m && m[1]) { e.preventDefault(); this._addImageFromUrl(m[1], c.x, c.y); return; } }
-      // 4) a bare image URL
-      if (plain && /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i.test(plain.trim())) { e.preventDefault(); this._addImageFromUrl(plain.trim(), c.x, c.y); return; }
-      // 5) plain text → a text element (skip our own internal element clipboard, handled elsewhere)
-      if (plain && !/^\s*\[?\{?"?(plexus|type"?\s*:)/i.test(plain) && plain.length < 5000) { e.preventDefault(); const el = makeText(c.x, c.y, { stroke: this.strokeColor, fontSize: 20 }); el.text = plain.trim(); measureText(el); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave(); return; }
+      const isSvgText = /^\s*<svg[\s>]/i.test(plain);
+      const htmlImg = /<img\b/i.test(html) ? (html.match(/<img[^>]+src=["']([^"']+)["']/i) || [])[1] : null;
+      const urlImg = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i.test(plain.trim()) ? plain.trim() : null;
+      const hasImage = imgFile || svgItem || isSvgText || htmlImg || urlImg;
+      const hasText = !hasImage && plain && !/^\s*[[{]?"?(plexus|type"?\s*:)/i.test(plain) && plain.length < 5000;
+      if (!hasImage && !hasText) return;
+      if (hasText && !strict) return; // text paste only when the canvas truly has focus
+      // dedupe: a document-level paste fires this on every open canvas view
+      const nowp = Date.now(); if (this.plugin._lastPaste && nowp - this.plugin._lastPaste < 250) return; this.plugin._lastPaste = nowp;
+      e.preventDefault();
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      if (imgFile) { const f = imgFile.getAsFile(); if (f) { if (f.type === 'image/svg+xml') { const r = new FileReader(); r.onload = () => this._addSvgAsImage(String(r.result || ''), c.x, c.y); r.readAsText(f); } else this._addImageFromFile(f, c.x, c.y); } return; }
+      if (svgItem) { svgItem.getAsString((s) => { if (s) this._addSvgAsImage(s, c.x, c.y); }); return; }
+      if (isSvgText) { this._addSvgAsImage(plain, c.x, c.y); return; }
+      if (htmlImg) { this._addImageFromUrl(htmlImg, c.x, c.y); return; }
+      if (urlImg) { this._addImageFromUrl(urlImg, c.x, c.y); return; }
+      if (hasText) { const el = makeText(c.x, c.y, { stroke: this.strokeColor, fontSize: 20 }); el.text = plain.trim(); measureText(el); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave(); }
     };
     this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
@@ -1402,6 +1411,35 @@ class CanvasView {
     const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
+  }
+  // Rasterize an SVG string to a single clean IMAGE element (not hundreds of vector primitives).
+  // For a complex map/illustration this is what you want — one croppable image, like Excalidraw does.
+  async _addSvgAsImage(svgText, wx, wy) {
+    try {
+      let svg = String(svgText || '');
+      if (!/^\s*<svg/i.test(svg)) { const m = svg.match(/<svg[\s\S]*<\/svg>/i); if (m) svg = m[0]; }
+      if (!/\sxmlns=/.test(svg)) svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+      let w = 0, h = 0;
+      const wm = svg.match(/<svg[^>]*\bwidth=["']?([\d.]+)/i), hm = svg.match(/<svg[^>]*\bheight=["']?([\d.]+)/i);
+      if (wm) w = parseFloat(wm[1]); if (hm) h = parseFloat(hm[1]);
+      if (!w || !h) { const vb = svg.match(/viewBox=["']\s*[\d.\-]+\s+[\d.\-]+\s+([\d.]+)\s+([\d.]+)/i); if (vb) { w = w || parseFloat(vb[1]); h = h || parseFloat(vb[2]); } }
+      if (!w || !h) { w = 1000; h = 700; }
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('svg load')); im.src = url; });
+      const iw = img.naturalWidth || w, ih = img.naturalHeight || h;
+      const scale = Math.min(3, Math.max(1, 1800 / Math.max(iw, ih))); // hi-dpi, capped
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * scale)); cv.height = Math.max(1, Math.round(ih * scale));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      const pngBlob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+      if (!pngBlob) throw new Error('toBlob null');
+      return await this._addImageFromFile(new File([pngBlob], 'svg-image.png', { type: 'image/png' }), wx, wy);
+    } catch (e) {
+      try { this.plugin.ui.addToaster({ title: 'Plexus: rendered the SVG as vectors (couldn’t rasterize it).', dismissible: true }); } catch (_e) {}
+      try { this._importSvgText(svgText, wx, wy); } catch (_e) {} // fallback: old vectorize path
+      return null;
+    }
   }
   // Paste/drop a remote image URL (or an <img src> from copied HTML). Fetch → blob → embed; toast on CORS failure.
   async _addImageFromUrl(url, wx, wy) {
@@ -2819,7 +2857,9 @@ class Plugin extends AppPlugin {
     // Overlay a ↗ badge onto each pasted image-reference: scan on navigation + a light interval backstop.
     try { this._injectImgRefCss(); } catch (_e) {}
     const scan = () => { try { this._scanImageBadges(); } catch (_e) {} };
-    try { this.events.on('panel.navigated', scan); this.events.on('lineitem.created', scan); this.events.on('lineitem.updated', scan); } catch (_e) {}
+    // On navigation, also reconstruct the index from synced image-blob filenames (web↔desktop parity).
+    const syncNav = (e) => { try { const r = e && e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r) this._syncImageRefsForRecord(r); else scan(); } catch (_e) { scan(); } };
+    try { this.events.on('panel.navigated', syncNav); this.events.on('panel.focused', syncNav); this.events.on('lineitem.created', scan); this.events.on('lineitem.updated', scan); } catch (_e) {}
     const scanIv = setInterval(scan, 1500); reg.add(() => clearInterval(scanIv));
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
@@ -2945,13 +2985,14 @@ class Plugin extends AppPlugin {
     if (targetGuid) rec = await getRecordPoll(this, targetGuid);
     else { const panel = this.ui.getActivePanel(); try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {} }
     if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note (editor panel) first, then paste.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'no record' }; }
-    let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], 'plexus-image-ref.png', { type: 'image/png' })); } catch (_e) {}
+    // Encode the whole cross-reference into the image's BLOB FILENAME (synced metadata that travels to every
+    // client — web AND desktop), so the ↗ chip + navigation reconstruct anywhere, not just where it was made.
+    const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
+    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel });
+    let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
-    // Clean inline reference: the chip is attached DIRECTLY to the pasted image (a small ↗ on its corner,
-    // like the canvas badge) — no separate label line. We register the cross-ref on the IMAGE line itself;
-    // a ↗ badge is overlaid on it, and clicking the image (or badge) page-flips to the drawing + zooms the region.
-    const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
+    // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
     if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true }); } catch (_e) {} }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
@@ -2998,6 +3039,43 @@ class Plugin extends AppPlugin {
       badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
       wrap.appendChild(badge);
     }
+  }
+  // Cross-ref encoded in the image blob filename (synced metadata → works on web AND desktop, not just the
+  // client where it was made). Shape: plexusref~<drawing>~<el>~<x_y_w_h>~<labelURI>.png
+  _encodeRefFilename(d) {
+    const enc = (s) => encodeURIComponent(String(s == null ? '' : s)).replace(/~/g, '%7E');
+    const reg = (d.region && isFinite(d.region.x)) ? [d.region.x, d.region.y, d.region.w, d.region.h].map((n) => Math.round(n)).join('_') : '';
+    return 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + enc(d.label) + '.png';
+  }
+  _parseRefFilename(fn) {
+    if (!fn || fn.indexOf('plexusref~') !== 0) return null;
+    const dec = (s) => { try { return decodeURIComponent(s || ''); } catch (_e) { return s || ''; } };
+    const parts = fn.replace(/\.png$/i, '').split('~');
+    const drawing = dec(parts[1]); if (!drawing) return null;
+    const el = dec(parts[2]) || null;
+    let region = null; if (parts[3]) { const p = parts[3].split('_').map(Number); if (p.length === 4 && p.every((n) => !isNaN(n))) region = { x: p[0], y: p[1], w: p[2], h: p[3] }; }
+    return { drawing, el, region, label: dec(parts[4]) || 'region', image: true };
+  }
+  // On opening a note, rebuild the local index from the synced image-blob filenames, so the ↗ chips appear
+  // on THIS client even if the reference was created elsewhere (the web↔desktop parity fix).
+  async _syncImageRefsForRecord(rec) {
+    try {
+      if (!rec || !rec.guid || !rec.getLineItems) return;
+      if (!this._syncedRecords) this._syncedRecords = new Set();
+      if (this._syncedRecords.has(rec.guid)) { this._scanImageBadges(); return; } // deep-scan each record once/session
+      this._syncedRecords.add(rec.guid);
+      let items; try { items = await rec.getLineItems(); } catch (_e) { this._syncedRecords.delete(rec.guid); return; }
+      let changed = false; const x = this._loadXref();
+      for (const li of (items || [])) {
+        if (!li || !li.guid || x[li.guid]) continue;
+        let blob = null; try { blob = await li.getBlob(); } catch (_e) {}
+        if (!blob || !blob.fileName) continue;
+        const parsed = this._parseRefFilename(blob.fileName); if (!parsed) continue;
+        x[li.guid] = Object.assign({ t: Date.now() }, parsed); changed = true;
+      }
+      if (changed) { this._saveXref(x); for (const v of this._views) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
+      this._scanImageBadges();
+    } catch (_e) {}
   }
   // Note → canvas: open the cited drawing (or reuse an already-open view) and flash the cited element/region.
   // Match views by recordGuid (set at construction) — NOT rec.guid (async-loaded, unreliable); the codebase pattern.
