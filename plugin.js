@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.88.0';
+const PLEXUS_VERSION = '0.89.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -171,9 +171,19 @@ const TOOLS = [
   { id: 'crop', icon: 'ti-scissors', title: 'Reference a region of an image (C) — drag a box over an image' },
   { id: 'frame', icon: 'ti-layout-board', title: 'Frame (F) — a named boundary; moves its contents together' },
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
+  { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
+// Ray-casting point-in-polygon — used by the lasso select to test element centers against the loop.
+function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
 
 /* ───────────────────────── hot-reload singleton ───────────────────────── */
 function freshRegistry() {
@@ -1164,6 +1174,8 @@ class CanvasView {
         mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'crop') {
         mode = 'crop'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; this.selected.clear();
+      } else if (this.tool === 'lasso') {
+        mode = 'lasso'; this._lasso = [[down.x, down.y]]; if (!e.shiftKey) this.selected.clear();
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -1180,6 +1192,7 @@ class CanvasView {
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
+      if (mode === 'lasso') { if (this._lasso) this._lasso.push([w.x, w.y]); this.dirty = true; return; }
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
@@ -1209,6 +1222,13 @@ class CanvasView {
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
         if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._referenceRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
+      }
+      else if (mode === 'lasso') {
+        const poly = this._lasso || []; this._lasso = null;
+        if (poly.length >= 3) {
+          for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; const bb = this._elBBox(el); if (!bb) continue; if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly)) this.selected.add(el.id); }
+        }
+        this.tool = 'select'; this._syncToolbar();
       }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
@@ -1257,7 +1277,7 @@ class CanvasView {
           if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase()); return; }
         }
       }
-      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser' };
+      const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
@@ -1280,7 +1300,30 @@ class CanvasView {
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
     const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
-    const onPaste = (e) => { if (this.destroyed || this.editingId) return; if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return; const items = (e.clipboardData && e.clipboardData.items) || []; for (const it of items) if (it.kind === 'file' && it.type && it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) { e.preventDefault(); const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); this._addImageFromFile(f, c.x, c.y); } } };
+    // Paste many formats onto the board: image files (PNG/JPG/GIF/WebP), SVG (as a file OR as copied markup),
+    // an <img> copied from a web page (text/html), a remote image URL, or plain text → a text element.
+    const onPaste = (e) => {
+      if (this.destroyed || this.editingId) return;
+      if (document.activeElement !== host && !this.wrap.contains(document.activeElement)) return;
+      const dt = e.clipboardData; if (!dt) return;
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      const items = [...(dt.items || [])];
+      // 1) image FILE (incl. svg file) — highest fidelity
+      const imgFile = items.find((it) => it.kind === 'file' && it.type && it.type.startsWith('image/'));
+      if (imgFile) { const f = imgFile.getAsFile(); if (f) { e.preventDefault(); if (f.type === 'image/svg+xml') { const r = new FileReader(); r.onload = () => this._importSvgText(String(r.result || ''), c.x, c.y); r.readAsText(f); } else this._addImageFromFile(f, c.x, c.y); return; } }
+      // 2) SVG markup copied as text
+      const svgItem = items.find((it) => it.kind === 'string' && it.type === 'image/svg+xml');
+      if (svgItem) { e.preventDefault(); svgItem.getAsString((s) => { if (s) this._importSvgText(s, c.x, c.y); }); return; }
+      const plain = dt.getData && dt.getData('text/plain');
+      const html = dt.getData && dt.getData('text/html');
+      if (plain && /^\s*<svg[\s>]/i.test(plain)) { e.preventDefault(); this._importSvgText(plain, c.x, c.y); return; }
+      // 3) an <img> inside copied HTML (e.g. dragging/copying a picture from a web page)
+      if (html && /<img\b/i.test(html)) { const m = html.match(/<img[^>]+src=["']([^"']+)["']/i); if (m && m[1]) { e.preventDefault(); this._addImageFromUrl(m[1], c.x, c.y); return; } }
+      // 4) a bare image URL
+      if (plain && /^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i.test(plain.trim())) { e.preventDefault(); this._addImageFromUrl(plain.trim(), c.x, c.y); return; }
+      // 5) plain text → a text element (skip our own internal element clipboard, handled elsewhere)
+      if (plain && !/^\s*\[?\{?"?(plexus|type"?\s*:)/i.test(plain) && plain.length < 5000) { e.preventDefault(); const el = makeText(c.x, c.y, { stroke: this.strokeColor, fontSize: 20 }); el.text = plain.trim(); measureText(el); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave(); return; }
+    };
     this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
   }
@@ -1353,6 +1396,20 @@ class CanvasView {
     const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
+  }
+  // Paste/drop a remote image URL (or an <img src> from copied HTML). Fetch → blob → embed; toast on CORS failure.
+  async _addImageFromUrl(url, wx, wy) {
+    try {
+      const resp = await fetch(url, { mode: 'cors' });
+      if (!resp.ok) throw new Error('http ' + resp.status);
+      const blob = await resp.blob();
+      if (!blob || !/^image\//.test(blob.type || '')) throw new Error('not an image');
+      const name = (url.split('/').pop() || 'image').split('?')[0];
+      return await this._addImageFromFile(new File([blob], name, { type: blob.type }), wx, wy);
+    } catch (e) {
+      try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t load that image (the site may block cross-origin fetches). Save it and drag the file in instead.', dismissible: true }); } catch (_e) {}
+      return null;
+    }
   }
   // Phase 9 E1: live-record card cache + render. _recFor fetches title + first line items async;
   // the plugin invalidates this cache on record.updated / lineitem.* so cards repaint live.
@@ -2543,6 +2600,15 @@ class CanvasView {
       ictx.strokeRect(r.x, r.y, r.w, r.h); ictx.setLineDash([]);
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    if (this._lasso && this._lasso.length > 1) { // lasso select loop — accent fill + dashed outline
+      ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      ictx.beginPath(); ictx.moveTo(this._lasso[0][0], this._lasso[0][1]);
+      for (let i = 1; i < this._lasso.length; i++) ictx.lineTo(this._lasso[i][0], this._lasso[i][1]);
+      ictx.closePath();
+      ictx.fillStyle = 'rgba(124,92,255,0.10)'; ictx.fill();
+      ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.5 / z; ictx.setLineDash([6 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]);
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -2728,15 +2794,24 @@ class Plugin extends AppPlugin {
     const onDocClick = (e) => {
       try {
         const t = e.target; if (!t || !t.closest) return;
-        if (!t.closest('.lineitem-ref, .lineitem-linkobj, .lineitem-link')) return;
         const row = t.closest('.listitem'); if (!row) return;
         const lineGuid = row.getAttribute('data-guid'); if (!lineGuid) return;
         const entry = this._lookupXref(lineGuid); if (!entry) return;
+        // Image-attached chip: any click on the pasted image (or its ↗ badge) navigates.
+        // Ref-segment chip (legacy): only a click on the link itself.
+        const isImg = entry.image && (t.tagName === 'IMG' || t.closest('img') || t.closest('.plexus-imgref-badge'));
+        const isRef = t.closest('.lineitem-ref, .lineitem-linkobj, .lineitem-link');
+        if (!isImg && !isRef) return;
         e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         this._navToCanvasAnchor(entry);
       } catch (_e) {}
     };
     document.addEventListener('click', onDocClick, true); reg.add(() => document.removeEventListener('click', onDocClick, true));
+    // Overlay a ↗ badge onto each pasted image-reference: scan on navigation + a light interval backstop.
+    try { this._injectImgRefCss(); } catch (_e) {}
+    const scan = () => { try { this._scanImageBadges(); } catch (_e) {} };
+    try { this.events.on('panel.navigated', scan); this.events.on('lineitem.created', scan); this.events.on('lineitem.updated', scan); } catch (_e) {}
+    const scanIv = setInterval(scan, 1500); reg.add(() => clearInterval(scanIv));
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
@@ -2864,15 +2939,14 @@ class Plugin extends AppPlugin {
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], 'plexus-image-ref.png', { type: 'image/png' })); } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
-    // Inline CHIP (org-remark style): a single ref segment titled with the label → renders as a compact,
-    // clickable chip in the note. Clicking it page-flips to the drawing and zooms the region.
+    // Clean inline reference: the chip is attached DIRECTLY to the pasted image (a small ↗ on its corner,
+    // like the canvas badge) — no separate label line. We register the cross-ref on the IMAGE line itself;
+    // a ↗ badge is overlaid on it, and clicking the image (or badge) page-flips to the drawing + zooms the region.
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
-    let refLine = null; try { refLine = await rec.createLineItem(null, imgLine, 'ulist', [{ type: 'ref', text: { guid: clip.sourceRecordGuid, title: '📍 ' + chipLabel } }], null); } catch (_e) {}
-    // Register the bidirectional cross-ref: clicking this chip flashes the source element/region on the
-    // canvas, and that element wears a ↗ chip + single-click-back to this line.
-    if (refLine && refLine.guid) { try { this._registerXref(refLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel }); } catch (_e) {} }
-    try { this.ui.addToaster({ title: 'Inline chip “📍 ' + chipLabel + '” added — click it to fly to the drawing and zoom in.', dismissible: true }); } catch (_e) {}
-    return { ok: !!(imgLine && refLine), imgLineGuid: imgLine ? imgLine.guid : null, refLineGuid: refLine ? refLine.guid : null, recordGuid: rec.guid };
+    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true }); } catch (_e) {} }
+    setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
+    try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
+    return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
   }
   async _openPanelFor(recordGuid, opts) {
     if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now(), blank: !!(opts && opts.blank) });
@@ -2892,6 +2966,29 @@ class Plugin extends AppPlugin {
     if (!lineGuid || !data || !data.drawing) return;
     const x = this._loadXref(); x[lineGuid] = Object.assign({ t: Date.now() }, data); this._saveXref(x);
     for (const v of this._views) { if (v.recordGuid === data.drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
+  }
+  _injectImgRefCss() {
+    if (document.getElementById('plexus-imgref-css')) return;
+    const s = document.createElement('style'); s.id = 'plexus-imgref-css';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}';
+    document.head.appendChild(s);
+  }
+  // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
+  _scanImageBadges() {
+    let idx; try { idx = this._loadXref(); } catch (_e) { return; }
+    let any = false; for (const k in idx) if (idx[k] && idx[k].image) { any = true; break; }
+    if (!any) return;
+    for (const li of document.querySelectorAll('.listitem[data-guid]')) {
+      const g = li.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.image) continue;
+      const img = li.querySelector('img'); if (!img) continue;
+      const wrap = img.parentElement; if (!wrap) continue;
+      if (wrap.querySelector(':scope > .plexus-imgref-badge')) continue;
+      wrap.classList.add('plexus-imgref-wrap');
+      const badge = document.createElement('div'); badge.className = 'plexus-imgref-badge'; badge.textContent = '↗';
+      badge.title = 'Open the drawing and zoom to “' + (entry.label || 'this reference') + '”';
+      badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
+      wrap.appendChild(badge);
+    }
   }
   // Note → canvas: open the cited drawing (or reuse an already-open view) and flash the cited element/region.
   // Match views by recordGuid (set at construction) — NOT rec.guid (async-loaded, unreliable); the codebase pattern.
