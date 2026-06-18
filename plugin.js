@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.67.0';
+const PLEXUS_VERSION = '0.68.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1303,6 +1303,23 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // CS-9: spatial query pinboard — run a Thymer search and materialize each match as a LIVE record card in a grid,
+  // wrapped in a labelled frame. Each card repaints on record.updated; "@task @overdue" → a wall you clear as you go.
+  async _queryPinboard(q) {
+    if (q == null) q = await this._promptText('Pinboard query (Thymer search, e.g. @task @overdue):', '@task');
+    if (!q) return;
+    let res = null; try { res = await this.plugin.data.searchByQuery(q, 40); } catch (_e) {}
+    const recs = (res && res.records) || [];
+    if (!recs.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no matches for “' + q + '”.', dismissible: true }); } catch (_e) {} return; }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const COLS = 4, CW = 240, CH = 150, GAP = 24, n = Math.min(recs.length, 40), rows = Math.ceil(n / COLS);
+    const x0 = this._snap(c.x - (COLS * (CW + GAP)) / 2 + GAP / 2), y0 = this._snap(c.y - (rows * (CH + GAP)) / 2 + 36);
+    const fr = makeFrame(x0 - 16, y0 - 44, COLS * (CW + GAP) + 16, rows * (CH + GAP) + 52); fr.name = 'Pinboard: ' + q; this.scene.elements.unshift(fr);
+    this.selected.clear();
+    recs.slice(0, 40).forEach((r, i) => { const col = i % COLS, row = Math.floor(i / COLS); const el = makeRecordCard(x0 + col * (CW + GAP), y0 + row * (CH + GAP), CW, CH, r.guid); this.scene.elements.push(el); this.selected.add(el.id); });
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Pinboard: ' + n + ' live cards for “' + q + '”.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 9 E10: board-card cache — fetches another drawing record's banner PNG (its live scene preview).
   _boardFor(guid) {
     if (!this._boardCache) this._boardCache = new Map();
@@ -2111,6 +2128,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
