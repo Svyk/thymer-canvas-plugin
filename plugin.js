@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.61.0';
+const PLEXUS_VERSION = '0.62.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1902,6 +1902,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Drawing', icon: 'ti-photo', onSelected: () => this._newDrawing() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New hybrid visual note', icon: 'ti-pencil', onSelected: () => this._newHybridNote() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
+    this.ui.addCommandPaletteCommand({ label: "Plexus: Open today's whiteboard", icon: 'ti-calendar', onSelected: () => this._openTodayWhiteboard() }); // IO-2
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
@@ -2044,6 +2045,25 @@ class Plugin extends AppPlugin {
     let rec = null; try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {}
     if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then flip it to a drawing.', dismissible: true }); } catch (_e) {} return null; }
     let existing = null; try { existing = await findSceneLine(rec); } catch (_e) {}
+    await this._openPanelFor(rec.guid, { blank: !existing, inPlace: true });
+    return rec.guid;
+  }
+  // IO-2: the daily whiteboard hub — flip TODAY's Journal record into a drawing. One record, three views
+  // (drawing + its text line items + graph). getJournalRecord creates the page lazily on first write.
+  async _journalCollection() {
+    if (this._journalCol) return this._journalCol;
+    let cols = null; try { cols = await this.data.getAllCollections(); } catch (_e) {}
+    this._journalCol = (cols || []).find((c) => { try { return c.isJournalPlugin && c.isJournalPlugin(); } catch (_e) { return false; } }) || null;
+    return this._journalCol;
+  }
+  async _openTodayWhiteboard() {
+    const journal = await this._journalCollection();
+    if (!journal) { try { this.ui.addToaster({ title: 'Plexus: no Journal collection found in this workspace.', dismissible: true }); } catch (_e) {} return null; }
+    let user = null; try { const us = this.data.getActiveUsers && this.data.getActiveUsers(); user = (us && us[0]) || null; } catch (_e) {}
+    let rec = null; try { rec = await journal.getJournalRecord(user); } catch (e) { console.error('[Plexus] getJournalRecord', e); }
+    if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: could not open today’s journal page.', dismissible: true }); } catch (_e) {} return null; }
+    let existing = null; try { existing = await findSceneLine(rec); } catch (_e) {}
+    if (!existing) { try { existing = rec.prop && rec.prop('Scene') && rec.prop('Scene').fileBlob && rec.prop('Scene').fileBlob(); } catch (_e) {} }
     await this._openPanelFor(rec.guid, { blank: !existing, inPlace: true });
     return rec.guid;
   }
