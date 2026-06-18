@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.96.0';
+const PLEXUS_VERSION = '0.97.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -193,6 +193,21 @@ function polyHitsRect(poly, bb) {
   for (const c of corners) if (pointInPoly(c[0], c[1], poly)) return true;
   for (const p of poly) if (p[0] >= bb.x && p[0] <= bb.x + bb.w && p[1] >= bb.y && p[1] <= bb.y + bb.h) return true;
   return false;
+}
+// Uniform hash-grid spatial index — buckets element bboxes into fixed cells so a viewport/point query touches
+// only overlapping cells → O(visible) hit-tests/lasso/fit instead of an O(n) full-array scan. Rebuilt lazily
+// (on the next query after any committed edit); render-cull keeps the z-ordered array scan for correctness.
+class SpatialGrid {
+  constructor(cell) { this.cell = cell || 256; this.map = new Map(); }
+  insert(el, bb) {
+    const c = this.cell, x0 = Math.floor(bb.x / c), y0 = Math.floor(bb.y / c), x1 = Math.floor((bb.x + bb.w) / c), y1 = Math.floor((bb.y + bb.h) / c);
+    for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) { const k = cx + ':' + cy; let a = this.map.get(k); if (!a) this.map.set(k, a = []); a.push(el); }
+  }
+  query(rx, ry, rw, rh) {
+    const c = this.cell, out = [], seen = new Set(), x0 = Math.floor(rx / c), y0 = Math.floor(ry / c), x1 = Math.floor((rx + rw) / c), y1 = Math.floor((ry + rh) / c);
+    for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) { const a = this.map.get(cx + ':' + cy); if (!a) continue; for (const el of a) if (!seen.has(el)) { seen.add(el); out.push(el); } }
+    return out;
+  }
 }
 // Even-arclength resample of a polyline [[x,y]…] down to <=maxN points (so a freehand lasso fits the synced filename).
 function resamplePoly(pts, maxN) {
@@ -793,6 +808,25 @@ class CanvasView {
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
+  // Lazily (re)build the spatial index + an id→array-index map (for z-order) + a cached scene-bounds. Invalidated
+  // on every committed edit (scheduleSave/_restore/load), so a query never sees stale geometry → no ghost hits.
+  _ensureGrid() {
+    if (this._grid && !this._gridDirty) return this._grid;
+    const g = new SpatialGrid(256), zi = new Map(), els = this.scene.elements;
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i]; zi.set(el.id, i); if (el.isDeleted) continue;
+      const bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
+      g.insert(el, bb);
+      if (bb.x < bx0) bx0 = bb.x; if (bb.y < by0) by0 = bb.y; if (bb.x + bb.w > bx1) bx1 = bb.x + bb.w; if (bb.y + bb.h > by1) by1 = bb.y + bb.h;
+    }
+    this._grid = g; this._zIndex = zi; this._gridDirty = false;
+    this._sceneBoundsCache = isFinite(bx0) ? { x: bx0, y: by0, w: bx1 - bx0, h: by1 - by0 } : null;
+    return g;
+  }
+  // Candidate elements overlapping a world rect, TOP-first (z-order desc) — for "topmost element" hit-tests.
+  _gridTopFirst(rx, ry, rw, rh) { const g = this._ensureGrid(), zi = this._zIndex, cand = g.query(rx, ry, rw, rh); cand.sort((a, b) => (zi.get(b.id) || 0) - (zi.get(a.id) || 0)); return cand; }
+  _sceneBounds() { this._ensureGrid(); return this._sceneBoundsCache; }
   // Phase 8: snap-to-grid (active only when the grid is on).
   _gridOn() { return !!(this.scene.appState && this.scene.appState.gridModeEnabled); }
   _gridSize() { return (this.scene.appState && this.scene.appState.gridSize) || 20; }
@@ -809,7 +843,7 @@ class CanvasView {
     this.camera.y = b.y + b.h / 2 - (this.cssH / this.camera.zoom) / 2;
     this.dirty = true;
   }
-  _fitToScene() { const live = this.scene.elements.filter((e) => !e.isDeleted); if (!live.length) return; this._fitToBounds(sceneBounds(this.scene), 60); }
+  _fitToScene() { const b = this._sceneBounds(); if (!b) return; this._fitToBounds(b, 60); }
   /* ── Cross-reference navigate-and-flash (note ⇄ canvas) ──────────────────────────────────
    * A note line that cites a region/element flashes that exact spot here; a cited element
    * double-clicks back to the citing note. Index lives in localStorage (plexus_xref). */
@@ -1132,14 +1166,19 @@ class CanvasView {
   }
   _hitTopAt(wx, wy) {
     const tol = 6 / this.camera.zoom, labelH = 18 / this.camera.zoom;
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted || el.mmHidden) continue; if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; } if (hitElement(el, wx, wy, tol)) return el; }
+    // Grid candidates near the point (expanded up by labelH so a frame's title band above its bbox is hittable), top-first.
+    for (const el of this._gridTopFirst(wx - tol, wy - tol - labelH, tol * 2, tol * 2 + labelH)) {
+      if (el.isDeleted || el.mmHidden) continue;
+      if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; }
+      if (hitElement(el, wx, wy, tol)) return el;
+    }
     return null;
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
   _bindableAt(wx, wy, excludeId) {
     const tol = 8 / this.camera.zoom;
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const el = this.scene.elements[i]; if (el.isDeleted || el.id === excludeId) continue; if ((el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') && hitElement(el, wx, wy, tol)) return el; }
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId) continue; if ((el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') && hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   _updateBindings() {
@@ -1418,9 +1457,13 @@ class CanvasView {
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
         if (poly.length >= 3) {
-          // FLEXIBLE enclosure: select every element the loop OVERLAPS (edge-touch counts), not just centre-in-loop —
-          // so a shape sitting next to / partly over an image is caught too.
-          for (const el of this.scene.elements) {
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+          const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+          // FLEXIBLE enclosure (grid-accelerated): only elements whose bbox overlaps the loop's bounding box can be
+          // enclosed → query those candidates, select any the loop OVERLAPS (edge-touch counts), not just centre-in.
+          this._ensureGrid();
+          for (const el of this._grid.query(rect.x, rect.y, rect.w, rect.h)) {
             if (el.isDeleted || el.type === 'frame') continue;
             const bb = this._elBBox(el); if (!bb) continue;
             if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) this.selected.add(el.id);
@@ -1428,9 +1471,6 @@ class CanvasView {
           // If the loop also covers a SUB-AREA of an image (not the whole image) → mark that as a pending region,
           // KEEPING the shape selection. A subsequent "Cite" then references the shape(s) AND the image region
           // together (composite) — fixes "lassoed a circle + part of the map but only the image got cited".
-          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-          for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
-          const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
           if (rect.w > 4 && rect.h > 4) {
             const img = this._topImageIn(rect), ib = img ? this._elBBox(img) : null;
             if (img && ib && (rect.w * rect.h) < (ib.w * ib.h) * 0.92) { this.selected.delete(img.id); this._setPendingImgRegion(img, rect, poly, true); }
@@ -2713,13 +2753,14 @@ class CanvasView {
   }
   // Topmost image element whose box overlaps the given world rect (for the crop marquee).
   _topImageIn(rect) {
-    for (let i = this.scene.elements.length - 1; i >= 0; i--) {
-      const el = this.scene.elements[i]; if (el.isDeleted || el.type !== 'image') continue;
+    this._ensureGrid(); const zi = this._zIndex; let best = null, bestZ = -1;
+    for (const el of this._grid.query(rect.x, rect.y, rect.w, rect.h)) {
+      if (el.isDeleted || el.type !== 'image') continue;
       const ex0 = Math.min(el.x, el.x + el.width), ex1 = Math.max(el.x, el.x + el.width);
       const ey0 = Math.min(el.y, el.y + el.height), ey1 = Math.max(el.y, el.y + el.height);
-      if (rect.x + rect.w > ex0 && rect.x < ex1 && rect.y + rect.h > ey0 && rect.y < ey1) return el;
+      if (rect.x + rect.w > ex0 && rect.x < ex1 && rect.y + rect.h > ey0 && rect.y < ey1) { const z = zi.get(el.id) || 0; if (z >= bestZ) { bestZ = z; best = el; } } // topmost (highest array index)
     }
-    return null;
+    return best;
   }
   // "Reference PART of an image": create a NEW image element showing just the world-rect region of
   // imgEl. Shares the same fileId (no data copy) + carries a `crop` in natural pixels. Handles
@@ -2845,7 +2886,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._pendingImgRegion = null; // undo/redo replaced the scene → cache stale
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; // undo/redo replaced the scene → cache + index stale
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
   }
@@ -3004,7 +3045,7 @@ class CanvasView {
     }
   }
   scheduleSave() {
-    this._cacheValid = false; // content changed → the render cache must be rebuilt (next crisp render does it)
+    this._cacheValid = false; this._gridDirty = true; // content changed → rebuild render cache + spatial index lazily
     // edit save: record an undo step (push the prior committed state, snapshot the new one)
     if (this._committed !== undefined) { this._undo.push(this._committed); if (this._undo.length > 80) this._undo.shift(); this._redo = []; }
     this._committed = this._snapshot();
@@ -3604,6 +3645,29 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      // PERF BASELINE (architecture audit): seed N synthetic elements into the active drawing, then time the hot
+      // paths so the spatial-index / delta-persistence phases are authorised by a real flamegraph, not a code-read.
+      // Console: `window.__plexusCanvas.test.bench(5000)` (then 20000, 50000). `benchReset()` clears the scene.
+      bench: (n) => {
+        const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' };
+        n = n || 5000;
+        const t0 = performance.now(), cols = Math.max(1, Math.ceil(Math.sqrt(n))), types = ['rectangle', 'ellipse', 'diamond'];
+        for (let i = 0; i < n; i++) {
+          const gx = (i % cols) * 60, gy = Math.floor(i / cols) * 60;
+          v.scene.elements.push(makeRect(gx, gy, 40, 30, { type: types[i % 3], stroke: '#7c5cff', fill: 'transparent' }));
+          if (i % 7 === 0 && i > 0) { const a = makeLinear(gx, gy, 'arrow', { stroke: '#0ea5e9', strokeWidth: 2 }); a.points[1] = [gx - 30, gy - 30]; linearBBox(a); v.scene.elements.push(a); }
+        }
+        const live = v.scene.elements.filter((e) => !e.isDeleted).length, seedMs = performance.now() - t0;
+        const time = (fn, reps) => { reps = reps || 1; const s = performance.now(); for (let i = 0; i < reps; i++) fn(); return +((performance.now() - s) / reps).toFixed(3); };
+        const byId = time(() => { const els = v.scene.elements; for (let i = 0; i < 200; i++) v._byId(els[(i * 53) % els.length].id); });
+        const bind = time(() => v._updateBindings(), 5);
+        const render = time(() => { v._cacheValid = false; v.render(); }, 3);
+        const hit = time(() => { for (let i = 0; i < 50; i++) v._hitTopAt(Math.random() * 3000, Math.random() * 3000); });
+        const bounds = time(() => sceneBounds(v.scene), 3);
+        const snap = time(() => v._snapshot(), 3), snapKB = Math.round(v._snapshot().length / 1024);
+        return { n: live, seedMs: +seedMs.toFixed(1), byId200Ms: byId, updateBindingsMs: bind, renderMs: render, hitTest50Ms: hit, sceneBoundsMs: bounds, snapshotMs: snap, snapshotKB: snapKB };
+      },
+      benchReset: () => { const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' }; const before = v.scene.elements.length; v.scene.elements = []; v.selected.clear(); v._cacheValid = false; v.dirty = true; return { cleared: before }; },
       // P1.0: a frame owns the elements whose centre is inside it (move-together unit).
       frameTest: () => {
         const v = this._activeView(); if (!v) return { ok: false, reason: 'no view' };
