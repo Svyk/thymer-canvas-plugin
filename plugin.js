@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.97.0';
+const PLEXUS_VERSION = '0.98.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -713,12 +713,16 @@ async function saveScene(plugin, rec, scene, camera, view) {
   }
   // Best-effort metadata (Plexus Drawings + any collection with these props; silently skipped elsewhere).
   try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
-  // P0.7: mirror visual text into a `Canvas Text` PROPERTY (not the body — no clutter) so Thymer native search
-  // + omni-search find text written on the canvas. Only when the collection has the property.
-  try { const ct = rec.prop('Canvas Text'); if (ct && typeof ct.set === 'function') { const txt = scene.elements.filter((e) => !e.isDeleted && e.type === 'text' && e.text).map((e) => String(e.text).trim()).filter(Boolean).join(' • ').slice(0, 4000); ct.set(txt); } } catch (_e) {}
-  // Banner = PNG preview (the card's cover image — the visual "drawing face" of the record). UX-5: gated by setting.
-  try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {} // UX-5: clear the banner when the preview is disabled
+  // PERF: the O(n) `Canvas Text` rescan + banner PNG re-export used to run on EVERY save (write amplification).
+  // They're now a DEBOUNCED idle pass (view._scheduleBannerText) — cosmetic + search-only, decoupled from the
+  // durable scene write above. View-less saves (rare) still refresh them inline here so nothing is lost.
+  if (!view) { try { _writeBannerTextInline(plugin, rec, scene); } catch (_e) {} }
   return { ok, mode, blobGuid: blob.guid };
+}
+// The Canvas-Text property mirror + banner-preview PNG. Off the save hot path (debounced); see _scheduleBannerText.
+async function _writeBannerTextInline(plugin, rec, scene) {
+  try { const ct = rec.prop('Canvas Text'); if (ct && typeof ct.set === 'function') { const txt = scene.elements.filter((e) => !e.isDeleted && e.type === 'text' && e.text).map((e) => String(e.text).trim()).filter(Boolean).join(' • ').slice(0, 4000); ct.set(txt); } } catch (_e) {}
+  try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {}
 }
 
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
@@ -2874,7 +2878,10 @@ class CanvasView {
     // over years and EVERY scan pays for the graveyard. Undo history is empty on load, so compact it away here.
     try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
     const a = this.scene.appState || {};
-    this.camera = new Camera(a.scroll ? a.scroll.x : -60, a.scroll ? a.scroll.y : -50, a.zoom || 1);
+    // SESSION/DOCUMENT SPLIT: prefer the locally-persisted camera (per drawing), fall back to the doc's appState.
+    let cx = a.scroll ? a.scroll.x : -60, cy = a.scroll ? a.scroll.y : -50, cz = a.zoom || 1;
+    try { const ls = this.recordGuid && localStorage.getItem('plexus_cam_' + this.recordGuid); if (ls) { const c = JSON.parse(ls); if (c && isFinite(c.x)) { cx = c.x; cy = c.y; cz = c.zoom || 1; } } } catch (_e) {}
+    this.camera = new Camera(cx, cy, cz);
     const st = this.plugin._settings || {};
     this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
@@ -2888,11 +2895,19 @@ class CanvasView {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
     this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; // undo/redo replaced the scene → cache + index stale
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
-    this.dirty = true; if (this.rec && !this.destroyed) saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
+    this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
   undo() { if (!this._undo.length) return; this._redo.push(this._snapshot()); this._restore(this._undo.pop()); }
   redo() { if (!this._redo.length) return; this._undo.push(this._snapshot()); this._restore(this._redo.pop()); }
-  _saveCamera() { this._lastCamChange = this._now(); this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom; if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700); }
+  // SESSION/DOCUMENT SPLIT: the camera is SESSION state, not document state — persist it locally (per drawing) and
+  // do NOT save the whole synced scene on every pan/zoom (the biggest write-amplification source). It still rides
+  // in appState on the next real EDIT save as a cross-device fallback; loadOrInit prefers the local value.
+  _saveCamera() {
+    this._lastCamChange = this._now();
+    this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom;
+    try { if (this.recordGuid) localStorage.setItem('plexus_cam_' + this.recordGuid, JSON.stringify({ x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom })); } catch (_e) {}
+  }
+  _scheduleBannerText() { if (this._btTimer) clearTimeout(this._btTimer); this._btTimer = setTimeout(() => { this._btTimer = null; if (!this.destroyed && this.rec) _writeBannerTextInline(this.plugin, this.rec, this.scene); }, 1500); }
   render() {
     if (this.destroyed || !this.staticCv) return;
     if (this._camAnim) this._stepCamAnim(); // advance the cinematic camera tween before drawing this frame
@@ -3050,9 +3065,10 @@ class CanvasView {
     if (this._committed !== undefined) { this._undo.push(this._committed); if (this._undo.length > 80) this._undo.shift(); this._redo = []; }
     this._committed = this._snapshot();
     if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
+    this._scheduleBannerText(); // O(n) banner+text refresh, debounced off the durable-save path
   }
   async saveNow() { if (!this.rec || this.destroyed) return null; const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res; }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -3479,7 +3495,7 @@ class Plugin extends AppPlugin {
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
   _openSettings() {
     const s = this._settings || (this._settings = loadPlexusSettings());
-    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; if (key === 'linkOpacity') PLEXUS_LINK_ALPHA = (s.linkOpacity == null ? 100 : s.linkOpacity) / 100; if (key === 'imageCacheMax') this._imgCacheEvict(); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v.saveNow(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
+    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; if (key === 'linkOpacity') PLEXUS_LINK_ALPHA = (s.linkOpacity == null ? 100 : s.linkOpacity) / 100; if (key === 'imageCacheMax') this._imgCacheEvict(); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v._scheduleBannerText(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
     const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
     const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-settings-wide';
     const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
