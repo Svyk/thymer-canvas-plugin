@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.78.0';
+const PLEXUS_VERSION = '0.79.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2019,6 +2019,48 @@ class CanvasView {
     } catch (e) { console.error('[Plexus] ai', e); }
     return null;
   }
+  // Phase 6: vision — send the rendered scene to a multimodal model and return its text analysis. Per-provider
+  // message shapes (OpenAI/xAI image_url, Anthropic image/base64, Gemini inlineData). dataUrl = a PNG data URL.
+  async _aiVision(system, user, dataUrl) {
+    const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
+    const key = await this._aiKey(provider); if (!key) return null;
+    const model = (this.plugin._settings && this.plugin._settings.aiModel) || '';
+    const b64 = String(dataUrl).replace(/^data:image\/\w+;base64,/, '');
+    try {
+      if (provider === 'openai' || provider === 'xai') {
+        const url = provider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+        const m = model || (provider === 'xai' ? 'grok-2-vision-latest' : 'gpt-4o-mini');
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: JSON.stringify({ model: m, messages: [{ role: 'system', content: system }, { role: 'user', content: [{ type: 'text', text: user }, { type: 'image_url', image_url: { url: dataUrl } }] }] }) });
+        const data = await res.json(); this._addAiUsage(data); return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+      }
+      if (provider === 'anthropic') {
+        const m = model || 'claude-3-5-sonnet-latest';
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: m, max_tokens: 1200, system, messages: [{ role: 'user', content: [{ type: 'text', text: user }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } }] }] }) });
+        const data = await res.json(); this._addAiUsage(data); return (data && data.content && data.content[0] && data.content[0].text) || '';
+      }
+      if (provider === 'gemini') {
+        const m = model || 'gemini-2.0-flash';
+        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + encodeURIComponent(key), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }, { inlineData: { mimeType: 'image/png', data: b64 } }] }] }) });
+        const data = await res.json(); this._addAiUsage(data); return (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || '';
+      }
+    } catch (e) { console.error('[Plexus] ai vision', e); }
+    return null;
+  }
+  // Phase 6: analyse the current drawing with a vision model and drop its feedback as a text note on the canvas.
+  async _aiAnalyzeCanvas() {
+    let blob = null; try { blob = await exportPng(this.scene, 2048, { scale: 1.5, padding: 16, background: true }); } catch (_e) {}
+    if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to analyse.', dismissible: true }); } catch (_e) {} return; }
+    const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result || '')); fr.onerror = () => r(''); fr.readAsDataURL(blob); });
+    if (!dataUrl) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: analysing the drawing…', dismissible: true }); } catch (_e) {}
+    const SYS = 'You are a concise visual-thinking assistant. Look at this whiteboard and respond in <120 words: what it depicts, gaps or unclear bits, and 2 concrete suggestions. Plain text.';
+    let txt = null; try { txt = await this._aiVision(SYS, 'Analyse this drawing.', dataUrl); } catch (_e) {}
+    if (!txt) { try { this.plugin.ui.addToaster({ title: 'Plexus: no analysis returned (check the AI provider + key).', dismissible: true }); } catch (_e) {} return; }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const el = makeText(this._snap(c.x), this._snap(c.y), { fontSize: 14, stroke: '#7c5cff' }); el.text = '🤖 ' + String(txt).trim(); el.width = 360; measureText(el);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Analysis added as a note.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 6: per-session AI token meter — accumulate usage across providers (OpenAI/xAI total_tokens,
   // Anthropic input+output, Gemini usageMetadata) into the plugin so the user can see what a session cost.
   _addAiUsage(data) {
@@ -2371,6 +2413,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
