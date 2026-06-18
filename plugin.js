@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.84.0';
+const PLEXUS_VERSION = '0.85.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -81,6 +81,9 @@ function recordSkin(rec) {
   try { const dp = rec.prop('Due') || rec.prop('Due Date') || rec.prop('Deadline'); if (dp && dp.date) { const d = dp.date(); if (d && d.getTime() < Date.now()) skin.urgent = true; } } catch (_e) {}
   return skin;
 }
+// CP-7/C-CF10: persist recently-used colours across drawings (a shared palette that new drawings inherit).
+function pushRecentColor(c) { try { let r = JSON.parse(localStorage.getItem('plexus_recent_colors') || '[]'); r = [c].concat(r.filter((x) => x !== c)).slice(0, 12); localStorage.setItem('plexus_recent_colors', JSON.stringify(r)); } catch (_e) {} }
+function recentColors() { try { return JSON.parse(localStorage.getItem('plexus_recent_colors') || '[]'); } catch (_e) { return []; } }
 // P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
 function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
 const COLOR_SCHEMES = {
@@ -1977,7 +1980,7 @@ class CanvasView {
   _applyColorToSelection(color) {
     let ch = false;
     for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.strokeColor = color; if (el.backgroundColor && el.backgroundColor !== 'transparent') el.backgroundColor = FILLS[color] || tintColor(color); ch = true; }
-    if (ch) { this.dirty = true; this.scheduleSave(); this._syncToolbar && this._syncToolbar(); }
+    if (ch) { this.dirty = true; this.scheduleSave(); this._syncToolbar && this._syncToolbar(); pushRecentColor(color); } // CP-7/C-CF10: persist recent colours across drawings
     return ch;
   }
   // P0.4 Shade Master + P0.4b Color Scheme Manager — palette extracted from this drawing + named schemes.
@@ -1993,6 +1996,7 @@ class CanvasView {
       for (const c of colors) { const sw = document.createElement('button'); sw.className = 'pxc-ct-sw'; sw.style.background = c; sw.title = c; sw.addEventListener('click', () => { this._applyColorToSelection(c); }); row.appendChild(sw); }
       sec.appendChild(row); box.appendChild(sec);
     };
+    const recent = recentColors(); if (recent.length) swatchRow('Recent (across drawings)', recent); // CP-7/C-CF10: inherited palette
     if (used.length) swatchRow('In this drawing', used);
     for (const name in COLOR_SCHEMES) swatchRow(name, COLOR_SCHEMES[name]);
     const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done'; close.addEventListener('click', () => overlay.remove()); box.appendChild(close);
