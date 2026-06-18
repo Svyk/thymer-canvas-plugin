@@ -54,6 +54,13 @@ const PLEXUS_ONTOLOGY_DEFAULT = {
   journalCollection: 'Journal', drawingsCollection: 'Plexus Drawings', iconsCollection: 'Icons',
   templatesCollection: 'Templates', capturesCollection: 'Captures',
   relationTags: { captured: 'captured', project: 'project', icon: 'icon' },
+  relationBuckets: { // BP-2/BP-3: field-label → relation category (priority order; consumed by Plexus Brain)
+    parents: ['parent', 'parents', 'up', 'source', 'origin', 'part of', 'belongs to'],
+    children: ['child', 'children', 'down', 'subtask', 'subtasks', 'contains'],
+    leftFriends: ['friend', 'friends', 'related', 'similar', 'supports', 'see also', 'attendees', 'people'],
+    rightFriends: ['opposes', 'blocks', 'blocked by', 'conflicts with'],
+    previous: ['previous', 'prev', 'after'], next: ['next', 'before', 'leads to'],
+  },
 };
 function loadPlexusOntology() {
   try { if (typeof window !== 'undefined' && window.__plexusOntology) return window.__plexusOntology; } catch (_e) {}
