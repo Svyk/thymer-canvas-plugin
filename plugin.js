@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.68.0';
+const PLEXUS_VERSION = '0.69.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1320,6 +1320,30 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Pinboard: ' + n + ' live cards for “' + q + '”.', dismissible: true }); } catch (_e) {}
   }
+  // CS-1: property-driven living layout — snap the selected record cards into COLUMNS by a typed property value
+  // (a kanban board keyed on Status/Priority/etc.), with a header per column. Re-run to re-arrange as values change.
+  async _arrangeByProperty() {
+    const cards = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type === 'record');
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ record cards first.', dismissible: true }); } catch (_e) {} return; }
+    const prop = await this._promptText('Arrange by property (e.g. Status, Priority):', 'Status');
+    if (!prop) return;
+    const groups = new Map();
+    for (const card of cards) {
+      let val = '(none)';
+      try { const rec = await this.plugin.data.getRecord(card.recordGuid); if (rec && rec.prop) { const p = rec.prop(prop); if (p) { val = (p.choiceLabel && p.choiceLabel()) || (p.text && p.text()) || (p.number && p.number() != null ? String(p.number()) : null) || '(none)'; } } } catch (_e) {}
+      val = String(val || '(none)'); if (!groups.has(val)) groups.set(val, []); groups.get(val).push(card);
+    }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const CW = 240, CH = 150, COLGAP = 40, ROWGAP = 20, cols = [...groups.keys()];
+    const x0 = this._snap(c.x - (cols.length * (CW + COLGAP)) / 2), y0 = this._snap(c.y - 80);
+    cols.forEach((val, ci) => {
+      const colX = x0 + ci * (CW + COLGAP);
+      const hdr = makeText(colX, y0 - 36, { fontSize: 16, stroke: '#7c5cff' }); hdr.text = prop + ': ' + val; measureText(hdr); this.scene.elements.push(hdr);
+      groups.get(val).forEach((card, ri) => { card.x = colX; card.y = y0 + ri * (CH + ROWGAP); card.width = CW; card.height = CH; });
+    });
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
+  }
   // Phase 9 E10: board-card cache — fetches another drawing record's banner PNG (its live scene preview).
   _boardFor(guid) {
     if (!this._boardCache) this._boardCache = new Map();
@@ -2129,6 +2153,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
