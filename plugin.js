@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.60.0';
+const PLEXUS_VERSION = '0.61.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -46,6 +46,22 @@ let PLEXUS_LINK_ALPHA = 1;
 function _pxcLinkAlpha() { return PLEXUS_LINK_ALPHA; }
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
+// IO-3: ONE shared ontology read by all three Plexus plugins (Canvas/Brain/Templater) so they agree on
+// collection names + relation tags. Default ⊕ localStorage['plexus_ontology'] override, hoisted to
+// window.__plexusOntology (first loader wins — like the shared embedder). Editable-record layer is a follow-up.
+const PLEXUS_ONTOLOGY_DEFAULT = {
+  entityCollections: ['Projects', 'People', 'Books', 'Notes', 'Captures', 'Icons', 'Plexus Drawings'],
+  journalCollection: 'Journal', drawingsCollection: 'Plexus Drawings', iconsCollection: 'Icons',
+  templatesCollection: 'Templates', capturesCollection: 'Captures',
+  relationTags: { captured: 'captured', project: 'project', icon: 'icon' },
+};
+function loadPlexusOntology() {
+  try { if (typeof window !== 'undefined' && window.__plexusOntology) return window.__plexusOntology; } catch (_e) {}
+  let o; try { o = JSON.parse(JSON.stringify(PLEXUS_ONTOLOGY_DEFAULT)); } catch (_e) { o = PLEXUS_ONTOLOGY_DEFAULT; }
+  try { const ov = JSON.parse(localStorage.getItem('plexus_ontology') || '{}'); o = Object.assign(o, ov); } catch (_e) {}
+  try { if (typeof window !== 'undefined') window.__plexusOntology = o; } catch (_e) {}
+  return o;
+}
 function hexToRgba(hex, a) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16); return 'rgba(' + (r || 124) + ',' + (g || 92) + ',' + (b || 255) + ',' + a + ')'; }
 // P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
 function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
@@ -565,6 +581,9 @@ function elementsFromAiJson(arr, ox, oy) {
 }
 async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
+  // CP-1: stamp a valid fractional z-index reflecting paint (array) order, so the persisted scene is
+  // Excalidraw-export-valid (was a dead 'a0' constant). Lexicographically sortable, fixed-width base36.
+  for (let i = 0; i < scene.elements.length; i++) scene.elements[i].index = 'a' + i.toString(36).padStart(8, '0');
   const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
   const blob = await plugin.data.uploadBlob(file);
   if (!blob) return { ok: false, reason: 'uploadBlob null' };
@@ -862,6 +881,17 @@ class CanvasView {
   _ungroup() { let changed = false; for (const id of this.selected) { const el = this._byId(id); if (el && el.groupIds && el.groupIds.length) { el.groupIds.pop(); changed = true; } } if (changed) { this.dirty = true; this.scheduleSave(); } }
   _bringToFront() { if (!this.selected.size) return; const sel = this.scene.elements.filter((e) => this.selected.has(e.id)); const rest = this.scene.elements.filter((e) => !this.selected.has(e.id)); this.scene.elements = rest.concat(sel); this.dirty = true; this.scheduleSave(); }
   _sendToBack() { if (!this.selected.size) return; const sel = this.scene.elements.filter((e) => this.selected.has(e.id)); const rest = this.scene.elements.filter((e) => !this.selected.has(e.id)); this.scene.elements = sel.concat(rest); this.dirty = true; this.scheduleSave(); }
+  // CP-1: step z-order by ONE. Walk selected ids toward front (di=+1) or back (di=-1), each swapping past the
+  // nearest non-selected neighbour. Front pass iterates high→low index so a contiguous selection moves as a block.
+  _stepZ(di) {
+    if (!this.selected.size) return; const els = this.scene.elements; const n = els.length;
+    const order = di > 0 ? [...Array(n).keys()].reverse() : [...Array(n).keys()];
+    let moved = false;
+    for (const i of order) { const j = i + di; if (j < 0 || j >= n) continue; if (this.selected.has(els[i].id) && !this.selected.has(els[j].id)) { const t = els[i]; els[i] = els[j]; els[j] = t; moved = true; } }
+    if (moved) { this.dirty = true; this.scheduleSave(); }
+  }
+  _bringForward() { this._stepZ(1); }
+  _sendBackward() { this._stepZ(-1); }
   _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
   _worldAt(e) { const r = this.wrap.getBoundingClientRect(); return this.camera.screenToWorld(e.clientX - r.left, e.clientY - r.top); }
   // S4: is pen mode on? Drives whether a pen pointer draws freedraw without picking the Pen tool.
@@ -1028,8 +1058,8 @@ class CanvasView {
         if (k === 'd') { e.preventDefault(); e.stopPropagation(); this._duplicate(); return; }
         if (k === 'a') { e.preventDefault(); e.stopPropagation(); this._selectAll(); return; }
         if (k === 'g') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._ungroup(); else this._group(); return; }
-        if (k === ']') { e.preventDefault(); e.stopPropagation(); this._bringToFront(); return; }
-        if (k === '[') { e.preventDefault(); e.stopPropagation(); this._sendToBack(); return; }
+        if (k === ']') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._bringToFront(); else this._bringForward(); return; } // CP-1: ⌘] forward, ⌘⇧] front
+        if (k === '[') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._sendToBack(); else this._sendBackward(); return; } // CP-1: ⌘[ backward, ⌘⇧[ back
         if (k === 'f') { e.preventDefault(); e.stopPropagation(); this._openSearch(); return; }
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
@@ -1858,6 +1888,7 @@ class Plugin extends AppPlugin {
     this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
     this._imgCache = new Map(); // S9: shared bounded LRU decode cache (one Image per fileId across all views)
     this._settings = loadPlexusSettings();
+    this._ontology = loadPlexusOntology(); // IO-3: shared collection/relation ontology
     PLEXUS_DEFAULT_FONT = this._settings.defaultFont || 'system-ui, sans-serif'; // S7
     PLEXUS_LINK_ALPHA = (this._settings.linkOpacity == null ? 100 : this._settings.linkOpacity) / 100; // S10
     this._secrets = null; // P0.0: decrypted AI key cache (session only)
