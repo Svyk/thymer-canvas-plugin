@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.62.0';
+const PLEXUS_VERSION = '0.63.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -375,6 +375,16 @@ function makeRecordCard(x, y, w, h, recordGuid) {
 function lineTextOf(li) {
   try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
 }
+// IO-1: a native TASK node — backed by a REAL Thymer `task` line item (lineGuid on recordGuid). Its checkbox
+// toggles setTaskStatus, so the same task is live in the Task Board / Day View / @task search. A task dropped on
+// a record card writes onto THAT record ("task on Bob"). Text + status are re-fetched live via _taskFor.
+function makeTaskNode(x, y, w, h, lineGuid, recordGuid) {
+  return {
+    id: newId(), type: 'task', x, y, width: w, height: h, angle: 0, lineGuid, recordGuid,
+    strokeColor: '#f59e0b', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
 // Phase 9 E2: a LIVE query node — runs a searchByQuery and lists matching records, re-runs on changes.
 function makeQueryNode(x, y, w, h, query) {
   return {
@@ -441,7 +451,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -957,6 +967,8 @@ class CanvasView {
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
         const hit = this._hitTopAt(down.x, down.y);
+        // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
+        if (hit && hit.type === 'task') { const cb = this._taskCheckboxRect(hit); if (down.x >= cb.x && down.x <= cb.x + cb.w && down.y >= cb.y && down.y <= cb.y + cb.h) { this._toggleTaskNode(hit); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
         if (hit) {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
           const mk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
@@ -1326,6 +1338,80 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // IO-1: task-node cache — fetches the backing line item's text + done status by (recordGuid, lineGuid).
+  // Keeps the live PluginLineItem on the entry so the checkbox can toggle setTaskStatus. Invalidated on edit.
+  _taskFor(el) {
+    if (!this._taskCache) this._taskCache = new Map();
+    const key = el.lineGuid; if (!key) return null;
+    const c = this._taskCache.get(key); if (c) return c.ready ? c : null;
+    const entry = { ready: false, text: '', done: false, li: null }; this._taskCache.set(key, entry);
+    (async () => {
+      try {
+        const rec = await this.plugin.data.getRecord(el.recordGuid); if (!rec) { entry.text = '(record gone)'; entry.ready = true; this.dirty = true; return; }
+        const items = await rec.getLineItems();
+        const li = (items || []).find((x) => x.guid === key);
+        if (!li) { entry.text = '(task gone)'; entry.ready = true; this.dirty = true; return; }
+        entry.li = li; entry.text = lineTextOf(li);
+        try { entry.done = (li.isTaskCompleted && li.isTaskCompleted() === true) || (li.getTaskStatus && li.getTaskStatus() === 'done'); } catch (_e) {}
+        entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateTask(lineGuid) { if (this._taskCache && this._taskCache.has(lineGuid)) { this._taskCache.delete(lineGuid); this.dirty = true; } }
+  async _toggleTaskNode(el) {
+    const t = this._taskFor(el); if (!t || !t.li) return; // not loaded yet — ignore the click
+    const next = t.done ? 'none' : 'done';
+    try { await t.li.setTaskStatus(next); } catch (e) { console.error('[Plexus] setTaskStatus', e); return; }
+    this._invalidateTask(el.lineGuid);
+  }
+  // The checkbox hit-region (world coords) at the task card's left.
+  _taskCheckboxRect(el) { const s = 18, m = (el.height - s) / 2; return { x: el.x + 8, y: el.y + m, w: s, h: s }; }
+  _drawTaskNode(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    const t = this._taskFor(el); const done = !!(t && t.done);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
+    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#f59e0b'; ctx.stroke();
+    // checkbox
+    const cb = this._taskCheckboxRect(el);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(cb.x, cb.y, cb.w, cb.h, 4); else ctx.rect(cb.x, cb.y, cb.w, cb.h);
+    ctx.lineWidth = 1.6; ctx.strokeStyle = done ? '#10b981' : '#9aa0a6'; ctx.stroke();
+    if (done) { ctx.fillStyle = '#10b981'; ctx.fill(); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cb.x + 4, cb.y + 9); ctx.lineTo(cb.x + 7.5, cb.y + 13); ctx.lineTo(cb.x + 14, cb.y + 5); ctx.stroke(); }
+    // text
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    const tx = cb.x + cb.w + 8, maxW = w - (tx - x) - 8;
+    ctx.textBaseline = 'middle'; ctx.font = '13px system-ui, sans-serif';
+    ctx.fillStyle = done ? '#9aa0a6' : '#1e1e1e';
+    const label = t ? (t.text || '(empty task)') : 'Loading…';
+    const clipped = this._clipText(ctx, label, maxW);
+    ctx.fillText(clipped, tx, y + h / 2);
+    if (done) { const tw = ctx.measureText(clipped).width; ctx.strokeStyle = '#9aa0a6'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tx, y + h / 2); ctx.lineTo(Math.min(tx + tw, x + w - 8), y + h / 2); ctx.stroke(); }
+    ctx.restore(); ctx.restore();
+  }
+  _insertTaskNode(lineGuid, recordGuid, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeTaskNode(this._snap(wx - 120), this._snap(wy - 26), 248, 52, lineGuid, recordGuid);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  // IO-1: create a real `task` line item (on the drawing's own record, or a chosen record) + drop a bound node.
+  async _addTaskNode(wx, wy) {
+    const text = await this._promptText('Task:', '');
+    if (text == null || !text.trim()) return;
+    const recGuid = this._recordGuidForTasks();
+    if (!recGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: no record to attach the task to.', dismissible: true }); } catch (_e) {} return; }
+    try {
+      const rec = await this.plugin.data.getRecord(recGuid); if (!rec) return;
+      let li = null; for (let i = 0; i < 5 && !li; i++) { try { li = await rec.createLineItem(null, null, 'task', [{ type: 'text', text: text.trim() }], null); } catch (_e) {} if (!li) await sleep(150); }
+      if (!li) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the task line item.', dismissible: true }); } catch (_e) {} return; }
+      this._insertTaskNode(li.guid, recGuid, wx, wy);
+    } catch (e) { console.error('[Plexus] addTaskNode', e); }
+  }
+  // The record a new task attaches to: the drawing's own record (so tasks on the daily whiteboard land on the day).
+  _recordGuidForTasks() { return this.rec && this.rec.guid ? this.rec.guid : (this.plugin._lastRecordGuid || null); }
   // P1.3: Deconstruct / Pizza Slicer — extract the selection (or a frame's contents) into a new standalone
   // Plexus drawing, leaving a live board-card link behind. Turns whiteboards into reusable modular "bricks".
   async _deconstructSelection() {
@@ -1828,7 +1914,7 @@ class CanvasView {
     const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
     let drawn = 0;
     for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
-    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else drawElement(sctx, el); }
+    for (const el of this.scene.elements) { if (el.isDeleted || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
     this._drawnCount = drawn;
     this._drawGhosts(sctx);
     // interactive layer — selection + transform handles
@@ -1903,6 +1989,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New hybrid visual note', icon: 'ti-pencil', onSelected: () => this._newHybridNote() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to drawing', icon: 'ti-pencil', onSelected: () => this._flipActiveRecord() });
     this.ui.addCommandPaletteCommand({ label: "Plexus: Open today's whiteboard", icon: 'ti-calendar', onSelected: () => this._openTodayWhiteboard() }); // IO-2
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Add task', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._addTaskNode(); } }); // IO-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
@@ -1942,7 +2029,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); } v._invalidateQueries(); } };
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1: refresh task nodes on external edits
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     let raf = 0;
     const tick = () => {

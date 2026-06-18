@@ -32,7 +32,8 @@ That's it — flipping any record in that collection then stores the scene in th
 
 Run these from the command palette (most also have toolbar buttons / hotkeys):
 
-- **Drawing & notes** — `New Drawing`, `New hybrid visual note`, `Flip to drawing` / `Flip to note`, `Gallery`.
+- **Drawing & notes** — `New Drawing`, `New hybrid visual note`, `Flip to drawing` / `Flip to note`, `Open today's whiteboard` (flips today's Journal record into a drawing), `Gallery`.
+- **Native tasks** — `Add task` drops a task card backed by a **real Thymer `task` line item**: its checkbox toggles `setTaskStatus`, so the same task is live in the Task Board / Day View / `@task`. Tasks attach to the drawing's own record (a task on today's whiteboard lands on the day).
 - **Frames & present** — Frame tool (`F`) owns its contents; `Present` steps through named frames as slides; `Print frames as pages (PDF)`.
 - **Thinking tools** — `New mind map` (Tab = child, Enter = sibling), `Icon Library` (records tagged `#icon`), `Colours` (Shade Master + named schemes), `Outline to canvas`.
 - **References** — record cards, board-card transclusion of other drawings, `Insert reference (@@)`, `Link selected cards`, `Cite` (snapshot any selection → paste into a note).
