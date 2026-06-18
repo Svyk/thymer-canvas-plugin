@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.98.0';
+const PLEXUS_VERSION = '0.99.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -725,6 +725,30 @@ async function _writeBannerTextInline(plugin, rec, scene) {
   try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {}
 }
 
+/* ──────────────────────────────── renderer seam ──────────────────────────────── */
+// The render() loop draws through a pluggable Renderer so a future WebGL HYBRID backend (GPU shapes/images +
+// Canvas2D/DOM overlay for text/cards/effects) is a DROP-IN, not a rewrite. The Canvas2D backend below forwards
+// to the existing painters verbatim → pixel-identical, zero behaviour change. Swap via RENDERER_BACKEND.
+const RENDERER_BACKEND = 'canvas2d'; // 'canvas2d' (current) | 'webgl' (Task 8)
+class Canvas2DRenderer {
+  constructor(view) { this.view = view; this.ctx = null; this.kind = 'canvas2d'; }
+  begin(ctx, camera, dpr) { this.ctx = ctx; const z = camera.zoom, d = dpr; ctx.setTransform(z * d, 0, 0, z * d, -camera.x * z * d, -camera.y * z * d); }
+  grid() { this.view._drawGrid(this.ctx); }
+  frame(el) { this.view._drawFrame(this.ctx, el); }
+  element(el) {
+    const v = this.view, ctx = this.ctx, t = el.type;
+    if (t === 'image') v._drawImage(ctx, el);
+    else if (t === 'record') v._drawRecordCard(ctx, el);
+    else if (t === 'query') v._drawQueryNode(ctx, el);
+    else if (t === 'board') v._drawBoardCard(ctx, el);
+    else if (t === 'task') v._drawTaskNode(ctx, el);
+    else drawElement(ctx, el);
+  }
+  ghosts() { this.view._drawGhosts(this.ctx); }
+  end() {}
+}
+function makeRenderer(view) { /* RENDERER_BACKEND === 'webgl' ? new WebGLRenderer(view) : */ return new Canvas2DRenderer(view); }
+
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
 class CanvasView {
   constructor(plugin, panel, recordGuid, opts) {
@@ -737,6 +761,7 @@ class CanvasView {
     this.tool = 'select'; this.selected = new Set();
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
+    this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
   }
   mount() {
     try { this.panel.setTitle('Plexus'); } catch (_e) {}
@@ -2931,16 +2956,18 @@ class CanvasView {
       sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
       this._scheduleSettle();
     } else {
-      sctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-      this._drawGrid(sctx);
+      // Crisp full render — routed through the pluggable renderer (seam). Canvas2D backend = the painters below.
+      this.renderer.begin(sctx, this.camera, d);
+      this.renderer.grid();
       // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
       const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
       const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
       let drawn = 0;
-      for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this._drawFrame(sctx, el); } // P1.0: frames render behind everything
-      for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; if (el.type === 'image') this._drawImage(sctx, el); else if (el.type === 'record') this._drawRecordCard(sctx, el); else if (el.type === 'query') this._drawQueryNode(sctx, el); else if (el.type === 'board') this._drawBoardCard(sctx, el); else if (el.type === 'task') this._drawTaskNode(sctx, el); else drawElement(sctx, el); }
+      for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
+      for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
       this._drawnCount = drawn;
-      this._drawGhosts(sctx);
+      this.renderer.ghosts();
+      this.renderer.end();
       this._refreshCache();
     }
     // interactive layer — selection + transform handles
