@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.92.0';
+const PLEXUS_VERSION = '0.93.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -847,14 +847,15 @@ class CanvasView {
     this.dirty = true;
   }
   // Reveal + a fast, attention-grabbing double-pulse ring on the referenced element/region.
-  _flashAnchor(anchor) {
+  _flashAnchor(anchor, opts) {
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const el = (anchor && anchor.el) ? this._byId(anchor.el) : null;
+    const estB = (opts && opts.establishImage && el) ? this._elBBox(el) : null; // establish from the whole source image
     // EMBEDDED in-image region: recompute the live world rect from the fraction so it tracks the image's
     // CURRENT geometry (moved/resized/rotated). Spotlight that exact sub-region in place — no crop copy.
     if (anchor && anchor.inImage && anchor.frac && el) {
       const world = this._imgRegionWorld(el, anchor.frac);
-      if (world && isFinite(world.x)) { this._revealThenFlash(world, () => { this._flash = { bbox: world, inImage: true, elId: el.id, frac: anchor.frac, fracPoly: anchor.fracPoly, start: now(), dur: 1200 }; this.dirty = true; }); return; }
+      if (world && isFinite(world.x)) { this._revealThenFlash(world, () => { this._flash = { bbox: world, inImage: true, elId: el.id, frac: anchor.frac, fracPoly: anchor.fracPoly, start: now(), dur: 1200 }; this.dirty = true; }, estB); return; }
     }
     if (anchor && anchor.inImage && !el) { try { this.plugin.ui.addToaster({ title: 'Plexus: the source image for this reference was removed.', dismissible: true }); } catch (_e) {} }
     let bbox = null;
@@ -866,7 +867,7 @@ class CanvasView {
     else bbox = reg || elB;
     if (!bbox) { try { bbox = sceneBounds(this.scene); } catch (_e) {} }
     if (!bbox || !isFinite(bbox.x)) return;
-    this._revealThenFlash(bbox, () => { this._flash = { bbox, start: now(), dur: 950 }; this.dirty = true; });
+    this._revealThenFlash(bbox, () => { this._flash = { bbox, start: now(), dur: 950 }; this.dirty = true; }, estB || elB);
   }
   _now() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
   // True if b is already comfortably framed on-screen (don't bother animating).
@@ -883,20 +884,22 @@ class CanvasView {
   }
   // If b isn't already framed, fly there cinematically (establish → zoom in) then run onArrive (the flash);
   // else flash immediately. The flash recomputes its region from the live element, so it lands true.
-  _revealThenFlash(b, onArrive) {
-    if (this._isFramed(b)) { onArrive(); return; }
-    this._animateCameraTo(this._revealTarget(b), 720, onArrive);
+  // establishBounds (optional) forces the cinematic fly even if already framed, establishing from those bounds
+  // (e.g. the whole source image) before zooming to b — the "always start wide on nav" feel.
+  _revealThenFlash(b, onArrive, establishBounds) {
+    if (!establishBounds && this._isFramed(b)) { onArrive(); return; }
+    this._animateCameraTo(this._revealTarget(b), establishBounds ? 820 : 720, onArrive, establishBounds ? this._revealTarget(establishBounds) : null);
   }
   // Cinematic 2-segment camera tween: current → a wide establishing framing (ease-out), then wide → target
   // (ease-in-out). Zoom interpolated geometrically (log space). Aborts on user input. onArrive fires on landing.
-  _animateCameraTo(target, dur, onArrive) {
+  _animateCameraTo(target, dur, onArrive, forcedWide) {
     const c0 = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom };
     const curCx = c0.x + (this.cssW / c0.zoom) / 2, curCy = c0.y + (this.cssH / c0.zoom) / 2;
     const tgtCx = target.x + (this.cssW / target.zoom) / 2, tgtCy = target.y + (this.cssH / target.zoom) / 2;
     const hw = (this.cssW / target.zoom) / 2, hh = (this.cssH / target.zoom) / 2;
     const wideBox = { x: Math.min(curCx, tgtCx - hw), y: Math.min(curCy, tgtCy - hh), w: 0, h: 0 };
     wideBox.w = Math.max(curCx, tgtCx + hw) - wideBox.x; wideBox.h = Math.max(curCy, tgtCy + hh) - wideBox.y;
-    const wide = this._revealTarget(wideBox);
+    const wide = forcedWide || this._revealTarget(wideBox);
     this._camAnim = { c0, wide, target, start: this._now(), dur: Math.max(220, dur || 700), onArrive };
     this._fastMove = true; this.dirty = true;
   }
@@ -1292,7 +1295,7 @@ class CanvasView {
       } else if (this.tool === 'laser') {
         mode = 'laser'; this._laser = [{ x: down.x, y: down.y, t: Date.now() }]; this.dirty = true; // S6: transient trail
       } else if (this.tool === 'pen') {
-        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this.scene.elements.push(created); this.selected.clear();
+        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this._penSm = { x: down.x, y: down.y }; this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'eraser') {
         mode = 'erase'; const hit = this._hitTopAt(down.x, down.y); if (hit) { hit.isDeleted = true; this.scheduleSave(); }
       } else if (this.tool === 'text') {
@@ -1316,7 +1319,14 @@ class CanvasView {
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._lastCamChange = this._now(); this.dirty = true; return; }
       const w = this._worldAt(e);
       if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
-      if (mode === 'pen' && created) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); created.points.push([cw.x, cw.y]); } } else created.points.push([w.x, w.y]); freedrawBBox(created); this.dirty = true; return; }
+      if (mode === 'pen' && created) {
+        // STABILIZER: low-pass the captured points so mouse jitter doesn't make the stroke feel jagged/lasso-like.
+        // Each point eases toward the raw position (still responsive); paired with the quadratic render = smooth ink.
+        const a = 0.5, push = (px, py) => { const s = this._penSm || (this._penSm = { x: px, y: py }); s.x += (px - s.x) * a; s.y += (py - s.y) * a; created.points.push([s.x, s.y]); };
+        const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null);
+        if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); push(cw.x, cw.y); } } else push(w.x, w.y);
+        freedrawBBox(created); this.dirty = true; return;
+      }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
@@ -3194,7 +3204,18 @@ class Plugin extends AppPlugin {
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
     const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly });
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
-    let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(null, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
+    // Nest the image UNDER the line the cursor is on (a CHILD), not at the record's top level. Resolve the
+    // cursor line from the active editor (the thread-target marker) → the matching line item → use as parent.
+    let parentLine = null;
+    try {
+      const panel = this.ui.getActivePanel();
+      const root = (panel && panel.getElement && panel.getElement()) || document;
+      const cur = root.querySelector('.flowythymer-thread-target') || root.querySelector('.listitem.has-focus, .listitem.is-target, .listitem.selected');
+      const li = cur ? (cur.getAttribute && cur.getAttribute('data-guid') ? cur : (cur.closest && cur.closest('.listitem[data-guid]'))) : null;
+      const g = li && li.getAttribute ? li.getAttribute('data-guid') : null;
+      if (g) { const items = await rec.getLineItems(); parentLine = (items || []).find((x) => x && x.guid === g) || null; }
+    } catch (_e) {}
+    let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(parentLine, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
     if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly }); } catch (_e) {} }
@@ -3300,7 +3321,8 @@ class Plugin extends AppPlugin {
     }
     if (!view) return;
     for (let j = 0; j < 25 && !view.rec; j++) await sleep(100); // let the scene load so the bbox is real before fitting
-    try { view._flashAnchor(entry); } catch (e) { console.error('[Plexus] navToAnchor', e); }
+    // Navigating TO the canvas → always start wide (the whole source image) then cinematically zoom into the region.
+    try { view._flashAnchor(entry, { establishImage: true }); } catch (e) { console.error('[Plexus] navToAnchor', e); }
   }
   // UX-5/UX-6: lightweight settings modal (banner-preview toggle + dark canvas). Persisted to localStorage.
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
