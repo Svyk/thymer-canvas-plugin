@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.77.0';
+const PLEXUS_VERSION = '0.78.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1751,6 +1751,10 @@ class CanvasView {
   async _insertMermaid() {
     const code = await this._promptText('Mermaid code:', 'graph LR\n  A[Ingest] --> B[Transform] --> C[Store]');
     if (!code) return;
+    await this._renderMermaidCode(code);
+  }
+  // Render Mermaid CODE → SVG → PNG element (shared by _insertMermaid and the AI Mermaid command).
+  async _renderMermaidCode(code) {
     try { this.plugin.ui.addToaster({ title: 'Plexus: rendering Mermaid…', dismissible: true }); } catch (_e) {}
     let svg = null;
     try { const m = await loadLib(LIB.mermaid); const mermaid = m.default || m; if (!this.plugin._mmdInit) { mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' }); this.plugin._mmdInit = true; } const r = await mermaid.render('pxcmmd' + Date.now(), code); svg = r && r.svg; }
@@ -1760,6 +1764,18 @@ class CanvasView {
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
     await this._addImageFromFile(file, c.x, c.y);
     try { this.plugin.ui.addToaster({ title: 'Mermaid diagram inserted.', dismissible: true }); } catch (_e) {}
+  }
+  // Phase 6: Mermaid from natural language — AI turns a prompt into Mermaid code, then renders it.
+  async _aiMermaid() {
+    const what = await this._promptText('Describe the diagram (AI → Mermaid):', 'a flowchart of our EMP sampling decision process');
+    if (!what) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: asking the model for a Mermaid diagram…', dismissible: true }); } catch (_e) {}
+    const SYS = 'Output ONLY valid Mermaid diagram code — no prose, no markdown fences. Choose the best diagram type (flowchart/sequence/class/state/ER) for the request.';
+    let code = null; try { code = await this._aiComplete(SYS, String(what)); } catch (_e) {}
+    if (code == null) return;
+    code = String(code).replace(/^```(mermaid)?/i, '').replace(/```$/, '').trim();
+    if (!code) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model returned no Mermaid code.', dismissible: true }); } catch (_e) {} return; }
+    await this._renderMermaidCode(code);
   }
   // P2: LaTeX equation (MathJax SVG, lazy) → rasterized image element.
   async _insertLatex() {
@@ -2354,6 +2370,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
