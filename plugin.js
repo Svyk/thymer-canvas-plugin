@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.90.0';
+const PLEXUS_VERSION = '0.90.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1225,8 +1225,17 @@ class CanvasView {
       }
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
+        let picked = 0;
         if (poly.length >= 3) {
-          for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; const bb = this._elBBox(el); if (!bb) continue; if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly)) this.selected.add(el.id); }
+          for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; const bb = this._elBBox(el); if (!bb) continue; if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly)) { this.selected.add(el.id); picked++; } }
+        }
+        // Lassoed a sub-area of an IMAGE (no whole element enclosed) → make a precise region reference of the
+        // loop's bounds, like the crop tool. So "lasso Oregon on the map → Cite" works (it was selecting nothing).
+        if (!picked && poly.length >= 3) {
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+          const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+          if (rect.w > 4 && rect.h > 4) { const img = this._topImageIn(rect); if (img) { const crop = this._referenceRegion(img, rect); if (crop) { try { this.plugin.ui.addToaster({ title: 'Region selected — now click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {} } } }
         }
         this.tool = 'select'; this._syncToolbar();
       }
