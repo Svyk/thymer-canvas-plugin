@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.75.0';
+const PLEXUS_VERSION = '0.76.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2003,6 +2003,12 @@ class CanvasView {
     } catch (e) { console.error('[Plexus] ai', e); }
     return null;
   }
+  // TS-8: cross-plugin seam — flip a record to a drawing and build a mind map from its headings once the view mounts.
+  async _mindMapFromNoteSeam(guid) {
+    if (!guid) return;
+    try { await this._openPanelFor(guid, { blank: false }); } catch (_e) {}
+    for (let i = 0; i < 25; i++) { const v = [...this._views].find((x) => x.rec && x.rec.guid === guid && x.scene); if (v) { try { await v._mmFromNote(guid); } catch (_e) {} return; } await sleep(120); }
+  }
   // Phase 10 E6: AI diagramming — prompt -> (consent + encrypted key) -> LLM -> JSON shapes -> elements.
   async _aiDiagram() {
     const what = await this._promptText('Describe the diagram to generate:', 'a 3-step data pipeline: ingest → transform → store');
@@ -2289,7 +2295,7 @@ class Plugin extends AppPlugin {
     try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
     // IO-5/TS-1: cross-plugin seam — Templater (or any plugin) calls window.__plexusCanvas.attachScene(guid)
     // to flip a freshly-created record into a drawing ("every note born hybrid"). Returns the panel promise.
-    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown(), attachScene: (guid, blank) => this._openPanelFor(guid, { blank: blank !== false }) };
+    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown(), attachScene: (guid, blank) => this._openPanelFor(guid, { blank: blank !== false }), mindMapFromNote: (guid) => this._mindMapFromNoteSeam(guid) }; // TS-8: Templater can emit a mind-map drawing
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
