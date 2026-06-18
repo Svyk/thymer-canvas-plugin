@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '0.81.0';
+const PLEXUS_VERSION = '0.82.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2128,6 +2128,27 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'AI image inserted.', dismissible: true }); } catch (_e) {}
     } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: image generation failed (' + e + ').', dismissible: true }); } catch (_e) {} }
   }
+  // Phase 6: AI image edit — send the SELECTED image + a prompt to OpenAI's edits endpoint (whole-image edit;
+  // true mask-region inpaint = follow-up). Needs a square PNG; result is dropped beside the original.
+  async _aiEditImage() {
+    const img = this._singleSel(); if (!img || img.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image first.', dismissible: true }); } catch (_e) {} return; }
+    const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
+    if (provider !== 'openai') { try { this.plugin.ui.addToaster({ title: 'Plexus: image edit needs the OpenAI provider.', dismissible: true }); } catch (_e) {} return; }
+    const file = this.scene.files && this.scene.files[img.fileId]; if (!file || !file.dataURL || !/,/.test(file.dataURL)) return;
+    const prompt = await this._promptText('How should the AI edit this image?', 'add a soft gradient background'); if (!prompt) return;
+    const key = await this._aiKey('openai'); if (!key) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: editing image (needs a square PNG)…', dismissible: true }); } catch (_e) {}
+    try {
+      const bin = atob(file.dataURL.split(',')[1]); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const fd = new FormData(); fd.append('image', new Blob([arr], { type: 'image/png' }), 'image.png'); fd.append('prompt', String(prompt)); fd.append('n', '1'); fd.append('size', '1024x1024'); fd.append('response_format', 'b64_json'); fd.append('model', 'dall-e-2');
+      const res = await fetch('https://api.openai.com/v1/images/edits', { method: 'POST', headers: { 'Authorization': 'Bearer ' + key }, body: fd });
+      const data = await res.json(); const b64 = data && data.data && data.data[0] && data.data[0].b64_json;
+      if (!b64) { try { this.plugin.ui.addToaster({ title: 'Plexus: edit failed (' + ((data && data.error && data.error.message) || 'image must be a square PNG <4MB') + ').', dismissible: true }); } catch (_e) {} return; }
+      const ebin = atob(b64); const earr = new Uint8Array(ebin.length); for (let i = 0; i < ebin.length; i++) earr[i] = ebin.charCodeAt(i);
+      await this._addImageFromFile(new File([earr], 'ai-edit.png', { type: 'image/png' }), img.x + Math.abs(img.width) + 24, img.y);
+      try { this.plugin.ui.addToaster({ title: 'Edited image inserted.', dismissible: true }); } catch (_e) {}
+    } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: image edit failed (' + e + ').', dismissible: true }); } catch (_e) {} }
+  }
   // Phase 6: per-session AI token meter — accumulate usage across providers (OpenAI/xAI total_tokens,
   // Anthropic input+output, Gemini usageMetadata) into the plugin so the user can see what a session cost.
   _addAiUsage(data) {
@@ -2482,6 +2503,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI edit selected image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiEditImage(); } }); // Phase 6: image edit
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert reference (@@)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._insertRef(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Boolean — union', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._boolean('union'); } });
