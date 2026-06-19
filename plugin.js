@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.7.0';
+const PLEXUS_VERSION = '1.8.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -19,7 +19,7 @@ const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that
 const PLEXUS_SETTINGS_KEY = 'plexus_settings';
 const PLEXUS_SETTINGS_DEFAULTS = {
   // S1 General
-  bannerPreview: true, darkMode: false, openMode: 'normal',
+  bannerPreview: true, darkMode: false, openMode: 'normal', invertImagesDark: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -1097,7 +1097,7 @@ class CanvasView {
     ro.observe(this.host.closest('.panel-scroller-y') || wrap); this._localDisposers.push(() => ro.disconnect());
     // UX-6: re-render when the Thymer theme switches (light↔dark) so the canvas + ink adapt immediately. Invalidate
     // the dark-luminance cache + the blit cache so the static layer redraws with adapted colours, then mark dirty.
-    const themeObs = new MutationObserver(() => { this._darkCacheT = 0; this._cacheValid = false; this.dirty = true; });
+    const themeObs = new MutationObserver(() => { const prev = this._darkCache; this._darkCacheT = 0; if (this._themeDark() !== prev) { this._cacheValid = false; this.dirty = true; } }); // only rebuild on an ACTUAL light↔dark flip, not every documentElement mutation
     try { themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] }); } catch (_e) {}
     this._localDisposers.push(() => themeObs.disconnect());
     this._wirePointer(); this.loadOrInit();
@@ -2033,9 +2033,13 @@ class CanvasView {
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
     if (img) {
       try {
+        // UX-6 (zsviczian dark mode): invert raster/SVG images on a dark canvas so figures/diagrams read. Per-image
+        // opt-out (el.noInvert — for photos/logos, via "Plexus: Toggle image dark-invert") + a global setting.
+        if (PXC_DARK && !el.noInvert && !(this.plugin._settings && this.plugin._settings.invertImagesDark === false)) ctx.filter = 'invert(0.93) hue-rotate(180deg)';
         const c = el.crop;
         if (c && c.w > 0 && c.h > 0) ctx.drawImage(img, c.x, c.y, c.w, c.h, el.x, el.y, el.width, el.height);
         else ctx.drawImage(img, el.x, el.y, el.width, el.height);
+        ctx.filter = 'none';
       } catch (_e) {}
     }
     else { const z = this.camera.zoom; ctx.fillStyle = 'rgba(124,92,255,0.08)'; ctx.fillRect(el.x, el.y, el.width, el.height); ctx.strokeStyle = '#7c5cff'; ctx.lineWidth = 1 / z; ctx.setLineDash([5 / z, 4 / z]); ctx.strokeRect(el.x, el.y, el.width, el.height); ctx.setLineDash([]); }
@@ -2068,7 +2072,9 @@ class CanvasView {
       const url = URL.createObjectURL(blob);
       const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('svg load')); im.src = url; });
       const iw = img.naturalWidth || w, ih = img.naturalHeight || h;
-      const scale = Math.min(3, Math.max(1, 1800 / Math.max(iw, ih))); // hi-dpi, capped
+      // PERF: cap the raster's max dimension (~1400px) so a complex/large SVG doesn't become a multi-thousand-px
+      // bitmap that drawImage must rescale every static-layer rebuild. Display is capped at 480px, so 1400 stays crisp.
+      const RMAX = 1400, scale = Math.min(3, RMAX / Math.max(iw, ih));
       const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * scale)); cv.height = Math.max(1, Math.round(ih * scale));
       cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
       URL.revokeObjectURL(url);
@@ -3103,6 +3109,15 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Text placed along the path (' + els.length + ' glyphs).', dismissible: true }); } catch (_e) {}
   }
   // Editor polish: toggle word-wrap on the selected text (wraps to its current width; toggle restores).
+  // UX-6: per-image opt-out of dark-mode inversion (for photos/logos that shouldn't invert). Flips el.noInvert on
+  // the selected image element(s); takes effect immediately on the dark canvas.
+  _toggleImageInvert() {
+    const imgs = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type === 'image');
+    if (!imgs.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image first.', dismissible: true }); } catch (_e) {} return; }
+    const on = !imgs[0].noInvert; for (const e of imgs) e.noInvert = on;
+    this._cacheValid = false; this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: on ? 'Image will NOT invert in dark mode.' : 'Image inverts in dark mode.', dismissible: true }); } catch (_e) {}
+  }
   _toggleTextWrap() {
     const el = this._singleSel(); if (!el || el.type !== 'text') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a text element.', dismissible: true }); } catch (_e) {} return; }
     if (el._wrapOrig != null) { el.text = el._wrapOrig; delete el._wrapOrig; measureText(el); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Text unwrapped.', dismissible: true }); } catch (_e) {} return; }
@@ -3496,7 +3511,7 @@ class CanvasView {
       ictx.beginPath(); ictx.arc(H.rot.x, H.rot.y, hs / 1.5, 0, 7); ictx.fill(); ictx.stroke();
     } else {
       ictx.setLineDash([6 / z, 4 / z]); const pad = 4 / z;
-      for (const id of this.selected) { const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); }
+      for (const id of this.selected) { if (id === this.editingId) continue; const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); } // #6: don't double the textarea outline while editing
       ictx.setLineDash([]);
     }
   }
@@ -3615,6 +3630,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF page (choose one)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPagePicker(); } }); // CP-PDF model-B-lite
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
@@ -3970,7 +3986,8 @@ class Plugin extends AppPlugin {
     const gen = section('General', true);
     select(gen, 'Default open mode', 'openMode', 'How a drawing opens.', [{ v: 'normal', l: 'Normal' }, { v: 'present', l: 'Present' }]);
     toggle(gen, 'Show drawing preview as the record banner', 'bannerPreview', 'Off keeps the note header clean; the preview PNG still saves.');
-    toggle(gen, 'Dark canvas background', 'darkMode', 'Paints the canvas + toolbar dark; shapes keep their colours.');
+    toggle(gen, 'Force dark canvas (override theme)', 'darkMode', 'Dark mode auto-follows your Thymer theme; turn this on to force a dark canvas even on a light theme.');
+    toggle(gen, 'Invert images in dark mode', 'invertImagesDark', 'Auto-inverts raster/SVG figures so they read on a dark canvas (zsviczian-style). Opt a single image out via the “Toggle image dark-invert” command.');
 
     const beh = section('Canvas behavior');
     toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');
