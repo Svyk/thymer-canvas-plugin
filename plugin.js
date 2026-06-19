@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.3.1';
+const PLEXUS_VERSION = '1.3.2';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -3139,19 +3139,20 @@ class CanvasView {
       ictx.setTransform(1, 0, 0, 1, 0, 0);
       ictx.font = (11 * d) + 'px system-ui, sans-serif'; ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
       for (const cite of this._xrefCites) {
-        // ONE pin per citation at the UNION top-right of all its live targets — a composite cite no longer scatters a
-        // pin per target. The pin carries a small count badge when it spans >1 target; clicking it flashes them all.
-        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, n = 0;
+        // ONE pin per citation — positioned at the PRIMARY (first) target's top-right corner so it sits ON the
+        // selection, not at the far union corner of a sprawling composite. Count badge when it spans >1 live target;
+        // clicking flashes them all.
+        let n = 0, primB = null;
         for (const tg of cite.targets) {
           const el = this._byId(tg.el); if (!el || el.isDeleted) continue;
           let b = null;
           if (tg.inImage && tg.frac) { const q = this._regionShapeWorld(el, tg.frac, tg.fracPoly); if (q && q.length) b = this._polyBBox(q); }
           if (!b) b = this._elBBox(el);
           if (!b || !isFinite(b.x)) continue;
-          x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); n++;
+          n++; if (!primB) primB = b; // first resolvable target = primary → anchor the pin here
         }
-        if (!n || !isFinite(x0)) continue;
-        const p = this.camera.worldToScreen(x1, y0), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
+        if (!n || !primB) continue;
+        const p = this.camera.worldToScreen(primB.x + primB.w, primB.y), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
         ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.94)'; ictx.fill();
         ictx.lineWidth = 1.5 * d; ictx.strokeStyle = 'rgba(255,255,255,0.85)'; ictx.stroke();
         ictx.fillStyle = '#fff'; ictx.fillText('↗', cx, cy);
