@@ -1,5 +1,26 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.9.0 — inline @/@@ references + native cause-effect shapes (2026-06-19, plan: elegant-beaming-harbor)
+**A — @/@@ refs:** `@`=record, `@@`=specific LINE. Inline picker dropdown over the text-edit textarea
+(`pxcParseRefTrigger` caret scan → debounced `searchByQuery` → ↑↓/Enter/Tab/Esc, `.pxc-refpicker`), alias-on-
+highlight (capture selection on the `@` keydown), record(#7c5cff)/line(#0ea5e9) tint. Model: `el.refKind` +
+`refLineGuid`/`refAlias`/`refLabel` on a whole text element (back-compat: bare `refGuid` ⇒ record). Shared
+`_configureRef`/`_makeRefElement`. **Forward nav:** `_openCard` branches `refKind==='line'` → `_openRefLine`
+(`navigateTo({itemGuid})` + panel + parent-record fallback). **Backward nav (cinematic):** line refs index into
+`plexus_backref` (`_indexBackref`→plugin `_registerBackref`); `_scanRefBadges` pins a note-side ↗ that flies to
+the chip via the **reused** `_navToCanvasAnchor`/`_flashAnchor`. dblclick/cited-guard gate on `isRef`.
+**B — cause-effect import:** `elementsFromCauseEffect(chart)` (pure, mirrors `elementsFromAiJson`) → role-coloured
+boxes + ★ primary + red/blue leaf terminators (skipped on effects) + grey effect→cause arrows + orange "Connects
+to", right-branching layout. `CE_ROLE_COLOR`/`CE_TERM_COLOR`/`CE_CONNECTOR_COLOR` + 'Cause & Effect' scheme.
+Commands "New cause-and-effect (fishbone)" + "Import cause-effect chart (JSON)" (`ti-affiliate`). `ce*` tags on
+elements for a later Brain-promotion path.
+**Verify:** 11/11 node assertions (`refTriggerTest`+`ceParseTest`) + console hooks `refChipTest`/`backrefRoundTripTest`.
+Adversarial review (FIX-FIRST) fixed: null-parent line-ref dblclick gate, `_editText` picker leak, record-ref dead
+backref storage, empty-query search.
+**Deferred (roadmap §8b):** CANVAS-SEG (mid-sentence segment refs), EAPI-3 (record→canvas flyback + cross-device
+backref sync — backref is localStorage-only), fishbone-spine view, classic pentagon style, themes, Brain promotion.
+
+
 ## ✅ SCRIPTS-ROADMAP EXECUTED (Canvas v0.60.0 + Brain v0.11.0, 2026-06-17)
 **v0.60.0 — micro-setting subsystems built:** **S4 Pen/stylus** (pointerType routing — pen draws
 freedraw without the Pen tool, single-finger pan, double-tap-erase, precision crosshair;
