@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.3.0';
+const PLEXUS_VERSION = '1.3.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -933,7 +933,9 @@ class CanvasView {
   // Lazily (re)build the spatial index + an id→array-index map (for z-order) + a cached scene-bounds. Invalidated
   // on every committed edit (scheduleSave/_restore/load), so a query never sees stale geometry → no ghost hits.
   _ensureGrid() {
-    if (this._grid && !this._gridDirty) return this._grid;
+    // Rebuild on the dirty flag OR any element-count change (catches scene replacement / adds / removes that somehow
+    // didn't flip the flag — the render cull reads this, so a stale grid silently hides content).
+    if (this._grid && !this._gridDirty && this._gridLen === this.scene.elements.length) return this._grid;
     const g = new SpatialGrid(256), zi = new Map(), els = this.scene.elements;
     let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
     for (let i = 0; i < els.length; i++) {
@@ -943,7 +945,7 @@ class CanvasView {
       g.insert(el, bb);
       if (bb.x < bx0) bx0 = bb.x; if (bb.y < by0) by0 = bb.y; if (bb.x + bb.w > bx1) bx1 = bb.x + bb.w; if (bb.y + bb.h > by1) by1 = bb.y + bb.h;
     }
-    this._grid = g; this._zIndex = zi; this._gridDirty = false;
+    this._grid = g; this._zIndex = zi; this._gridDirty = false; this._gridLen = els.length;
     this._sceneBoundsCache = isFinite(bx0) ? { x: bx0, y: by0, w: bx1 - bx0, h: by1 - by0 } : null;
     return g;
   }
@@ -3006,6 +3008,9 @@ class CanvasView {
     // PERF (architecture review): deletes are soft tombstones (isDeleted), never spliced — so n grows unbounded
     // over years and EVERY scan pays for the graveyard. Undo history is empty on load, so compact it away here.
     try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
+    // CRITICAL: the scene was just REPLACED by the loaded one. A render may have already built the spatial grid from
+    // the empty pre-load scene (loadOrInit is async) — force a rebuild, or the grid-driven render cull draws NOTHING.
+    this._gridDirty = true; this._grid = null; this._cacheValid = false;
     const a = this.scene.appState || {};
     // SESSION/DOCUMENT SPLIT: prefer the locally-persisted camera (per drawing), fall back to the doc's appState.
     let cx = a.scroll ? a.scroll.x : -60, cy = a.scroll ? a.scroll.y : -50, cz = a.zoom || 1;
