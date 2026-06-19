@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.9.0';
+const PLEXUS_VERSION = '1.10.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -531,7 +531,92 @@ function measureText(el) { // updates el.width/height from el.text; uses a share
   for (const ln of lines) w = Math.max(w, ctx.measureText(ln || ' ').width);
   el.width = Math.max(w, 8); el.height = Math.max(lines.length, 1) * (el.fontSize || 24) * 1.25;
 }
+// ── CANVAS-SEG: mid-sentence inline refs ──────────────────────────────────────
+// A text element MAY carry `el.runs` = an array of {t:'text', s} | {t:'ref', kind:'record'|'line', guid, lineGuid?,
+// label, alias?}. `el.text` stays the FLATTENED display string (refs → alias||label) so every existing reader/exporter
+// keeps working, and plain JSON round-trips for free (no schema migration; an el without `runs` behaves exactly as
+// before). The per-run x-extents are layout-only and MUST NEVER be serialized — they live in this side WeakMap keyed by
+// the element, rebuilt lazily by measureRuns/drawRuns (storing them on the element would corrupt undo/dirty/persistence).
+const _pxcRunLayout = new WeakMap();
+function runDisplay(run) { if (!run) return ''; return run.t === 'ref' ? String(run.alias || run.label || 'ref') : String(run.s == null ? '' : run.s); }
+function runsOf(el) { return (el && el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: (el && el.text) || '' }]; }
+function flattenRuns(runs) { let o = ''; for (const r of runs) o += runDisplay(r); return o; }
+function hasRefRun(runs) { for (const r of runs) if (r.t === 'ref') return true; return false; }
+function normalizeRuns(runs) { const out = []; for (const r of runs) { if (r.t === 'ref') { out.push(r); continue; } if (!r.s) continue; const last = out[out.length - 1]; if (last && last.t === 'text') last.s += r.s; else out.push({ t: 'text', s: r.s }); } return out; }
+function _runOffsets(runs) { let off = 0; const out = []; for (const run of runs) { const txt = runDisplay(run); out.push({ run, txt, start: off, end: off + txt.length, isRef: run.t === 'ref' }); off += txt.length; } return out; }
+// Map a single contiguous textarea edit (oldFlat → newFlat) back onto runs: runs fully outside the edit survive; any run
+// (incl. a ref) overlapping the deleted span dissolves to plain text, keeping its untouched fragments. Deterministic — no
+// substring guessing — so a ref the user typed over degrades cleanly instead of mis-binding.
+function applyFlatEdit(runs, oldFlat, newFlat) {
+  if (oldFlat === newFlat) return runs;
+  const oL = oldFlat.length, nL = newFlat.length; let p = 0; const minL = Math.min(oL, nL);
+  while (p < minL && oldFlat.charCodeAt(p) === newFlat.charCodeAt(p)) p++;
+  let s = 0; const maxS = minL - p;
+  while (s < maxS && oldFlat.charCodeAt(oL - 1 - s) === newFlat.charCodeAt(nL - 1 - s)) s++;
+  const delStart = p, delEnd = oL - s, insText = newFlat.slice(p, nL - s);
+  const left = [], right = [];
+  for (const o of _runOffsets(runs)) {
+    if (o.end <= delStart) { left.push(o.run); continue; }
+    if (o.start >= delEnd) { right.push(o.run); continue; }
+    const lcut = o.start < delStart ? o.txt.slice(0, delStart - o.start) : '';
+    const rcut = o.end > delEnd ? o.txt.slice(delEnd - o.start) : '';
+    if (lcut) left.push({ t: 'text', s: lcut });
+    if (rcut) right.push({ t: 'text', s: rcut });
+  }
+  const mid = insText ? [{ t: 'text', s: insText }] : [];
+  return normalizeRuns(left.concat(mid, right));
+}
+// Replace the flat range [start,end) (a plain @token the user just typed) with a ref run.
+function spliceRunRange(runs, start, end, newRun) {
+  const left = [], right = [];
+  for (const o of _runOffsets(runs)) {
+    if (o.end <= start) { left.push(o.run); continue; }
+    if (o.start >= end) { right.push(o.run); continue; }
+    const lcut = o.start < start ? o.txt.slice(0, start - o.start) : '';
+    const rcut = o.end > end ? o.txt.slice(end - o.start) : '';
+    if (lcut) left.push({ t: 'text', s: lcut });
+    if (rcut) right.push({ t: 'text', s: rcut });
+  }
+  return normalizeRuns(left).concat([newRun], normalizeRuns(right));
+}
+function measureRuns(el) {
+  if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
+  const ctx = measureText._c; ctx.font = textFont(el);
+  const fs = el.fontSize || 24, lh = fs * 1.25, runs = runsOf(el);
+  const layout = []; let line = 0, x = 0, maxW = 0;
+  for (const run of runs) {
+    if (run.t === 'ref') { const txt = runDisplay(run), w = ctx.measureText(txt || ' ').width; layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; }
+    else { const parts = String(run.s == null ? '' : run.s).split('\n'); for (let i = 0; i < parts.length; i++) { if (i > 0) { if (x > maxW) maxW = x; line++; x = 0; } const txt = parts[i]; if (!txt) continue; const w = ctx.measureText(txt).width; layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; } }
+  }
+  if (x > maxW) maxW = x;
+  el.width = Math.max(maxW, 8); el.height = Math.max(line + 1, 1) * lh;
+  _pxcRunLayout.set(el, layout);
+  return layout;
+}
+function drawRuns(ctx, el) {
+  let layout = _pxcRunLayout.get(el); if (!layout) layout = measureRuns(el);
+  ctx.save(); ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  const fs = el.fontSize || 24, lh = fs * 1.25, base = (el.opacity == null ? 1 : el.opacity);
+  for (const p of layout) {
+    const isRef = p.run.t === 'ref';
+    const col = adaptInk(isRef ? (p.run.kind === 'line' ? '#0ea5e9' : '#7c5cff') : (el.strokeColor || '#1e1e1e'));
+    const px = el.x + p.x, py = el.y + p.line * lh;
+    ctx.globalAlpha = base * (isRef ? _pxcLinkAlpha() : 1); ctx.fillStyle = col; ctx.fillText(p.text, px, py);
+    if (isRef) { ctx.strokeStyle = col; ctx.lineWidth = Math.max(1, fs * 0.055); const uy = py + fs * 1.06; ctx.beginPath(); ctx.moveTo(px, uy); ctx.lineTo(px + p.w, uy); ctx.stroke(); }
+  }
+  ctx.restore();
+}
+// Return the ref run under (wx,wy) world-space, or null. Un-rotates first (text rarely rotated, but stay correct).
+function hitInlineRef(el, wx, wy) {
+  if (!el || el.type !== 'text' || !el.runs || !el.runs.length) return null;
+  let layout = _pxcRunLayout.get(el); if (!layout) layout = measureRuns(el);
+  if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2, c = Math.cos(-el.angle), s = Math.sin(-el.angle), dx = wx - cx, dy = wy - cy; wx = cx + dx * c - dy * s; wy = cy + dx * s + dy * c; }
+  const fs = el.fontSize || 24, lh = fs * 1.25;
+  for (const p of layout) { if (p.run.t !== 'ref') continue; const px = el.x + p.x, py = el.y + p.line * lh; if (wx >= px && wx <= px + p.w && wy >= py && wy <= py + lh) return p.run; }
+  return null;
+}
 function drawText(ctx, el) {
+  if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
   ctx.save();
   ctx.fillStyle = adaptInk(el.strokeColor || '#1e1e1e'); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
@@ -1800,6 +1885,7 @@ class CanvasView {
     let mode = null, sx = 0, sy = 0, cx0 = 0, cy0 = 0, down = null, created = null, moveEls = null, moved = false;
     let rsEl = null, rsHandle = null, rs0 = null, rotEl = null, rotCenter = null, rotStart = 0, rotPtr0 = 0;
     let lpTimer = null; const clearLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }; // S10 long-press
+    let downRef = null; // CANVAS-SEG: {id, wasSelected} of a runs-text hit on press → click-again-on-ref navigates
     const onDown = (e) => {
       host.focus();
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
@@ -1840,10 +1926,11 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
-        const hit = this._hitTopAt(down.x, down.y);
+        const hit = this._hitTopAt(down.x, down.y); downRef = null;
         // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
         if (hit && hit.type === 'task') { const cb = this._taskCheckboxRect(hit); if (down.x >= cb.x && down.x <= cb.x + cb.w && down.y >= cb.y && down.y <= cb.y + cb.h) { this._toggleTaskNode(hit); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
         if (hit) {
+          if (hit.type === 'text' && hit.runs && hit.runs.length) downRef = { id: hit.id, wasSelected: this.selected.has(hit.id) }; // CANVAS-SEG: capture pre-selection state for click-again navigate
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
           const mk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
           mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map(mk);
@@ -1878,7 +1965,15 @@ class CanvasView {
       try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true;
     };
     const onMove = (e) => {
-      if (!mode) return; moved = true; clearLP(); // S10: any drag cancels a pending long-press open
+      if (!mode) { // CANVAS-SEG hover: pointer cursor over an inline ref run (no drag in progress)
+        if (this.tool === 'select' && !this.editingId && !this._present && !this._eyedrop) {
+          const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
+          const over = hit && hit.type === 'text' && hit.runs && hit.runs.length && hitInlineRef(hit, w.x, w.y);
+          const cur = over ? 'pointer' : ''; if (this.wrap.style.cursor !== cur) this.wrap.style.cursor = cur;
+        }
+        return;
+      }
+      moved = true; clearLP(); // S10: any drag cancels a pending long-press open
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._lastCamChange = this._now(); this.dirty = true; return; }
       const w = this._worldAt(e);
@@ -1931,7 +2026,13 @@ class CanvasView {
         if (poly.length >= 3) this._selectFromLoop(poly);
         this.tool = 'select'; this._syncToolbar();
       }
-      else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
+      else if (mode === 'move' && moveEls) {
+        if (moved) this.scheduleSave();
+        else if (downRef && downRef.wasSelected) { // CANVAS-SEG: second click on an already-selected runs-text → navigate the ref under the cursor; deferred so a dblclick edits instead
+          const el = this._byId(downRef.id), run = el && hitInlineRef(el, down.x, down.y);
+          if (run) { if (this._pendingNav) clearTimeout(this._pendingNav); this._pendingNav = setTimeout(() => { this._pendingNav = null; this._openCard({ refKind: run.kind, refGuid: run.guid, refLineGuid: run.lineGuid }); }, 230); }
+        }
+      }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
       else if (mode === 'pan' && moved) { this._saveCamera(); }
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
@@ -1983,6 +2084,7 @@ class CanvasView {
       if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
     const onDblClick = (e) => {
+      if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
       if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
@@ -2065,7 +2167,9 @@ class CanvasView {
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
     this.editingId = el.id;
     const ta = document.createElement('textarea'); ta.className = 'pxc-textedit'; this._ta = ta;
-    ta.value = el.text || ''; ta.spellcheck = false;
+    ta.value = (el.runs && el.runs.length) ? flattenRuns(el.runs) : (el.text || ''); ta.spellcheck = false;
+    let prevFlat = ta.value; // CANVAS-SEG: baseline for mapping each flat edit back onto el.runs
+    this._refPrevFlat = () => prevFlat; this._refSetPrevFlat = (v) => { prevFlat = v; }; // _applyRefChip updates the baseline after an inline splice
     const place = () => {
       const z = this.camera.zoom, s = this.camera.worldToScreen(el.x, el.y);
       ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
@@ -2075,15 +2179,23 @@ class CanvasView {
     };
     place(); this.wrap.appendChild(ta);
     const grow = () => { ta.style.height = '0px'; ta.style.height = ta.scrollHeight + 'px'; };
+    this._refRefresh = () => { try { place(); grow(); } catch (_e) {} }; // CANVAS-SEG: _applyRefChip resizes the textarea after an inline splice
     setTimeout(() => { ta.focus(); ta.select(); grow(); }, 0);
     this._refPick = { open: false, mode: null, query: '', triggerStart: 0, rows: [], idx: 0, seq: 0, alias: '', dom: null, timer: null }; // A2 picker state
     try { this._injectRefPickerCss(); } catch (_e) {}
-    const onInput = () => { el.text = ta.value; measureText(el); place(); grow(); this.dirty = true; this._refDetect(ta, el); };
+    const syncRuns = () => { // map the latest flat edit onto el.runs (dissolving any edited-over ref); fall back to plain
+      if (el.runs && el.runs.length) {
+        el.runs = applyFlatEdit(el.runs, prevFlat, ta.value);
+        if (!hasRefRun(el.runs)) delete el.runs;
+      }
+      prevFlat = ta.value; el.text = ta.value;
+      if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
+    };
+    const onInput = () => { syncRuns(); place(); grow(); this.dirty = true; this._refDetect(ta, el); };
     const commit = () => {
-      this._closeRefPicker();
-      el.text = ta.value; measureText(el);
+      this._closeRefPicker(); syncRuns();
       if (!String(el.text).trim()) el.isDeleted = true;
-      this.editingId = null; this._ta = null; try { ta.remove(); } catch (_e) {}
+      this.editingId = null; this._ta = null; this._refPrevFlat = null; this._refSetPrevFlat = null; this._refRefresh = null; try { ta.remove(); } catch (_e) {}
       this.dirty = true; this.scheduleSave();
     };
     this._refCommit = commit; // _applyRefChip uses this to finalize a caret-only chip
@@ -2159,11 +2271,19 @@ class CanvasView {
       this._configureRef(el, opts); this._indexBackref(el);
       if (this._refCommit) this._refCommit();
       try { this.plugin.ui.addToaster({ title: 'Reference added — double-click to open.', dismissible: true }); } catch (_e) {}
-    } else { // mid-text → strip the @token, spawn a sibling chip to the right, keep editing the host
-      el.text = before + after; measureText(el);
-      const chip = this._makeRefElement(opts, el.x + Math.abs(el.width) + 12, el.y);
-      this.scene.elements.push(chip); this._indexBackref(chip);
-      ta.value = el.text; this.dirty = true; this.scheduleSave();
+    } else { // CANVAS-SEG mid-text → splice an inline ref RUN into the host's runs; keep editing the host (no sibling chip)
+      const start = rp.triggerStart, end = ta.selectionStart;
+      const baseRuns = (el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: ta.value }];
+      const refRun = { t: 'ref', kind: opts.kind === 'line' ? 'line' : 'record', guid: opts.guid || null, lineGuid: opts.lineGuid || null, label: opts.label || 'ref' };
+      if (alias && String(alias).trim()) refRun.alias = String(alias).trim();
+      el.runs = spliceRunRange(baseRuns, start, end, refRun);
+      el.text = flattenRuns(el.runs); measureRuns(el);
+      ta.value = el.text;
+      const caret = start + runDisplay(refRun).length; try { ta.selectionStart = ta.selectionEnd = caret; } catch (_e) {}
+      if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value); // keep the edit baseline in sync (no phantom dissolve next keystroke)
+      if (this._refRefresh) this._refRefresh(); // resize the textarea to the spliced value now (not on next keystroke)
+      this.dirty = true; this.scheduleSave();
+      try { this.plugin.ui.addToaster({ title: 'Inline reference added.', dismissible: true }); } catch (_e) {} // inline line refs are forward-nav only (no note-side badge) by design
     }
   }
   _imgFor(fileId) { return this.plugin._imgCacheGet(fileId, this.scene.files); } // S9: shared LRU decode cache
@@ -3742,7 +3862,7 @@ class CanvasView {
     try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
     const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -4541,6 +4661,34 @@ class Plugin extends AppPlugin {
         return { r: { kind: r.refKind, guid: r.refGuid, text: r.text }, l: { kind: l.refKind, line: l.refLineGuid, text: l.text },
           ok: r.refKind === 'record' && r.refGuid === 'REC1' && r.text === '@Oregon' && r.isRef === true && r.width > 0 &&
               l.refKind === 'line' && l.refGuid === 'REC2' && l.refLineGuid === 'LINE1' && l.text === '@@see here' };
+      },
+      // CANVAS-SEG: inline-run model — flatten leaves no '@', layout x-extents are monotonic, ref hit-tests, splice + edit-dissolve.
+      inlineSegTest: () => {
+        const el = makeText(0, 0, { fontSize: 16 });
+        el.runs = [{ t: 'text', s: 'see ' }, { t: 'ref', kind: 'record', guid: 'R1', label: 'Oregon' }, { t: 'text', s: ' now' }];
+        el.text = flattenRuns(el.runs);
+        const layout = measureRuns(el), refRow = layout.find((p) => p.run.t === 'ref'), line0 = layout.filter((p) => p.line === 0);
+        let mono = true; for (let i = 1; i < line0.length; i++) if (line0[i].x < line0[i - 1].x) mono = false;
+        return { text: el.text, runs: layout.length, ok: el.text === 'see Oregon now' && el.text.indexOf('@') === -1 && layout.length === 3 && !!refRow && refRow.w > 0 && mono && el.width > 0 };
+      },
+      inlineHitTest: () => {
+        const el = makeText(10, 20, { fontSize: 16 });
+        el.runs = [{ t: 'text', s: 'a ' }, { t: 'ref', kind: 'line', guid: 'R', lineGuid: 'L', label: 'thing' }];
+        el.text = flattenRuns(el.runs); measureRuns(el);
+        const p = _pxcRunLayout.get(el).find((q) => q.run.t === 'ref');
+        const inHit = hitInlineRef(el, 10 + p.x + p.w / 2, 20 + 4), miss = hitInlineRef(el, 10 + 1, 20 + 4);
+        return { hit: !!inHit, miss: miss, ok: !!inHit && inHit.guid === 'R' && inHit.lineGuid === 'L' && miss === null };
+      },
+      inlineApplyTest: () => {
+        const out = spliceRunRange([{ t: 'text', s: 'foo bar' }], 4, 7, { t: 'ref', kind: 'record', guid: 'G', label: 'Bar' });
+        const flat = flattenRuns(out), open = out.find((r) => r.t === 'ref');
+        return { runs: out.length, flat, ok: out.length === 2 && out[0].t === 'text' && out[0].s === 'foo ' && flat === 'foo Bar' && flat.indexOf('@') === -1 && !!open && open.guid === 'G' };
+      },
+      inlineEditTest: () => {
+        const runs = [{ t: 'text', s: 'x ' }, { t: 'ref', kind: 'record', guid: 'G', label: 'Bar' }, { t: 'text', s: ' y' }];
+        const old = flattenRuns(runs);
+        const keep = applyFlatEdit(runs, old, 'x Bar yz'), dissolve = applyFlatEdit(runs, old, 'x Bzr y');
+        return { keep: hasRefRun(keep), dissolve: hasRefRun(dissolve), ok: hasRefRun(keep) === true && hasRefRun(dissolve) === false && flattenRuns(keep) === 'x Bar yz' && flattenRuns(dissolve) === 'x Bzr y' };
       },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {

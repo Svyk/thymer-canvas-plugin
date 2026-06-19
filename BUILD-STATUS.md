@@ -1,5 +1,33 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.10.0 — CANVAS-SEG: mid-sentence INLINE refs (2026-06-19, plan: staged-finding-ritchie Phase A)
+Type a `@`/`@@` reference INSIDE a text box without breaking the sentence — no literal `@/@@` remains, the ref
+renders as a styled+underlined clickable inline span, click navigates (record vs line). Segment-level, not a
+separate chip element.
+- **Model:** optional `el.runs` = `[{t:'text',s} | {t:'ref',kind:'record'|'line',guid,lineGuid?,label,alias?}]`.
+  `el.text` stays the FLATTENED display string (refs→alias||label) so every existing reader/exporter/SVG/banner
+  works unchanged; plain JSON round-trips → NO schema migration; an el without `runs` behaves exactly as before.
+- **Layout is NEVER serialized** — per-run x-extents live in a module-level `_pxcRunLayout` WeakMap keyed by el,
+  rebuilt lazily by `measureRuns`/`drawRuns` (storing them on the element would corrupt undo/dirty/persistence —
+  load-bearing fix flagged by the design review).
+- **Pure helpers (module-level, near measureText):** `runsOf`/`runDisplay`/`flattenRuns`/`hasRefRun`/`normalizeRuns`/
+  `_runOffsets`/`applyFlatEdit`/`spliceRunRange`/`measureRuns`/`drawRuns`/`hitInlineRef`. `drawText` branches to
+  `drawRuns` when `el.runs`.
+- **Editing:** the textarea edits the FLAT string; `_editText`'s `syncRuns` maps each edit onto `el.runs` via
+  `applyFlatEdit(runs, prevFlat, value)` (a ref the edit touches DISSOLVES to plain text — deterministic, no
+  substring guessing). `prevFlat` tracked in onInput/commit and after the inline splice via `this._refSetPrevFlat`.
+  `_applyRefChip` mid-text branch now splices a ref RUN into the host (was: spawn a sibling chip); caret-only branch
+  UNCHANGED (whole-element chip, back-compat).
+- **Click model:** click-once-selects, click-again-on-ref navigates (`downRef.wasSelected` gate); deferred ~230ms
+  behind `_pendingNav` which `onDblClick` clears (dblclick = edit) and `destroy()` disposes. Hover shows a pointer
+  cursor over a ref run (onMove pre-`!mode` branch; excludes editing/present/eyedropper).
+- **Scope:** inline LINE refs are forward-nav-only (no note-side ↗ badge) — the backref store keys one ref per
+  element; whole-element chips keep their badge. Folds into Phase D (backref-sync) if wanted.
+- **Verify:** 19/19 node asserts (`inlineSegTest`/`inlineHitTest`/`inlineApplyTest`/`inlineEditTest` + multiline/
+  splice-edges/dissolve/idempotent-remeasure) + adversarial `code-reviewer` (invariants 1-6 confirmed; fixed the 2
+  low findings: eyedropper-cursor clobber + textarea-refresh-after-splice). Existing `refTriggerTest`/`refChipTest`
+  untouched (back-compat).
+
 ## ✅ v1.9.0 — inline @/@@ references + native cause-effect shapes (2026-06-19, plan: elegant-beaming-harbor)
 **A — @/@@ refs:** `@`=record, `@@`=specific LINE. Inline picker dropdown over the text-edit textarea
 (`pxcParseRefTrigger` caret scan → debounced `searchByQuery` → ↑↓/Enter/Tab/Esc, `.pxc-refpicker`), alias-on-
