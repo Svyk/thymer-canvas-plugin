@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.4.0';
+const PLEXUS_VERSION = '1.4.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1070,15 +1070,26 @@ class CanvasView {
     iconBtn.addEventListener('click', () => this.plugin._openIconGlyphLibrary());
     bar.appendChild(iconBtn);
     const sep = document.createElement('div'); sep.className = 'pxc-sep'; bar.appendChild(sep); this._swatches = {};
+    // Colour SUBMENU — one swatch button (shows the current stroke) opens a grid of the 15 palette colours, so the
+    // bar stays compact instead of carrying 15 inline swatches.
+    const colWrap = document.createElement('div'); colWrap.className = 'pxc-shape-wrap';
+    const colBtn = document.createElement('button'); colBtn.className = 'pxc-tool pxc-colorbtn'; colBtn.title = 'Colour';
+    const colDot = document.createElement('span'); colDot.className = 'pxc-color-dot'; colDot.style.background = this.strokeColor; colBtn.appendChild(colDot); this._colorDot = colDot;
+    const colFly = document.createElement('div'); colFly.className = 'pxc-shape-flyout pxc-color-flyout'; colFly.style.display = 'none';
+    const pickColor = (c) => {
+      this.strokeColor = c; this.fillColor = FILLS[c] || 'transparent'; let changed = false;
+      for (const id of this.selected) { const el = this._byId(id); if (el) { el.strokeColor = c; el.backgroundColor = FILLS[c] || 'transparent'; changed = true; } }
+      colDot.style.background = c; this._syncToolbar(); this.dirty = true; if (changed) this.scheduleSave();
+    };
     for (const c of PALETTE) {
       const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c; s.style.background = c;
-      s.addEventListener('click', () => {
-        this.strokeColor = c; this.fillColor = FILLS[c] || 'transparent'; let changed = false;
-        for (const id of this.selected) { const el = this._byId(id); if (el) { el.strokeColor = c; el.backgroundColor = FILLS[c] || 'transparent'; changed = true; } }
-        this._syncToolbar(); this.dirty = true; if (changed) this.scheduleSave();
-      });
-      bar.appendChild(s); this._swatches[c] = s;
+      s.addEventListener('click', (e) => { e.stopPropagation(); pickColor(c); colFly.style.display = 'none'; });
+      colFly.appendChild(s); this._swatches[c] = s;
     }
+    colBtn.addEventListener('click', (e) => { e.stopPropagation(); colFly.style.display = colFly.style.display === 'none' ? 'grid' : 'none'; });
+    const closeCol = (ev) => { if (colFly.style.display !== 'none' && !colWrap.contains(ev.target)) colFly.style.display = 'none'; };
+    document.addEventListener('pointerdown', closeCol); this._localDisposers.push(() => document.removeEventListener('pointerdown', closeCol));
+    colWrap.appendChild(colBtn); colWrap.appendChild(colFly); bar.appendChild(colWrap);
     const sep2 = document.createElement('div'); sep2.className = 'pxc-sep'; bar.appendChild(sep2);
     const note = document.createElement('button'); note.className = 'pxc-tool pxc-flipnote'; note.title = 'Flip to the note (open this record’s text)';
     note.innerHTML = '<span class="ti ti-arrow-back-up"></span>'; note.appendChild(document.createTextNode(' Note'));
@@ -1103,6 +1114,7 @@ class CanvasView {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
     if (this._swatches) for (const c in this._swatches) this._swatches[c].classList.toggle('active', c === this.strokeColor);
+    if (this._colorDot) this._colorDot.style.background = this.strokeColor; // colour-submenu button face tracks the active stroke
   }
   _resize() {
     const scroller = this.host.closest('.panel-scroller-y') || this.host.closest('.panel') || this.host.parentElement;
@@ -4523,6 +4535,9 @@ const BASE_CSS = `
 /* Shape-picker flyout */
 .pxc-host .pxc-root .pxc-shape-wrap { position: relative; display: inline-flex; }
 .pxc-host .pxc-root .pxc-shape-flyout { position: absolute; top: 100%; left: 0; margin-top: 4px; display: flex; gap: 3px; padding: 5px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.18); z-index: 20; }
+.pxc-host .pxc-root .pxc-colorbtn { padding: 0; }
+.pxc-host .pxc-root .pxc-color-dot { width: 17px; height: 17px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.55), 0 0 0 1px rgba(0,0,0,.18); }
+.pxc-host .pxc-root .pxc-color-flyout { grid-template-columns: repeat(5, 1fr); gap: 5px; }
 /* P0.4/P0.4b: Colour tool */
 .pxc-colortool { min-width: 360px; max-width: 420px; }
 .pxc-ct-sec { margin-bottom: 10px; }
