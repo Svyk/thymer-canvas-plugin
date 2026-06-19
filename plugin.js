@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.13.0';
+const PLEXUS_VERSION = '1.14.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1027,12 +1027,40 @@ function elementsFromAiJson(arr, ox, oy) {
 // B2: pure builder — a /cause-effect-chart RCA JSON → native canvas elements (role-coloured boxes + ★ primary +
 // red/blue terminator circles + grey effect→cause arrows + orange "Connects to" cross-links), right-branching tree.
 // Schema: {nodes:[{id,text,role,terminator?,category?}], edges:[{effect,cause}], connections:[{from,to,label}]}.
-function elementsFromCauseEffect(chart, ox, oy) {
+// CE-FISHBONE: a closed home-plate pentagon (the classic "problem statement" head pointing right), drawn as a 'line'.
+function cePentagon(x, y, w, h, color) {
+  const el = makeLinear(x, y, 'line', { stroke: color, strokeWidth: 2 });
+  const tipX = x + w, midY = y + h / 2, bodyX = x + w * 0.72;
+  el.points = [[x, y], [bodyX, y], [tipX, midY], [bodyX, y + h], [x, y + h], [x, y]]; // 6 pts, closed
+  el.endArrowhead = null; el.startArrowhead = null; el.roughness = 0;
+  linearBBox(el); return el;
+}
+// CE-FISHBONE: Ishikawa layout — root = head at the right of a horizontal spine; major causes alternate up/down as
+// angled bones; sub-causes stack outward along each bone. Returns {pos, lines} (spine/bones, no arrowheads).
+function ceFishbonePositions(nodes, kids, rootId, ox, oy, BW, BH) {
+  const pos = {}, lines = [], placed = {}; const VGAP = 80;
+  const majors = kids[rootId] || []; const M = Math.max(majors.length, 1);
+  const midY = oy + 300, step = (M + 1) * 120, headX = ox + step + 40;
+  pos[rootId] = { x: headX, y: midY - BH / 2, w: BW, h: BH }; placed[rootId] = true;
+  lines.push({ from: [ox, midY], to: [headX, midY], spine: true });
+  const placeBranch = (id, side, ax, ay) => {
+    if (placed[id]) return; placed[id] = true;
+    const bx = ax - 170, by = ay + side * 130;
+    pos[id] = { x: bx, y: by - BH / 2, w: BW, h: BH };
+    lines.push({ from: [ax, ay], to: [bx + BW, by] });
+    (kids[id] || []).forEach((k, j) => placeBranch(k, side, bx + 30, by + side * (70 + j * 80)));
+  };
+  majors.forEach((m, i) => { const side = (i % 2 === 0) ? -1 : 1; const sx = headX - (i + 1) * (headX - ox) / (M + 1); placeBranch(m, side, sx, midY); });
+  let oc = 0; for (const n of nodes) if (!placed[n.id]) { pos[n.id] = { x: ox - 60, y: oy + (oc++) * VGAP, w: BW, h: BH }; placed[n.id] = true; }
+  return { pos, lines };
+}
+function elementsFromCauseEffect(chart, ox, oy, layout) {
   ox = ox || 0; oy = oy || 0; const out = [];
   if (!chart || typeof chart !== 'object') return out;
   const nodes = Array.isArray(chart.nodes) ? chart.nodes : [];
   const edges = Array.isArray(chart.edges) ? chart.edges : [];
   const conns = Array.isArray(chart.connections) ? chart.connections : [];
+  const mode = (layout === 'fishbone' || layout === 'pentagon') ? layout : 'tree'; // CE-FISHBONE: layout variants
   const byId = {}; for (const n of nodes) if (n && n.id != null) byId[n.id] = n;
   const kids = {}, isEffect = {};
   for (const e of edges) { if (!e || byId[e.effect] == null || byId[e.cause] == null) continue; (kids[e.effect] = kids[e.effect] || []).push(e.cause); isEffect[e.effect] = true; }
@@ -1047,12 +1075,15 @@ function elementsFromCauseEffect(chart, ox, oy) {
   };
   place(rootId, 0);
   for (const n of nodes) if (!seen[n.id]) { depthOf[n.id] = 0; rowOf[n.id] = leaf++; seen[n.id] = true; }
-  const pos = {};
+  // positions per layout (tree + pentagon share the tree grid; fishbone uses the spine layout)
+  const pos = {}; let fishLines = null;
+  if (mode === 'fishbone') { const fb = ceFishbonePositions(nodes, kids, rootId, ox, oy, BW, BH); for (const id in fb.pos) pos[id] = fb.pos[id]; fishLines = fb.lines; }
+  else { for (const n of nodes) pos[n.id] = { x: ox + (depthOf[n.id] || 0) * HGAP, y: oy + (rowOf[n.id] || 0) * VGAP, w: BW, h: BH }; }
   for (const n of nodes) {
+    const p = pos[n.id]; if (!p) continue; const x = p.x, y = p.y;
     const role = CE_ROLE_COLOR[n.role] || CE_ROLE_COLOR.neutral;
-    const x = ox + (depthOf[n.id] || 0) * HGAP, y = oy + (rowOf[n.id] || 0) * VGAP; pos[n.id] = { x, y, w: BW, h: BH };
-    const box = makeRect(x, y, BW, BH, { type: 'rectangle', stroke: role, fill: tintColor(role), fillStyle: 'solid' });
-    box.roughness = 0; box.ceRole = n.role || 'neutral'; box.ceNodeId = n.id; if (n.category) box.ceCategory = n.category; out.push(box);
+    if (mode === 'pentagon' && n.id === rootId) { const pent = cePentagon(x, y, BW, BH, role); pent.ceRole = n.role || 'neutral'; pent.ceNodeId = n.id; if (n.category) pent.ceCategory = n.category; out.push(pent); }
+    else { const box = makeRect(x, y, BW, BH, { type: 'rectangle', stroke: role, fill: tintColor(role), fillStyle: 'solid' }); box.roughness = 0; box.ceRole = n.role || 'neutral'; box.ceNodeId = n.id; if (n.category) box.ceCategory = n.category; out.push(box); }
     const star = n.role === 'primary' ? '★ ' : ''; const label = String(n.text || '');
     const catM = label.match(/^([^:]{1,32}:)\s*([\s\S]*)$/);
     if (catM) { const head = makeText(x + 9, y + 8, { fontSize: 13, stroke: '#1e1e1e' }); head.text = star + catM[1]; head.fontFamily = 'system-ui, sans-serif'; measureText(head); out.push(head);
@@ -1064,8 +1095,15 @@ function elementsFromCauseEffect(chart, ox, oy) {
         if (n.terminator === 'question') { const q = makeText(cx - 4, cy - 9, { fontSize: 15, stroke: tcol }); q.text = '?'; measureText(q); out.push(q); } }
     }
   }
-  for (const e of edges) { const a = pos[e.effect], b = pos[e.cause]; if (!a || !b) continue;
-    const ar = makeLinear(0, 0, 'arrow', { stroke: '#94a3b8', strokeWidth: 2 }); ar.points = [[a.x + a.w + 4, a.y + a.h / 2], [b.x - 4, b.y + b.h / 2]]; ar.endArrowhead = 'arrow'; linearBBox(ar); out.push(ar); }
+  if (mode === 'fishbone' && fishLines) { // bones + spine instead of horizontal arrows
+    for (const ln of fishLines) { const seg = makeLinear(0, 0, 'line', { stroke: ln.spine ? '#64748b' : '#94a3b8', strokeWidth: ln.spine ? 3 : 2 }); seg.points = [ln.from, ln.to]; seg.endArrowhead = null; seg.roughness = 0.4; seg.ceBone = true; linearBBox(seg); out.push(seg); }
+  } else {
+    for (const e of edges) { const a = pos[e.effect], b = pos[e.cause]; if (!a || !b) continue;
+      const ar = makeLinear(0, 0, 'arrow', { stroke: '#94a3b8', strokeWidth: 2 }); ar.points = [[a.x + a.w + 4, a.y + a.h / 2], [b.x - 4, b.y + b.h / 2]]; ar.endArrowhead = 'arrow'; linearBBox(ar); out.push(ar); }
+    if (mode === 'pentagon') { // classic backbone spine through the head
+      const r = pos[rootId]; let maxX = ox; for (const n of nodes) { const q = pos[n.id]; if (q && q.x + BW > maxX) maxX = q.x + BW; }
+      const sp = makeLinear(0, 0, 'line', { stroke: '#64748b', strokeWidth: 3 }); sp.points = [[r.x + BW, r.y + BH / 2], [maxX + 20, r.y + BH / 2]]; sp.endArrowhead = null; sp.roughness = 0.4; sp.ceBone = true; linearBBox(sp); out.unshift(sp); }
+  }
   for (const c of conns) { const a = pos[c.from], b = pos[c.to]; if (!a || !b) continue;
     const ar = makeLinear(0, 0, 'arrow', { stroke: CE_CONNECTOR_COLOR, strokeWidth: 2 }); ar.ceConnector = true; ar.points = [[a.x + a.w / 2, a.y + a.h], [b.x + b.w / 2, b.y + b.h]]; ar.endArrowhead = 'arrow'; linearBBox(ar); out.push(ar);
     const mid = makeText((a.x + b.x) / 2 + a.w / 2, (a.y + b.y) / 2 + a.h + 4, { fontSize: 11, stroke: CE_CONNECTOR_COLOR }); mid.text = c.label || 'Connects to'; measureText(mid); out.push(mid); }
@@ -3584,14 +3622,14 @@ class CanvasView {
     const prim = chart.nodes.filter((n) => n && n.role === 'primary').length;
     if (prim !== 1) { try { this.plugin.ui.addToaster({ title: 'Plexus: chart should have exactly one "primary" effect (found ' + prim + ').', dismissible: true }); } catch (_e) {} }
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 120);
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 120, chart.layout); // CE-FISHBONE: a pasted chart may specify "layout":"fishbone"|"pentagon"
     if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to draw from that chart.', dismissible: true }); } catch (_e) {} return; }
     this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Cause & effect: ' + els.length + ' element(s) imported.', dismissible: true }); } catch (_e) {}
   }
-  // B3: scaffold a starter cause-&-effect (right-branching) the user fleshes out.
-  _newCauseEffect() {
+  // B3 / CE-FISHBONE: scaffold a starter cause-&-effect in the chosen layout (tree | fishbone | pentagon).
+  _newCauseEffect(layout) {
     const chart = { nodes: [
       { id: 'p', text: 'Effect / problem', role: 'primary' },
       { id: 'c1', text: 'Cause', role: 'action' },
@@ -3599,10 +3637,11 @@ class CanvasView {
       { id: 'c3', text: 'Unknown — needs evidence', role: 'neutral', terminator: 'question' },
     ], edges: [{ effect: 'p', cause: 'c1' }, { effect: 'c1', cause: 'c2' }, { effect: 'c1', cause: 'c3' }], connections: [] };
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 80);
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 80, layout);
     this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
     this.dirty = true; this.scheduleSave();
-    try { this.plugin.ui.addToaster({ title: 'Cause-&-effect starter added — edit the boxes; causes branch to the right.', dismissible: true }); } catch (_e) {}
+    const how = layout === 'fishbone' ? 'fishbone spine (bones alternate up/down)' : layout === 'pentagon' ? 'pentagon head + spine' : 'right-branching tree';
+    try { this.plugin.ui.addToaster({ title: 'Cause-&-effect starter added (' + how + ') — edit the boxes.', dismissible: true }); } catch (_e) {}
   }
   // P2: CSV → bar chart. Paste/enter `label,value` rows; generates editable bars + labels.
   async _chartFromCsv() {
@@ -4139,8 +4178,10 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (fishbone)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect(); } });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Import cause-effect chart (JSON)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._ceImportJson(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (tree)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect('tree'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (fishbone)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect('fishbone'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (pentagon)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect('pentagon'); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Import cause-effect chart (JSON)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._ceImportJson(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
@@ -4938,10 +4979,18 @@ class Plugin extends AppPlugin {
           { effect: 'p', cause: 'a' }, { effect: 'a', cause: 'b' }, { effect: 'a', cause: 'c' }, { effect: 'a', cause: 'd' },
           { effect: 'c', cause: 'e' }, { effect: 'e', cause: 'f' }, { effect: 'e', cause: 'g' },
         ], connections: [{ from: 'g', to: 'c', label: 'Connects to' }] };
-        const els = elementsFromCauseEffect(chart, 0, 0);
+        const els = elementsFromCauseEffect(chart, 0, 0); // tree (2-arg) — the regression guard, unchanged
         const boxes = els.filter((e) => e.ceRole).length, arrows = els.filter((e) => e.type === 'arrow' && !e.ceConnector).length;
         const connectors = els.filter((e) => e.ceConnector).length, terms = els.filter((e) => e.ceTerminator).length, primaries = els.filter((e) => e.ceRole === 'primary').length;
-        return { boxes, arrows, connectors, terms, primaries, ok: boxes === 8 && arrows === 7 && connectors >= 1 && terms >= 1 && primaries === 1 };
+        // CE-FISHBONE: same house-fire chart through the new layouts — boxes/terminators preserved, edges become bones,
+        // pentagon root becomes a closed line + a spine; no stray arrowheads on any pentagon/bone line.
+        const fish = elementsFromCauseEffect(chart, 0, 0, 'fishbone'), pent = elementsFromCauseEffect(chart, 0, 0, 'pentagon');
+        const fishBoxes = fish.filter((e) => e.ceRole).length, fishBones = fish.filter((e) => e.ceBone).length, fishArrows = fish.filter((e) => e.type === 'arrow' && !e.ceConnector).length;
+        const pentRoot = pent.find((e) => e.ceNodeId === 'p'), pentSpine = pent.filter((e) => e.ceBone).length;
+        const noStrayHeads = pent.concat(fish).filter((e) => e.ceBone || e === pentRoot).every((e) => !e.endArrowhead && !e.startArrowhead && e.elbowed !== true); // incl. the pentagon head
+        return { boxes, arrows, connectors, terms, primaries, fishBoxes, fishBones, fishArrows, pentRootType: pentRoot && pentRoot.type, pentSpine,
+          ok: boxes === 8 && arrows === 7 && connectors >= 1 && terms >= 1 && primaries === 1 &&
+              fishBoxes === 8 && fishBones >= 3 && fishArrows === 0 && pentRoot && pentRoot.type === 'line' && pentSpine >= 1 && noStrayHeads === true };
       },
       // Phase 10 E14: re-date in place — create an Event, set its Scheduled datetime, return for MCP verify.
       scheduleTest: async () => {

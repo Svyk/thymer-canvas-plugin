@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.14.0 — CE-FISHBONE: fishbone-spine + pentagon layouts (2026-06-19, plan: staged-finding-ritchie Phase C1)
+`elementsFromCauseEffect(chart, ox, oy, layout)` now takes a 4th `layout` arg: `'tree'` (default, unchanged) |
+`'fishbone'` | `'pentagon'`. Pure geometry, no SDK.
+- **Refactor:** positions precomputed into `pos` (tree + pentagon share the tree grid; fishbone uses `ceFishbonePositions`
+  — a central horizontal spine with major bones alternating up/down, sub-causes stacked outward, cycle-safe `placed`
+  guard, orphan fallback). The node loop reads `pos[n.id]` → **tree output is byte-identical** (coords, element order,
+  ceRole/ceNodeId/ceCategory tags, terminator gate).
+- **Fishbone** draws spine+bones as `ceBone` `line` elements (no arrowheads), SKIPS the default horizontal edge arrows,
+  keeps the orange `ceConnector` cross-links. **Pentagon** renders the root as a closed 6-point home-plate `line`
+  (`cePentagon`) + a backbone spine (`out.unshift`), keeps the default edge arrows.
+- All ce elements are existing types (`rectangle`/`ellipse`/`line`/`arrow`/`text`) → render/hit/export/SVG via the
+  existing dispatch; **no new element type** (unlike linecard), nothing to wire.
+- **Commands:** the 2 old (one mislabeled "(fishbone)" but built tree, on the unvalidated `ti-affiliate`) → 4 on
+  guardrail-confirmed **`ti-graph`**: New (tree/fishbone/pentagon) + Import. `_newCauseEffect(layout)` threads it; import
+  reads `chart.layout`.
+- **Verify:** 18/18 node asserts (tree regression: 8 boxes/7 arrows; fishbone: 8 boxes/≥3 bones/0 plain arrows; pentagon:
+  line root/6-pt/spine/no stray heads; all bbox finite) + adversarial `code-reviewer` = **CLEAN**. `ceParseTest` stays
+  2-arg (tree guard).
+
 ## ✅ v1.13.0 — IMG-REF: image-target references (2026-06-19, plan: staged-finding-ritchie Phase B3) — Phase B COMPLETE
 A ref whose target is an **image attachment line**, rendered as a violet `▣` chip, opened in an in-panel **lightbox**.
 - **Scope = attachment LINES, not records.** Sidesteps the unreliable `getBanner()` "is-image" detection (Blocker 1) by
