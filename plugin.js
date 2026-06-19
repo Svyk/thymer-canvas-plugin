@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.1.1';
+const PLEXUS_VERSION = '1.2.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1025,6 +1025,26 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Region marked on the image — click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
+  // Shared loop → selection logic, used by the LASSO tool AND the pen→Cite path: select every element the loop
+  // OVERLAPS (edge-touch counts, grid-accelerated), and if the loop covers a sub-area of an image, mark that as a
+  // pending region (keeping the shape selection) so a subsequent Cite references the shape(s) AND the region together.
+  _selectFromLoop(poly, excludeId) {
+    if (!poly || poly.length < 3) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    this._ensureGrid();
+    for (const el of this._grid.query(rect.x, rect.y, rect.w, rect.h)) {
+      if (el.isDeleted || el.type === 'frame' || el.id === excludeId) continue;
+      const bb = this._elBBox(el); if (!bb) continue;
+      if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) this.selected.add(el.id);
+    }
+    if (rect.w > 4 && rect.h > 4) {
+      const img = this._topImageIn(rect), ib = img ? this._elBBox(img) : null;
+      if (img && ib && img.id !== excludeId && (rect.w * rect.h) < (ib.w * ib.h) * 0.92) { this.selected.delete(img.id); this._setPendingImgRegion(img, rect, poly, true); }
+    }
+    this.dirty = true;
+  }
   // Center the target if it isn't already comfortably on screen (gentle zoom cap), then mark dirty.
   _revealBounds(b) {
     if (!b || !isFinite(b.x)) return;
@@ -1136,12 +1156,15 @@ class CanvasView {
   _buildXrefIndex() {
     const idx = {}; let x = {};
     try { x = this.plugin._loadXref(); } catch (_e) {}
+    const cites = [];
     for (const k in x) {
       const e = x[k]; if (!e || e.drawing !== this.recordGuid) continue;
-      if (e.el) (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label, inImage: e.inImage, frac: e.frac, fracPoly: e.fracPoly });
-      if (e.extra) for (const ex of e.extra) { if (ex.el) (idx[ex.el] = idx[ex.el] || []).push({ lineGuid: k, label: e.label, inImage: ex.inImage, frac: ex.frac, fracPoly: ex.fracPoly }); } // composite cite: each target gets its own ↗
+      const targets = [];
+      if (e.el) { (idx[e.el] = idx[e.el] || []).push({ lineGuid: k, label: e.label, inImage: e.inImage, frac: e.frac, fracPoly: e.fracPoly }); targets.push({ el: e.el, inImage: e.inImage, frac: e.frac, fracPoly: e.fracPoly }); }
+      if (e.extra) for (const ex of e.extra) { if (ex.el) { (idx[ex.el] = idx[ex.el] || []).push({ lineGuid: k, label: e.label, inImage: ex.inImage, frac: ex.frac, fracPoly: ex.fracPoly }); targets.push({ el: ex.el, inImage: ex.inImage, frac: ex.frac, fracPoly: ex.fracPoly }); } }
+      if (targets.length) cites.push({ lineGuid: k, label: e.label, targets }); // ONE pin per citation (see render); _xrefByEl stays for the per-element dbl-click jump
     }
-    this._xrefByEl = idx;
+    this._xrefByEl = idx; this._xrefCites = cites;
   }
   // Canvas → note: page-flip THIS panel to the citing note and highlight the exact line (Nav plugin pulses it).
   // In place (no new panel) so the drawing↔text toggle feels like flipping the same page. itemGuid auto-resolves
@@ -1573,33 +1596,14 @@ class CanvasView {
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
         created = null;
-      } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); created = null; }
+      } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); this._lastFreedraw = created; created = null; }
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
         if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
       }
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
-        if (poly.length >= 3) {
-          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-          for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
-          const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-          // FLEXIBLE enclosure (grid-accelerated): only elements whose bbox overlaps the loop's bounding box can be
-          // enclosed → query those candidates, select any the loop OVERLAPS (edge-touch counts), not just centre-in.
-          this._ensureGrid();
-          for (const el of this._grid.query(rect.x, rect.y, rect.w, rect.h)) {
-            if (el.isDeleted || el.type === 'frame') continue;
-            const bb = this._elBBox(el); if (!bb) continue;
-            if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) this.selected.add(el.id);
-          }
-          // If the loop also covers a SUB-AREA of an image (not the whole image) → mark that as a pending region,
-          // KEEPING the shape selection. A subsequent "Cite" then references the shape(s) AND the image region
-          // together (composite) — fixes "lassoed a circle + part of the map but only the image got cited".
-          if (rect.w > 4 && rect.h > 4) {
-            const img = this._topImageIn(rect), ib = img ? this._elBBox(img) : null;
-            if (img && ib && (rect.w * rect.h) < (ib.w * ib.h) * 0.92) { this.selected.delete(img.id); this._setPendingImgRegion(img, rect, poly, true); }
-          }
-        }
+        if (poly.length >= 3) this._selectFromLoop(poly);
         this.tool = 'select'; this._syncToolbar();
       }
       else if (mode === 'move' && moveEls) { if (moved) this.scheduleSave(); }
@@ -2924,6 +2928,11 @@ class CanvasView {
   // Copy the selected image (or a given element) onto the plugin's image-ref clipboard, so it can be
   // pasted as a block reference into any note. Stores a PNG snapshot + the source record + element id.
   async _copyImageRefToClip(el) {
+    // PEN → CITE: if nothing is selected/pending but the user just drew a freehand loop with the pen, treat that loop
+    // like a lasso so "circle it with the pen, then Cite" cites what it encircles (enclosed shapes + an image region).
+    if (!el && !this.selected.size && !this._pendingImgRegion && this._lastFreedraw && this._lastFreedraw.points && this._lastFreedraw.points.length >= 6 && !this._lastFreedraw.isDeleted) {
+      this._selectFromLoop(this._lastFreedraw.points, this._lastFreedraw.id); this._lastFreedraw = null;
+    }
     // Gather the TARGETS to cite: a pending in-image region (if any) + every selected element. More than one
     // target → a COMPOSITE cite that flashes them ALL on navigate-back (e.g. a shape AND part of an image).
     const targets = []; // {kind:'region'|'el', imgId/el, frac, fracPoly, region, bb, isImage?}
@@ -2936,7 +2945,7 @@ class CanvasView {
     const regionImgId = targets.length ? targets[0].imgId : null;
     for (const id of this.selected) { if (id === regionImgId) continue; const e = this._byId(id); if (!e) continue; const bb = this._elBBox(e); if (!bb) continue; targets.push({ kind: 'el', el: id, region: bb, bb, isImage: e.type === 'image' }); }
     if (!targets.length && el && el.type === 'image') { const bb = this._elBBox(el); targets.push({ kind: 'el', el: el.id, region: bb, bb, isImage: true }); }
-    if (!targets.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image, a region, or element(s) to cite first.', dismissible: true }); } catch (_e) {} return false; }
+    if (!targets.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to cite — drag the Lasso (S) over a region, circle it with the Pen, select element(s), or pick an image, then Cite.', dismissible: true }); } catch (_e) {} return false; }
     const prim = targets[0];
     // Chip label (default = a nearby text label / the drawing name / a target count).
     const recName = (this.rec && this.rec.getName && this.rec.getName()) || 'drawing';
@@ -3114,21 +3123,32 @@ class CanvasView {
     // Cross-ref ↗ pins — one per cited line. An in-image region pin sits ON its region (tracks the image as it
     // moves/resizes/rotates); a whole-element cite sits at the element corner. Hit-targets stored for click-to-note.
     this._xrefPins = [];
-    if (this._xrefByEl) {
+    if (this._xrefCites && this._xrefCites.length) {
       ictx.setTransform(1, 0, 0, 1, 0, 0);
       ictx.font = (11 * d) + 'px system-ui, sans-serif'; ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
-      for (const id of Object.keys(this._xrefByEl)) {
-        const el = this._byId(id); if (!el || el.isDeleted) continue;
-        for (const entry of this._xrefByEl[id]) {
-          let wp = null;
-          if (entry.inImage && entry.frac) { const q = this._regionShapeWorld(el, entry.frac, entry.fracPoly); if (q && q.length) { const rb = this._polyBBox(q); wp = { x: rb.x + rb.w, y: rb.y }; } } // region's top-right corner
-          if (!wp) { const bb = this._elBBox(el); if (!bb) continue; wp = { x: bb.x + bb.w, y: bb.y }; }
-          const p = this.camera.worldToScreen(wp.x, wp.y), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
-          ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.94)'; ictx.fill();
-          ictx.lineWidth = 1.5 * d; ictx.strokeStyle = 'rgba(255,255,255,0.85)'; ictx.stroke();
-          ictx.fillStyle = '#fff'; ictx.fillText('↗', cx, cy);
-          this._xrefPins.push({ x: p.x, y: p.y, r: 11, lineGuid: entry.lineGuid });
+      for (const cite of this._xrefCites) {
+        // ONE pin per citation at the UNION top-right of all its live targets — a composite cite no longer scatters a
+        // pin per target. The pin carries a small count badge when it spans >1 target; clicking it flashes them all.
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, n = 0;
+        for (const tg of cite.targets) {
+          const el = this._byId(tg.el); if (!el || el.isDeleted) continue;
+          let b = null;
+          if (tg.inImage && tg.frac) { const q = this._regionShapeWorld(el, tg.frac, tg.fracPoly); if (q && q.length) b = this._polyBBox(q); }
+          if (!b) b = this._elBBox(el);
+          if (!b || !isFinite(b.x)) continue;
+          x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); n++;
         }
+        if (!n || !isFinite(x0)) continue;
+        const p = this.camera.worldToScreen(x1, y0), cx = p.x * d, cy = p.y * d, rr = 8.5 * d;
+        ictx.beginPath(); ictx.arc(cx, cy, rr, 0, 7); ictx.fillStyle = 'rgba(124,92,255,0.94)'; ictx.fill();
+        ictx.lineWidth = 1.5 * d; ictx.strokeStyle = 'rgba(255,255,255,0.85)'; ictx.stroke();
+        ictx.fillStyle = '#fff'; ictx.fillText('↗', cx, cy);
+        if (n > 1) { // count badge for a multi-target (composite) cite
+          const bx = cx + rr * 0.82, by = cy - rr * 0.82, br = 6 * d;
+          ictx.beginPath(); ictx.arc(bx, by, br, 0, 7); ictx.fillStyle = '#fff'; ictx.fill(); ictx.lineWidth = 1.2 * d; ictx.strokeStyle = 'rgba(124,92,255,0.95)'; ictx.stroke();
+          ictx.fillStyle = '#7c5cff'; ictx.font = '700 ' + (8 * d) + 'px system-ui, sans-serif'; ictx.fillText(String(n), bx, by); ictx.font = (11 * d) + 'px system-ui, sans-serif';
+        }
+        this._xrefPins.push({ x: p.x, y: p.y, r: 11, lineGuid: cite.lineGuid });
       }
       ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
     }
