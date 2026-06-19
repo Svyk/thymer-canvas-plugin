@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.11.0 — SEARCH-CREATE: create-if-missing in the @-ref picker (2026-06-19, plan: staged-finding-ritchie Phase B1)
+When the `@`-ref picker finds no exact-title record, a green "＋ Create '<query>'" row appears; choosing it opens an
+in-panel collection picker, creates the record, and binds it as a ref — Thymer-native @-create.
+- **Gating:** `pxcHasExactTitle(rows,query)` (pure, module-level) suppresses the row when an exact title already exists;
+  record mode only (`@`, never `@@` — a line can't exist without a record); `_runRefSearch` appends the synthetic row.
+- **Blur-commit race (the hazard) handled:** `_applyCreateRef` snapshots the splice ctx (start/tokenLen/alias/caretOnly),
+  sets `ta.value = before + query + after` (strips only the `@`; the non-empty query keeps commit from deleting the el),
+  calls `this._refCommit()` to tear down the editor cleanly BEFORE the modal opens, then binds on the `el` OBJECT in
+  `_createRefRecordAndBind` (never the dead textarea). Offsets stay valid (`before.length===start`).
+- **Create+bind:** `collection.createRecord(query)` (guid|null guarded) → `getRecordPoll` → caretOnly = whole-element chip
+  (`_configureRef`+`_indexBackref`); mid-text = `spliceRunRange` over the plain query text at `[start,start+tokenLen)`.
+  `el.isDeleted` re-checked after the awaits.
+- **`_pickCollection`:** in-panel modal (no window.prompt), filterable + keyboard-nav + Esc/backdrop cancel, remembers
+  the last pick in `localStorage['plexus_create_col']` (convenience default only — NOT cross-device state).
+- **Verify:** 7/7 node asserts (`searchCreateTest` + exact-match/bind-offset) + adversarial `code-reviewer` = **CLEAN**.
+  Non-create ref paths byte-unchanged (back-compat).
+
 ## ✅ v1.10.0 — CANVAS-SEG: mid-sentence INLINE refs (2026-06-19, plan: staged-finding-ritchie Phase A)
 Type a `@`/`@@` reference INSIDE a text box without breaking the sentence — no literal `@/@@` remains, the ref
 renders as a styled+underlined clickable inline span, click navigates (record vs line). Segment-level, not a

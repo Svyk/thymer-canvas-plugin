@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.10.0';
+const PLEXUS_VERSION = '1.11.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -615,6 +615,9 @@ function hitInlineRef(el, wx, wy) {
   for (const p of layout) { if (p.run.t !== 'ref') continue; const px = el.x + p.x, py = el.y + p.line * lh; if (wx >= px && wx <= px + p.w && wy >= py && wy <= py + lh) return p.run; }
   return null;
 }
+// SEARCH-CREATE: true when the picker results already contain an exact-title match for the query (so we DON'T offer
+// "Create" — matches Thymer-native @-create). Empty query ⇒ true (never offer create on a bare @).
+function pxcHasExactTitle(rows, query) { const q = String(query || '').trim().toLowerCase(); if (!q) return true; for (const r of rows) if (!r.create && String(r.label || '').trim().toLowerCase() === q) return true; return false; }
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -2221,7 +2224,7 @@ class CanvasView {
   _injectRefPickerCss() {
     if (document.getElementById('plexus-refpick-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-refpick-css';
-    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}';
+    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}.pxc-refrow.pxc-create .r1{color:#16a34a;font-weight:700}.pxc-collist{max-height:280px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px}.pxc-colrow{padding:7px 10px;border-radius:6px;cursor:pointer;font:13px/1.2 system-ui,sans-serif}.pxc-colrow:hover,.pxc-colrow.active{background:rgba(124,92,255,.18)}';
     document.head.appendChild(s);
   }
   _refDetect(ta, el) {
@@ -2241,6 +2244,8 @@ class CanvasView {
     const rows = [];
     if (mode === 'record') { for (const r of (res && res.records || []).slice(0, 8)) rows.push({ kind: 'record', guid: r.guid, label: (r.getName && r.getName()) || 'Untitled', sub: 'record' }); }
     else { for (const li of (res && res.lines || []).slice(0, 8)) { let recGuid = null, parent = ''; try { const pr = li.getRecord && li.getRecord(); recGuid = pr && pr.guid; parent = (pr && pr.getName && pr.getName()) || ''; } catch (_e) {} rows.push({ kind: 'line', lineGuid: li.guid, guid: recGuid, label: lineTextOf(li) || '(line)', sub: parent || 'line' }); } }
+    // SEARCH-CREATE: no exact-title record? offer a "Create" row (record mode only — a line can't exist without a record).
+    if (mode === 'record' && query && query.trim() && !pxcHasExactTitle(rows, query)) rows.push({ kind: 'record', create: true, label: query.trim(), sub: 'Create new record' });
     rp.rows = rows; rp.idx = 0; this._renderRefPicker(this._ta);
   }
   _renderRefPicker(ta) {
@@ -2250,8 +2255,8 @@ class CanvasView {
     dom.innerHTML = '';
     if (!rp.rows.length) { const e = document.createElement('div'); e.className = 'pxc-refempty'; e.textContent = rp.query ? 'No matches' : (rp.mode === 'line' ? 'Type to find a line…' : 'Type to find a record…'); dom.appendChild(e); }
     rp.rows.forEach((row, i) => {
-      const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '');
-      const a = document.createElement('div'); a.className = 'r1'; a.textContent = (rp.mode === 'line' ? '@@ ' : '@ ') + row.label; r.appendChild(a);
+      const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '') + (row.create ? ' pxc-create' : '');
+      const a = document.createElement('div'); a.className = 'r1'; a.textContent = row.create ? ('＋ Create “' + row.label + '”') : ((rp.mode === 'line' ? '@@ ' : '@ ') + row.label); r.appendChild(a);
       const b = document.createElement('div'); b.className = 'r2'; b.textContent = row.sub; r.appendChild(b);
       r.addEventListener('mousedown', (ev) => { ev.preventDefault(); rp.idx = i; this._refChoose(ta, this._byId(this.editingId)); });
       dom.appendChild(r);
@@ -2263,6 +2268,7 @@ class CanvasView {
   _refChoose(ta, el) { const rp = this._refPick; const row = rp.rows[rp.idx]; if (!row || !el) { this._closeRefPicker(); return; } this._applyRefChip(ta, el, row); }
   _closeRefPicker() { const rp = this._refPick; if (!rp) return; if (rp.timer) clearTimeout(rp.timer); if (rp.dom) { try { rp.dom.remove(); } catch (_e) {} } rp.dom = null; rp.open = false; rp.rows = []; }
   _applyRefChip(ta, el, row) {
+    if (row && row.create) { this._applyCreateRef(ta, el, row); return; } // SEARCH-CREATE
     const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
     const before = ta.value.slice(0, rp.triggerStart), after = ta.value.slice(ta.selectionStart);
     const opts = { kind: row.kind, guid: row.guid, lineGuid: row.lineGuid, label: row.label, alias: alias };
@@ -2285,6 +2291,61 @@ class CanvasView {
       this.dirty = true; this.scheduleSave();
       try { this.plugin.ui.addToaster({ title: 'Inline reference added.', dismissible: true }); } catch (_e) {} // inline line refs are forward-nav only (no note-side badge) by design
     }
+  }
+  // SEARCH-CREATE: the user chose "Create '<query>'". Capture the splice context, strip just the '@' so the editor
+  // commits a non-empty, literal-@-free value (NO blur race against the modal), then create + bind asynchronously.
+  _applyCreateRef(ta, el, row) {
+    const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
+    const start = rp.triggerStart, end = ta.selectionStart, flat = ta.value;
+    const before = flat.slice(0, start), after = flat.slice(end);
+    const caretOnly = !before.trim() && !after.trim();
+    const query = row.label;
+    this._closeRefPicker();
+    ta.value = before + query + after;               // keep the typed query as plain text; drop the '@'
+    if (this._refCommit) this._refCommit();           // commit closes the editor cleanly; el survives in the scene
+    this._createRefRecordAndBind(el, { query, start, tokenLen: query.length, alias, caretOnly });
+  }
+  async _createRefRecordAndBind(el, ctx) {
+    const col = await this._pickCollection('Create “' + ctx.query + '” in collection:');
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Create cancelled.', dismissible: true }); } catch (_e) {} return; }
+    let guid = null; try { guid = col.createRecord(ctx.query); } catch (_e) {}
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the record.', dismissible: true }); } catch (_e) {} return; }
+    const rec = await getRecordPoll(this.plugin, guid, 8);
+    const name = (rec && rec.getName && rec.getName()) || ctx.query;
+    if (el.isDeleted) return; // host removed while the modal was open
+    if (ctx.caretOnly) { this._configureRef(el, { kind: 'record', guid, label: name, alias: ctx.alias }); this._indexBackref(el); }
+    else { // splice an inline ref run over the plain query text we left in place
+      const baseRuns = (el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: el.text || '' }];
+      const refRun = { t: 'ref', kind: 'record', guid, label: name }; if (ctx.alias && String(ctx.alias).trim()) refRun.alias = String(ctx.alias).trim();
+      el.runs = spliceRunRange(baseRuns, ctx.start, ctx.start + ctx.tokenLen, refRun);
+      el.text = flattenRuns(el.runs); measureRuns(el);
+    }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Created + linked “' + name + '”.', dismissible: true }); } catch (_e) {}
+  }
+  // In-panel collection picker (no window.prompt on desktop). Filterable, keyboard-navigable, remembers the last pick.
+  async _pickCollection(label) {
+    try { this._injectRefPickerCss(); } catch (_e) {}
+    let cols = []; try { cols = await this.plugin.data.getAllCollections(); } catch (_e) {}
+    const meta = (cols || []).filter(Boolean).map((c) => { let name = 'Collection', guid = null; try { name = (c.getName && c.getName()) || 'Collection'; } catch (_e) {} try { guid = (c.getGuid && c.getGuid()) || null; } catch (_e) {} return { c, name, guid }; });
+    let last = null; try { last = localStorage.getItem('plexus_create_col'); } catch (_e) {}
+    meta.sort((a, b) => (a.guid === last && b.guid !== last) ? -1 : (b.guid === last && a.guid !== last) ? 1 : a.name.localeCompare(b.name));
+    return new Promise((resolve) => {
+      const ov = document.createElement('div'); ov.className = 'pxc-modal';
+      const done = (val) => { try { ov.remove(); } catch (_e) {} resolve(val); };
+      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { e.stopPropagation(); done(null); } });
+      const box = document.createElement('div'); box.className = 'pxc-modal-box'; box.addEventListener('pointerdown', (e) => e.stopPropagation());
+      const lab = document.createElement('div'); lab.className = 'pxc-modal-label'; lab.textContent = label || 'Choose a collection:';
+      const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'pxc-modal-input'; inp.placeholder = 'Filter collections…';
+      const list = document.createElement('div'); list.className = 'pxc-collist';
+      let idx = 0, shown = meta;
+      const pick = (m) => { if (!m) return; try { localStorage.setItem('plexus_create_col', m.guid || ''); } catch (_e) {} done(m.c); };
+      const render = () => { const f = inp.value.trim().toLowerCase(); shown = meta.filter((m) => !f || m.name.toLowerCase().includes(f)); if (idx >= shown.length) idx = Math.max(0, shown.length - 1); list.innerHTML = ''; shown.forEach((m, i) => { const r = document.createElement('div'); r.className = 'pxc-colrow' + (i === idx ? ' active' : ''); r.textContent = m.name; r.addEventListener('mousedown', (ev) => { ev.preventDefault(); pick(m); }); list.appendChild(r); }); };
+      inp.addEventListener('input', () => { idx = 0; render(); });
+      inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx + 1, shown.length - 1); render(); } else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx - 1, 0); render(); } else if (e.key === 'Enter') { e.preventDefault(); pick(shown[idx]); } else if (e.key === 'Escape') { e.preventDefault(); done(null); } });
+      box.appendChild(lab); box.appendChild(inp); box.appendChild(list); ov.appendChild(box);
+      this.wrap.appendChild(ov); render(); setTimeout(() => inp.focus(), 0);
+    });
   }
   _imgFor(fileId) { return this.plugin._imgCacheGet(fileId, this.scene.files); } // S9: shared LRU decode cache
   _drawImage(ctx, el) {
@@ -4689,6 +4750,16 @@ class Plugin extends AppPlugin {
         const old = flattenRuns(runs);
         const keep = applyFlatEdit(runs, old, 'x Bar yz'), dissolve = applyFlatEdit(runs, old, 'x Bzr y');
         return { keep: hasRefRun(keep), dissolve: hasRefRun(dissolve), ok: hasRefRun(keep) === true && hasRefRun(dissolve) === false && flattenRuns(keep) === 'x Bar yz' && flattenRuns(dissolve) === 'x Bzr y' };
+      },
+      // SEARCH-CREATE: the Create row is suppressed iff an exact-title match exists; mid-text bind splices over the
+      // plain query text we leave in place (token already stripped of its '@').
+      searchCreateTest: () => {
+        const rows = [{ kind: 'record', guid: 'A', label: 'Oregon' }, { kind: 'record', guid: 'B', label: 'Oregon Trail' }];
+        const noExact = pxcHasExactTitle(rows, 'Oreg'), exact = pxcHasExactTitle(rows, 'oregon'), bare = pxcHasExactTitle([], '');
+        const baseRuns = [{ t: 'text', s: 'note Oregon end' }]; // editor left 'Oregon' as plain text at offset 5
+        const out = spliceRunRange(baseRuns, 5, 11, { t: 'ref', kind: 'record', guid: 'NEW', label: 'Oregon' });
+        const flat = flattenRuns(out), ref = out.find((r) => r.t === 'ref');
+        return { noExact, exact, bare, flat, ok: noExact === false && exact === true && bare === true && flat === 'note Oregon end' && flat.indexOf('@') === -1 && !!ref && ref.guid === 'NEW' };
       },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {
