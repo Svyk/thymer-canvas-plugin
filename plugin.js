@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.6.0';
+const PLEXUS_VERSION = '1.7.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -86,6 +86,28 @@ function pushRecentColor(c) { try { let r = JSON.parse(localStorage.getItem('ple
 function recentColors() { try { return JSON.parse(localStorage.getItem('plexus_recent_colors') || '[]'); } catch (_e) { return []; } }
 // P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
 function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
+// UX-6 dark mode: perceived luminance (0..1) of a CSS colour (#rgb/#rrggbb/rgb()). null if unparseable.
+function _cssLum(css) {
+  if (!css) return null; css = String(css).trim(); let r, g, b;
+  let m = css.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) { let h = m[1]; if (h.length === 3) h = h.split('').map((c) => c + c).join(''); r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16); }
+  else { m = css.match(/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i); if (m) { r = +m[1]; g = +m[2]; b = +m[3]; } else return null; }
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+// UX-6 dark mode: when PXC_DARK, lighten an INK colour (stroke/text/icon) that's too dark to read on a dark canvas.
+// Only touches near-dark inks (L<0.4) — vivid colours and white pass through unchanged, so it adapts, not inverts.
+// (Excalidraw/zsviczian-style luminance-aware ink; refine the curve once the NotebookLM research lands.)
+let PXC_DARK = false;
+function adaptInk(hex, dark) {
+  const d = dark == null ? PXC_DARK : dark;
+  if (!d || !hex || hex === 'transparent') return hex;
+  const L = _cssLum(hex); if (L == null || L >= 0.4) return hex;
+  const h = hex.replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const r = parseInt(n.slice(0, 2), 16), g = parseInt(n.slice(2, 4), 16), b = parseInt(n.slice(4, 6), 16);
+  const t = 0.78 - L; // darker ink → blended further toward a bright neutral, preserving a hint of hue
+  const mix = (c) => Math.round(c + (232 - c) * t);
+  return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join('');
+}
 // Read a Tabler icon's glyph CHAR + font-family from the live stylesheet (`.ti-<name>::before { content }`). The
 // `tabler-icons` font renders that char on a Canvas2D context via fillText. `ok:false` when the glyph is unresolvable
 // (unbundled / empty) so the drawer can reject it instead of dropping an invisible element.
@@ -180,12 +202,12 @@ const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PALETTE = ['#1e1e1e', '#64748b', '#7c5cff', '#6366f1', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#92400e'];
+const PALETTE = ['#1e1e1e', '#64748b', '#7c5cff', '#6366f1', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#92400e', '#ffffff'];
 const FILLS = {
   '#1e1e1e': 'transparent', '#64748b': '#f1f5f9', '#7c5cff': '#efeaff', '#6366f1': '#e0e7ff',
   '#0ea5e9': '#e0f2fe', '#06b6d4': '#cffafe', '#14b8a6': '#ccfbf1', '#10b981': '#dcfce7',
   '#84cc16': '#ecfccb', '#f59e0b': '#fef3c7', '#f97316': '#ffedd5', '#ef4444': '#fee2e2',
-  '#ec4899': '#fce7f3', '#a855f7': '#f3e8ff', '#92400e': '#fef0e7',
+  '#ec4899': '#fce7f3', '#a855f7': '#f3e8ff', '#92400e': '#fef0e7', '#ffffff': 'transparent',
 };
 const TAG_COLORS = ['#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#14b8a6'];
 function tagColor(s) { s = String(s || ''); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return TAG_COLORS[Math.abs(h) % TAG_COLORS.length]; }
@@ -349,7 +371,7 @@ function hachure(ctx, x, y, w, h, color, sw, rng) {
 }
 function applyStroke(ctx, opts) {
   ctx.lineWidth = opts.strokeWidth || 2;
-  ctx.strokeStyle = opts.stroke || '#1e1e1e';
+  ctx.strokeStyle = adaptInk(opts.stroke || '#1e1e1e');
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.globalAlpha = opts.opacity == null ? 1 : opts.opacity;
 }
@@ -498,7 +520,7 @@ function measureText(el) { // updates el.width/height from el.text; uses a share
 function drawText(ctx, el) {
   if (el.text == null || el.text === '') return;
   ctx.save();
-  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
+  ctx.fillStyle = adaptInk(el.strokeColor || '#1e1e1e'); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
   ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   const fs = el.fontSize || 24, lh = fs * 1.25, lines = String(el.text).split('\n');
   for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
@@ -510,7 +532,7 @@ function drawIcon(ctx, el) {
   if (!el.glyph) return;
   const sz = Math.min(Math.abs(el.width), Math.abs(el.height)) || el.fontSize || 24;
   ctx.save();
-  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  ctx.fillStyle = adaptInk(el.strokeColor || '#1e1e1e'); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
   ctx.font = sz + 'px "' + (el.fontFamily || 'tabler-icons') + '"'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
   ctx.fillText(el.glyph, el.x + el.width / 2, el.y + el.height / 2);
   ctx.restore();
@@ -1073,6 +1095,11 @@ class CanvasView {
     this._resize();
     const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
     ro.observe(this.host.closest('.panel-scroller-y') || wrap); this._localDisposers.push(() => ro.disconnect());
+    // UX-6: re-render when the Thymer theme switches (light↔dark) so the canvas + ink adapt immediately. Invalidate
+    // the dark-luminance cache + the blit cache so the static layer redraws with adapted colours, then mark dirty.
+    const themeObs = new MutationObserver(() => { this._darkCacheT = 0; this._cacheValid = false; this.dirty = true; });
+    try { themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] }); } catch (_e) {}
+    this._localDisposers.push(() => themeObs.disconnect());
     this._wirePointer(); this.loadOrInit();
   }
   _buildToolbar() {
@@ -1979,7 +2006,8 @@ class CanvasView {
     const place = () => {
       const z = this.camera.zoom, s = this.camera.worldToScreen(el.x, el.y);
       ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
-      ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = el.strokeColor || '#1e1e1e'; ta.style.fontFamily = (el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT; // S7
+      const dk = !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark(); // S7/UX-6: typed text must read on a dark canvas
+      ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = adaptInk(el.strokeColor || '#1e1e1e', dk); ta.style.fontFamily = (el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT;
       ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px';
     };
     place(); this.wrap.appendChild(ta);
@@ -3282,12 +3310,27 @@ class CanvasView {
     this.scene.appState.scroll = { x: this.camera.x, y: this.camera.y }; this.scene.appState.zoom = this.camera.zoom;
     try { if (this.recordGuid) localStorage.setItem('plexus_cam_' + this.recordGuid, JSON.stringify({ x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom })); } catch (_e) {}
   }
-  _scheduleBannerText() { if (this._btTimer) clearTimeout(this._btTimer); this._btTimer = setTimeout(() => { this._btTimer = null; if (!this.destroyed && this.rec) _writeBannerTextInline(this.plugin, this.rec, this.scene); }, 1500); }
+  // UX-6: is the live Thymer theme dark? Reads a background token's luminance (works across ALL themes, not just a
+  // named light/dark). Cached 500ms so it's not a per-frame getComputedStyle. Recomputes after a theme switch.
+  _themeDark() {
+    const t = Date.now();
+    if (this._darkCacheT && t - this._darkCacheT < 500) return this._darkCache;
+    let dark = false;
+    try {
+      const cs = getComputedStyle(this.host || this.wrap || document.body);
+      const bg = (cs.getPropertyValue('--cards-bg') || cs.getPropertyValue('--color-bg-900') || cs.getPropertyValue('--color-bg-700') || '').trim();
+      const L = _cssLum(bg); if (L != null) dark = L < 0.5;
+    } catch (_e) {}
+    this._darkCache = dark; this._darkCacheT = t; return dark;
+  }
   render() {
     if (this.destroyed || !this.staticCv) return;
     if (this._camAnim) this._stepCamAnim(); // advance the cinematic camera tween before drawing this frame
     this._syncPropPanel();
-    const dark = !!(this.plugin._settings && this.plugin._settings.darkMode); // UX-6: dark mode (canvas + chrome)
+    // UX-6: dark mode AUTO-follows the live Thymer theme (so switching theme adjusts the canvas, strokes, icons,
+    // and the theme-tokened modals together). The `darkMode` setting, if on, is a force-dark override.
+    const dark = !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark();
+    PXC_DARK = dark; // module flag read by adaptInk() in the ink painters this frame
     if (this.wrap) this.wrap.classList.toggle('pxc-dark', dark);
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
