@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.4.1';
+const PLEXUS_VERSION = '1.5.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -235,6 +235,25 @@ const ICON_CATALOG = [
   { group: 'Business',      names: ['ti-coin', 'ti-cash', 'ti-currency-dollar', 'ti-wallet', 'ti-shopping-cart', 'ti-building-store', 'ti-briefcase', 'ti-receipt', 'ti-target', 'ti-trophy'] },
   { group: 'UI & misc',     names: ['ti-settings', 'ti-search', 'ti-filter', 'ti-folder', 'ti-file', 'ti-link', 'ti-plus', 'ti-circle-minus', 'ti-menu-2', 'ti-dots', 'ti-layout-dashboard', 'ti-layout-grid', 'ti-list', 'ti-photo', 'ti-brush'] },
 ];
+// ── Toolbar customization — a per-user config (order/visibility/palette/density/size/position) persisted in
+// localStorage['plexus_toolbar']. _buildToolbar renders from it; the settings page edits it + live-rebuilds. ──
+const DEFAULT_TOOLBAR_ORDER = TOOLS.map((t) => t.id).concat(['_shapes', '_icons', '_color', '_note', '_cite', '_settings']);
+const TOOLBAR_SPECIAL_LABEL = { _shapes: 'Shapes picker', _icons: 'Icons library', _color: 'Colours', _note: 'Note button', _cite: 'Cite button', _settings: 'Toolbar settings' };
+function toolbarItemLabel(id) { const t = TOOLS.find((x) => x.id === id); if (t) return t.title.replace(/\s*\(.*$/, '').trim(); return TOOLBAR_SPECIAL_LABEL[id] || id; }
+function toolbarItemIcon(id) { const t = TOOLS.find((x) => x.id === id); if (t) return t.icon; return { _shapes: 'ti-box', _icons: 'ti-mood-happy', _color: 'ti-palette', _note: 'ti-arrow-back-up', _cite: 'ti-link', _settings: 'ti-settings' }[id] || 'ti-square'; }
+function loadToolbarConfig() {
+  let c = null; try { c = JSON.parse(localStorage.getItem('plexus_toolbar') || 'null'); } catch (_e) {}
+  if (!c || typeof c !== 'object') c = {};
+  c.order = Array.isArray(c.order) ? c.order.filter((id) => DEFAULT_TOOLBAR_ORDER.includes(id)) : [];
+  const have = new Set(c.order); for (const id of DEFAULT_TOOLBAR_ORDER) if (!have.has(id)) c.order.push(id); // new items always appear
+  c.hidden = (c.hidden && typeof c.hidden === 'object') ? c.hidden : {};
+  c.density = c.density === 'compact' ? 'compact' : 'comfortable';
+  c.iconSize = Math.max(22, Math.min(44, Math.round(c.iconSize) || 30));
+  c.position = c.position === 'left' ? 'left' : 'top';
+  if (Array.isArray(c.palette)) { const pal = c.palette.filter((h) => /^#[0-9a-f]{6}$/i.test(h)); c.palette = pal.length ? pal : null; } else c.palette = null;
+  return c;
+}
+function saveToolbarConfig(c) { try { localStorage.setItem('plexus_toolbar', JSON.stringify(c)); } catch (_e) {} }
 // Ray-casting point-in-polygon — used by the lasso select to test element centers against the loop.
 function pointInPoly(x, y, poly) {
   let inside = false;
@@ -1042,64 +1061,63 @@ class CanvasView {
     this._wirePointer(); this.loadOrInit();
   }
   _buildToolbar() {
-    const bar = document.createElement('div'); bar.className = 'pxc-toolbar'; this._toolBtns = {};
-    for (const t of TOOLS) {
-      const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = t.title;
-      b.innerHTML = '<span class="ti ' + t.icon + '"></span>';
-      b.addEventListener('click', () => { this.tool = t.id; this._syncToolbar(); this.iCv.focus(); });
-      bar.appendChild(b); this._toolBtns[t.id] = b;
-    }
-    // Shapes flyout — 6 visual-thinking shapes behind ONE button (mini hand-drawn previews; keeps the bar from bloating).
-    const shapeWrap = document.createElement('div'); shapeWrap.className = 'pxc-shape-wrap';
-    const shapeBtn = document.createElement('button'); shapeBtn.className = 'pxc-tool'; shapeBtn.title = 'More shapes — triangle, cylinder (database), hexagon, cloud…';
-    shapeBtn.innerHTML = '<span class="ti ti-box"></span>';
-    const flyout = document.createElement('div'); flyout.className = 'pxc-shape-flyout'; flyout.style.display = 'none';
-    const mkPrev = (id) => { const cv = document.createElement('canvas'); cv.width = 30; cv.height = 30; cv.style.cssText = 'width:20px;height:20px;display:block'; try { SHAPE_DRAW[id](cv.getContext('2d'), 4, 5, 22, 20, { stroke: '#cdd3df', strokeWidth: 1.6, roughness: 1 }, 7); } catch (_e) {} return cv; };
-    for (const sp of SHAPE_PICKER) {
-      const sb = document.createElement('button'); sb.className = 'pxc-tool'; sb.title = sp.title; sb.appendChild(mkPrev(sp.id));
-      sb.addEventListener('click', (e) => { e.stopPropagation(); this.tool = sp.id; this._syncToolbar(); flyout.style.display = 'none'; this.iCv.focus(); });
-      flyout.appendChild(sb);
-    }
-    shapeBtn.addEventListener('click', (e) => { e.stopPropagation(); flyout.style.display = flyout.style.display === 'none' ? 'flex' : 'none'; });
-    const closeFly = (ev) => { if (flyout.style.display !== 'none' && !shapeWrap.contains(ev.target)) flyout.style.display = 'none'; };
-    document.addEventListener('pointerdown', closeFly); this._localDisposers.push(() => document.removeEventListener('pointerdown', closeFly));
-    shapeWrap.appendChild(shapeBtn); shapeWrap.appendChild(flyout); bar.appendChild(shapeWrap); this._toolBtns['_shapes'] = shapeBtn;
-    // Icon library launcher (drawer of ~90 Tabler symbols).
-    const iconBtn = document.createElement('button'); iconBtn.className = 'pxc-tool'; iconBtn.title = 'Icons — drop a symbol on the board';
-    iconBtn.innerHTML = '<span class="ti ti-mood-happy"></span>';
-    iconBtn.addEventListener('click', () => this.plugin._openIconGlyphLibrary());
-    bar.appendChild(iconBtn);
-    const sep = document.createElement('div'); sep.className = 'pxc-sep'; bar.appendChild(sep); this._swatches = {};
-    // Colour SUBMENU — one swatch button (shows the current stroke) opens a grid of the 15 palette colours, so the
-    // bar stays compact instead of carrying 15 inline swatches.
-    const colWrap = document.createElement('div'); colWrap.className = 'pxc-shape-wrap';
-    const colBtn = document.createElement('button'); colBtn.className = 'pxc-tool pxc-colorbtn'; colBtn.title = 'Colour';
-    const colDot = document.createElement('span'); colDot.className = 'pxc-color-dot'; colDot.style.background = this.strokeColor; colBtn.appendChild(colDot); this._colorDot = colDot;
-    const colFly = document.createElement('div'); colFly.className = 'pxc-shape-flyout pxc-color-flyout'; colFly.style.display = 'none';
-    const pickColor = (c) => {
-      this.strokeColor = c; this.fillColor = FILLS[c] || 'transparent'; let changed = false;
-      for (const id of this.selected) { const el = this._byId(id); if (el) { el.strokeColor = c; el.backgroundColor = FILLS[c] || 'transparent'; changed = true; } }
-      colDot.style.background = c; this._syncToolbar(); this.dirty = true; if (changed) this.scheduleSave();
+    const cfg = this._toolbarCfg || (this._toolbarCfg = loadToolbarConfig());
+    if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} }
+    this._toolbarDisposers = [];
+    const bar = document.createElement('div');
+    bar.className = 'pxc-toolbar' + (cfg.density === 'compact' ? ' pxc-dense' : '') + (cfg.position === 'left' ? ' pxc-vertical' : '');
+    bar.style.setProperty('--pxc-tool-size', (cfg.iconSize || 30) + 'px');
+    this._toolBtns = {}; this._swatches = {};
+    const palette = (cfg.palette && cfg.palette.length) ? cfg.palette : PALETTE;
+    const fillFor = (c) => FILLS[c] || tintColor(c); // custom colours get an auto-tint
+    const builders = {
+      _shapes: () => {
+        const wrap = document.createElement('div'); wrap.className = 'pxc-shape-wrap';
+        const btn = document.createElement('button'); btn.className = 'pxc-tool'; btn.title = 'More shapes — triangle, cylinder (database), hexagon, cloud…'; btn.innerHTML = '<span class="ti ti-box"></span>';
+        const fly = document.createElement('div'); fly.className = 'pxc-shape-flyout'; fly.style.display = 'none';
+        const mkPrev = (sid) => { const cv = document.createElement('canvas'); cv.width = 30; cv.height = 30; cv.style.cssText = 'width:20px;height:20px;display:block'; try { SHAPE_DRAW[sid](cv.getContext('2d'), 4, 5, 22, 20, { stroke: '#cdd3df', strokeWidth: 1.6, roughness: 1 }, 7); } catch (_e) {} return cv; };
+        for (const sp of SHAPE_PICKER) { const sb = document.createElement('button'); sb.className = 'pxc-tool'; sb.title = sp.title; sb.appendChild(mkPrev(sp.id)); sb.addEventListener('click', (e) => { e.stopPropagation(); this.tool = sp.id; this._syncToolbar(); fly.style.display = 'none'; this.iCv.focus(); }); fly.appendChild(sb); }
+        btn.addEventListener('click', (e) => { e.stopPropagation(); fly.style.display = fly.style.display === 'none' ? 'flex' : 'none'; });
+        const closeFly = (ev) => { if (fly.style.display !== 'none' && !wrap.contains(ev.target)) fly.style.display = 'none'; };
+        document.addEventListener('pointerdown', closeFly); this._toolbarDisposers.push(() => document.removeEventListener('pointerdown', closeFly));
+        wrap.appendChild(btn); wrap.appendChild(fly); this._toolBtns['_shapes'] = btn; return wrap;
+      },
+      _icons: () => { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = 'Icons — drop a symbol on the board'; b.innerHTML = '<span class="ti ti-mood-happy"></span>'; b.addEventListener('click', () => this.plugin._openIconGlyphLibrary()); return b; },
+      _color: () => {
+        const wrap = document.createElement('div'); wrap.className = 'pxc-shape-wrap';
+        const btn = document.createElement('button'); btn.className = 'pxc-tool pxc-colorbtn'; btn.title = 'Colour';
+        const dot = document.createElement('span'); dot.className = 'pxc-color-dot'; dot.style.background = this.strokeColor; btn.appendChild(dot); this._colorDot = dot;
+        const fly = document.createElement('div'); fly.className = 'pxc-shape-flyout pxc-color-flyout'; fly.style.display = 'none';
+        const pick = (c) => { this.strokeColor = c; this.fillColor = fillFor(c); let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { el.strokeColor = c; el.backgroundColor = fillFor(c); ch = true; } } dot.style.background = c; this._syncToolbar(); this.dirty = true; if (ch) this.scheduleSave(); };
+        for (const c of palette) { const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c; s.style.background = c; s.addEventListener('click', (e) => { e.stopPropagation(); pick(c); fly.style.display = 'none'; }); fly.appendChild(s); this._swatches[c] = s; }
+        btn.addEventListener('click', (e) => { e.stopPropagation(); fly.style.display = fly.style.display === 'none' ? 'grid' : 'none'; });
+        const closeCol = (ev) => { if (fly.style.display !== 'none' && !wrap.contains(ev.target)) fly.style.display = 'none'; };
+        document.addEventListener('pointerdown', closeCol); this._toolbarDisposers.push(() => document.removeEventListener('pointerdown', closeCol));
+        wrap.appendChild(btn); wrap.appendChild(fly); return wrap;
+      },
+      _note: () => { const b = document.createElement('button'); b.className = 'pxc-tool pxc-flipnote'; b.title = 'Flip to the note (open this record’s text)'; b.innerHTML = '<span class="ti ti-arrow-back-up"></span><span class="pxc-flip-lab">Note</span>'; b.addEventListener('click', () => this._flipToNote()); return b; },
+      _cite: () => { const b = document.createElement('button'); b.className = 'pxc-tool pxc-flipnote'; b.title = 'Copy the selected image as a block reference, to paste into a note'; b.innerHTML = '<span class="ti ti-link"></span><span class="pxc-flip-lab">Cite</span>'; b.addEventListener('click', () => this._copyImageRefToClip()); return b; },
+      _settings: () => { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = 'Customize toolbar (tools, colours, layout)'; b.innerHTML = '<span class="ti ti-settings"></span>'; b.addEventListener('click', () => this.plugin._openToolbarSettings()); return b; },
     };
-    for (const c of PALETTE) {
-      const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c; s.style.background = c;
-      s.addEventListener('click', (e) => { e.stopPropagation(); pickColor(c); colFly.style.display = 'none'; });
-      colFly.appendChild(s); this._swatches[c] = s;
+    for (const id of cfg.order) {
+      if (cfg.hidden[id]) continue;
+      const t = TOOLS.find((x) => x.id === id);
+      let node = null;
+      if (t) { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = t.title; b.innerHTML = '<span class="ti ' + t.icon + '"></span>'; b.addEventListener('click', () => { this.tool = t.id; this._syncToolbar(); this.iCv.focus(); }); this._toolBtns[t.id] = b; node = b; }
+      else if (builders[id]) node = builders[id]();
+      if (node) bar.appendChild(node);
     }
-    colBtn.addEventListener('click', (e) => { e.stopPropagation(); colFly.style.display = colFly.style.display === 'none' ? 'grid' : 'none'; });
-    const closeCol = (ev) => { if (colFly.style.display !== 'none' && !colWrap.contains(ev.target)) colFly.style.display = 'none'; };
-    document.addEventListener('pointerdown', closeCol); this._localDisposers.push(() => document.removeEventListener('pointerdown', closeCol));
-    colWrap.appendChild(colBtn); colWrap.appendChild(colFly); bar.appendChild(colWrap);
-    const sep2 = document.createElement('div'); sep2.className = 'pxc-sep'; bar.appendChild(sep2);
-    const note = document.createElement('button'); note.className = 'pxc-tool pxc-flipnote'; note.title = 'Flip to the note (open this record’s text)';
-    note.innerHTML = '<span class="ti ti-arrow-back-up"></span>'; note.appendChild(document.createTextNode(' Note'));
-    note.addEventListener('click', () => this._flipToNote());
-    bar.appendChild(note);
-    const cite = document.createElement('button'); cite.className = 'pxc-tool pxc-flipnote'; cite.title = 'Copy the selected image as a block reference, to paste into a note';
-    cite.innerHTML = '<span class="ti ti-link"></span>'; cite.appendChild(document.createTextNode(' Cite'));
-    cite.addEventListener('click', () => this._copyImageRefToClip());
-    bar.appendChild(cite);
+    if (!bar.children.length) bar.style.display = 'none'; // everything hidden → no empty pill (gear stays in the command palette)
+    this._toolbarEl = bar;
     setTimeout(() => this._syncToolbar(), 0); return bar;
+  }
+  // Rebuild the toolbar in place from the (possibly just-edited) config — used by the customization page for live preview.
+  _rebuildToolbar() {
+    if (!this.wrap) return;
+    this._toolbarCfg = loadToolbarConfig();
+    const fresh = this._buildToolbar();
+    const old = this.wrap.querySelector(':scope > .pxc-toolbar');
+    if (old) this.wrap.replaceChild(fresh, old); else this.wrap.insertBefore(fresh, this.wrap.children[2] || null);
   }
   // Flip back to the plain note. UX-3: open IN PLACE (navigate THIS panel to the note editor), not a side panel.
   async _flipToNote() {
@@ -3442,7 +3460,7 @@ class CanvasView {
     try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
     const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -3491,6 +3509,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icons (symbol library)', icon: 'ti-mood-happy', onSelected: () => this._openIconGlyphLibrary() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Customize toolbar', icon: 'ti-settings', onSelected: () => this._openToolbarSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library (your #icon records)', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
@@ -3989,6 +4008,66 @@ class Plugin extends AppPlugin {
   // reference onto the canvas; Thymer backlinks then track every drawing that uses that icon (Nicole's loop).
   // Preloaded glyph library — ~99 curated Tabler symbols, searchable + categorized. Click → drops an `icon` element
   // at viewport centre (a real, move/resize/rotate/colour/export-able scene element). Reuses the .pxc-il-* drawer CSS.
+  // Persist the toolbar config + live-rebuild every open view's toolbar.
+  _applyToolbarConfig(cfg) { saveToolbarConfig(cfg); for (const v of this._views) { try { v._rebuildToolbar(); } catch (e) { console.error('[Plexus] toolbar rebuild', e); } } }
+  // The granular toolbar customization page — show/hide + reorder items, edit the palette, set density/size/position.
+  _openToolbarSettings() {
+    let cfg = loadToolbarConfig();
+    const apply = () => this._applyToolbarConfig(cfg);
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-tbset';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Customize toolbar'; box.appendChild(title);
+    const body = document.createElement('div'); body.className = 'pxc-tbset-body'; box.appendChild(body);
+    const foot = document.createElement('div'); foot.className = 'pxc-tbset-foot';
+    const reset = document.createElement('button'); reset.className = 'pxc-tb-reset'; reset.textContent = 'Reset to default';
+    reset.addEventListener('click', () => { try { localStorage.removeItem('plexus_toolbar'); } catch (_e) {} cfg = loadToolbarConfig(); apply(); render(); });
+    const done = document.createElement('button'); done.className = 'pxc-settings-close'; done.textContent = 'Done'; done.addEventListener('click', () => overlay.remove());
+    foot.appendChild(reset); foot.appendChild(done); box.appendChild(foot);
+    overlay.appendChild(box); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    const head = (t) => { const d = document.createElement('div'); d.className = 'pxc-tb-h'; d.textContent = t; return d; };
+    const render = () => {
+      body.innerHTML = '';
+      body.appendChild(head('Tools & buttons — show, hide, reorder'));
+      const list = document.createElement('div'); list.className = 'pxc-tb-list';
+      cfg.order.forEach((id, i) => {
+        const row = document.createElement('div'); row.className = 'pxc-tb-row';
+        const up = document.createElement('button'); up.className = 'pxc-tb-mv'; up.innerHTML = '<span class="ti ti-chevron-up"></span>'; up.disabled = i === 0;
+        up.addEventListener('click', () => { if (i > 0) { const a = cfg.order; const tmp = a[i - 1]; a[i - 1] = a[i]; a[i] = tmp; apply(); render(); } });
+        const dn = document.createElement('button'); dn.className = 'pxc-tb-mv'; dn.innerHTML = '<span class="ti ti-chevron-down"></span>'; dn.disabled = i === cfg.order.length - 1;
+        dn.addEventListener('click', () => { if (i < cfg.order.length - 1) { const a = cfg.order; const tmp = a[i + 1]; a[i + 1] = a[i]; a[i] = tmp; apply(); render(); } });
+        const ic = document.createElement('span'); ic.className = 'ti ' + toolbarItemIcon(id) + ' pxc-tb-ico';
+        const lab = document.createElement('span'); lab.className = 'pxc-tb-lab'; lab.textContent = toolbarItemLabel(id);
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !cfg.hidden[id];
+        cb.addEventListener('change', () => { if (cb.checked) delete cfg.hidden[id]; else cfg.hidden[id] = true; apply(); });
+        row.appendChild(up); row.appendChild(dn); row.appendChild(ic); row.appendChild(lab); row.appendChild(cb); list.appendChild(row);
+      });
+      body.appendChild(list);
+      body.appendChild(head('Colour palette'));
+      const pal = (cfg.palette && cfg.palette.length) ? cfg.palette : PALETTE.slice();
+      const palWrap = document.createElement('div'); palWrap.className = 'pxc-tb-pal';
+      pal.forEach((c, i) => {
+        const cell = document.createElement('div'); cell.className = 'pxc-tb-palcell';
+        const inp = document.createElement('input'); inp.type = 'color'; inp.value = c;
+        inp.addEventListener('input', () => { const arr = (cfg.palette && cfg.palette.length) ? cfg.palette.slice() : PALETTE.slice(); arr[i] = inp.value; cfg.palette = arr; apply(); });
+        const rm = document.createElement('button'); rm.className = 'pxc-tb-palrm'; rm.title = 'Remove'; rm.innerHTML = '<span class="ti ti-x"></span>';
+        rm.addEventListener('click', () => { const arr = (cfg.palette && cfg.palette.length) ? cfg.palette.slice() : PALETTE.slice(); arr.splice(i, 1); cfg.palette = arr.length ? arr : null; apply(); render(); });
+        cell.appendChild(inp); cell.appendChild(rm); palWrap.appendChild(cell);
+      });
+      const add = document.createElement('button'); add.className = 'pxc-tb-paladd'; add.innerHTML = '<span class="ti ti-plus"></span> Add colour';
+      add.addEventListener('click', () => { const arr = (cfg.palette && cfg.palette.length) ? cfg.palette.slice() : PALETTE.slice(); arr.push('#7c5cff'); cfg.palette = arr; apply(); render(); });
+      const resetPal = document.createElement('button'); resetPal.className = 'pxc-tb-paladd'; resetPal.textContent = 'Reset colours';
+      resetPal.addEventListener('click', () => { cfg.palette = null; apply(); render(); });
+      palWrap.appendChild(add); palWrap.appendChild(resetPal); body.appendChild(palWrap);
+      body.appendChild(head('Layout'));
+      const lay = document.createElement('div'); lay.className = 'pxc-tb-layout';
+      const sel = (label, value, opts, on) => { const r = document.createElement('label'); r.className = 'pxc-tb-lrow'; const s = document.createElement('span'); s.textContent = label; const el = document.createElement('select'); for (const [v, t] of opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; if (value === v) o.selected = true; el.appendChild(o); } el.addEventListener('change', () => on(el.value)); r.appendChild(s); r.appendChild(el); return r; };
+      lay.appendChild(sel('Density', cfg.density, [['comfortable', 'Comfortable'], ['compact', 'Compact']], (v) => { cfg.density = v; apply(); }));
+      const sizeRow = document.createElement('label'); sizeRow.className = 'pxc-tb-lrow'; const ss = document.createElement('span'); ss.textContent = 'Icon size'; const range = document.createElement('input'); range.type = 'range'; range.min = '22'; range.max = '44'; range.value = String(cfg.iconSize); range.addEventListener('input', () => { cfg.iconSize = +range.value; apply(); }); sizeRow.appendChild(ss); sizeRow.appendChild(range); lay.appendChild(sizeRow);
+      lay.appendChild(sel('Position', cfg.position, [['top', 'Top bar'], ['left', 'Left rail']], (v) => { cfg.position = v; apply(); }));
+      body.appendChild(lay);
+    };
+    document.body.appendChild(overlay); render();
+  }
   async _openIconGlyphLibrary() {
     const v0 = this._activeView();
     if (!v0) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
@@ -4475,9 +4554,37 @@ const BASE_CSS = `
 .pxc-host .pxc-root.pxc-pencursor .pxc-interactive { cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><line x1="12" y1="2" x2="12" y2="22" stroke="%237c5cff" stroke-width="1"/><line x1="2" y1="12" x2="22" y2="12" stroke="%237c5cff" stroke-width="1"/></svg>') 12 12, crosshair; }
 .pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
 .pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 8px; right: 8px; top: 10px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; padding: 5px 7px; width: auto; max-width: calc(100% - 16px); margin: 0 auto; box-sizing: border-box; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
-.pxc-host .pxc-root .pxc-tool { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 16px; padding: 0; }
+.pxc-host .pxc-root .pxc-tool { width: var(--pxc-tool-size, 30px); height: var(--pxc-tool-size, 30px); display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: calc(var(--pxc-tool-size, 30px) * 0.53); padding: 0; }
 .pxc-host .pxc-root .pxc-tool:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; }
+/* Density + orientation (toolbar customization) */
+.pxc-host .pxc-root .pxc-toolbar.pxc-dense { gap: 2px; padding: 3px 5px; }
+.pxc-host .pxc-root .pxc-toolbar.pxc-dense .pxc-flipnote { font-size: 11px; }
+.pxc-host .pxc-root .pxc-toolbar.pxc-vertical { flex-direction: column; flex-wrap: nowrap; top: 10px; bottom: 10px; left: 8px; right: auto; width: auto; max-width: none; margin: 0; overflow-y: auto; justify-content: flex-start; align-items: center; }
+.pxc-host .pxc-root .pxc-toolbar.pxc-vertical .pxc-shape-flyout { top: 0; left: 100%; margin: 0 0 0 5px; }
+.pxc-host .pxc-root .pxc-toolbar.pxc-vertical .pxc-flipnote { width: var(--pxc-tool-size, 30px); }
+.pxc-host .pxc-root .pxc-toolbar.pxc-vertical .pxc-flipnote .pxc-flip-lab { display: none; }
+.pxc-host .pxc-root .pxc-flipnote .pxc-flip-lab { margin-left: 4px; }
+/* Toolbar customization page */
+.pxc-tbset .pxc-tbset-body { max-height: 60vh; overflow-y: auto; }
+.pxc-tb-h { font-size: 11px; font-weight: 600; color: var(--color-text-600); margin: 14px 0 6px; letter-spacing: .02em; }
+.pxc-tb-list { display: flex; flex-direction: column; gap: 2px; }
+.pxc-tb-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; }
+.pxc-tb-row:hover { background: var(--sidebar-bg-hover); }
+.pxc-tb-mv { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--cards-border-color); border-radius: 5px; background: var(--input-bg-color); color: var(--color-text-400); cursor: pointer; font-size: 13px; }
+.pxc-tb-mv:disabled { opacity: .3; cursor: default; }
+.pxc-tb-ico { font-size: 16px; color: var(--color-text-400); width: 20px; text-align: center; }
+.pxc-tb-lab { flex: 1; font-size: 13px; color: var(--color-text-400); }
+.pxc-tb-pal { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pxc-tb-palcell { position: relative; }
+.pxc-tb-palcell input[type=color] { width: 34px; height: 34px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: none; padding: 0; cursor: pointer; }
+.pxc-tb-palrm { position: absolute; top: -6px; right: -6px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--cards-border-color); background: var(--cards-bg); color: var(--color-text-600); cursor: pointer; font-size: 9px; }
+.pxc-tb-paladd { padding: 7px 10px; border: 1px dashed var(--cards-border-color); border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 12px; }
+.pxc-tb-layout { display: flex; flex-direction: column; gap: 10px; }
+.pxc-tb-lrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--color-text-400); }
+.pxc-tb-lrow select, .pxc-tb-lrow input[type=range] { background: var(--input-bg-color); color: var(--color-text-400); border: 1px solid var(--cards-border-color); border-radius: 6px; padding: 4px 6px; }
+.pxc-tbset-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; }
+.pxc-tb-reset { padding: 7px 12px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: transparent; color: var(--color-text-600); cursor: pointer; font-size: 12px; }
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-flipnote { width: auto; gap: 4px; padding: 0 9px; font-size: 12px; font-weight: 600; }
 .pxc-host .pxc-root .pxc-flipnote:hover { background: var(--sidebar-bg-hover); }
