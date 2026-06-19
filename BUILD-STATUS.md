@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.16.0 — BACKREF-SYNC: cross-client synced backref index (2026-06-19, plan: staged-finding-ritchie Phase D)
+The note→canvas backref ↗ index moves off per-device `localStorage` onto a **synced Thymer blob** so it persists +
+round-trips across the **desktop app AND Chrome web** (the user's explicit requirement).
+- **Structure:** nested **per-drawing sub-maps** `{ [drawing]: { [lineGuid]: {el,label,t} } }` (fixes the design's
+  concurrency-clobber: writers never overwrite another drawing's entries; GC = drop one sub-map). Pure helpers
+  `pxcBrefMigrate`/`pxcBrefFlatten`/`pxcBrefMergeNested` (node-tested 8/8).
+- **localStorage stays the HOT/authoritative path** — `_registerBackref` writes local FIRST, then schedules a
+  best-effort sync; all reads (`_loadBackref` flattens for the unchanged `_scanRefBadges`) are sync, never block on the
+  network. If every synced call fails, the feature degrades to exactly the old per-device behavior (no regression).
+- **Synced mirror:** a JSON blob on a body `file` line of a singleton `⚙ Plexus Backref Index` record (the proven
+  `saveScene` blob pattern; resolve = cached guid → marker-title search dedup-by-smallest-guid → create). `_brefSyncLoad`
+  merges remote→local on startup. **Review-caught fix:** `_brefSyncFlush` now **read-merge-writes** (pulls the remote
+  blob and merges before uploading) so a whole-store write can't wipe another device's entries (newest-`t` wins).
+- **GC:** `record.updated` with `trashed` prunes that drawing's sub-map (no ghost ↗). Debounce + load timers disposed.
+- **Migration:** old flat localStorage → nested on first load (idempotent).
+- **Deferred (DOM-unverifiable solo):** the record-PAGE **header** ↗ badge for `@record` refs needs live chrome-devtools
+  DOM verification — left for an in-app pass. The line-level ↗ badge keeps working, now from synced storage.
+- **⚠ Needs in-app verification (can't live-test):** the live cross-device blob round-trip + singleton create. The
+  data-layer logic is node-verified; the Thymer blob/record calls are all proven-elsewhere + fully defensive.
+- **Verify:** 8/8 node asserts (migrate/flatten/newest-wins/merge/prune) + adversarial `code-reviewer` (no-regression,
+  migration, singleton safety, GC all CONFIRMED; HIGH flush-clobber found + fixed).
+
 ## ✅ v1.15.0 — CE-BRAIN: promote cause-effect to records (2026-06-19, plan: staged-finding-ritchie Phase C2) — Phase C COMPLETE
 "Plexus: Promote cause-effect to records (Brain)" materializes ce nodes as real Thymer records + writes each
 cause→effect link so Plexus Brain graphs them.

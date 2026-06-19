@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.15.0';
+const PLEXUS_VERSION = '1.16.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -618,6 +618,20 @@ function hitInlineRef(el, wx, wy) {
 // SEARCH-CREATE: true when the picker results already contain an exact-title match for the query (so we DON'T offer
 // "Create" — matches Thymer-native @-create). Empty query ⇒ true (never offer create on a bare @).
 function pxcHasExactTitle(rows, query) { const q = String(query || '').trim().toLowerCase(); if (!q) return true; for (const r of rows) if (!r.create && String(r.label || '').trim().toLowerCase() === q) return true; return false; }
+// BACKREF-SYNC: the note→canvas backref index is structured as PER-DRAWING sub-maps `{ [drawing]: { [lineGuid]:
+// {el,label,t} } }` so concurrent writers (many drawings) never clobber each other's entries, and GC = drop one
+// drawing's sub-map. localStorage holds the hot copy; a synced blob on a singleton record carries it cross-device.
+const BREF_REC_TITLE = '⚙ Plexus Backref Index';
+const BREF_FILE = 'plexus-backref-index.json';
+function pxcBrefMigrate(raw) { // accepts the OLD flat {lineGuid:{drawing,…}} OR the new nested shape → returns nested
+  const nested = {}; if (!raw || typeof raw !== 'object') return nested;
+  let flat = false; for (const k in raw) { const v = raw[k]; flat = !!(v && typeof v === 'object' && typeof v.drawing === 'string'); break; }
+  if (flat) { for (const lg in raw) { const e = raw[lg]; if (!e || !e.drawing) continue; (nested[e.drawing] = nested[e.drawing] || {})[lg] = { el: e.el, label: e.label, t: e.t || 0 }; } return nested; }
+  for (const d in raw) { const sub = raw[d]; if (sub && typeof sub === 'object') { nested[d] = {}; for (const lg in sub) { const e = sub[lg]; if (e) nested[d][lg] = { el: e.el, label: e.label, t: e.t || 0 }; } } }
+  return nested;
+}
+function pxcBrefFlatten(nested) { const flat = {}; for (const d in nested) { const sub = nested[d]; for (const lg in sub) { const e = sub[lg]; const cur = flat[lg]; if (!cur || (e.t || 0) >= (cur.t || 0)) flat[lg] = { drawing: d, el: e.el, label: e.label, t: e.t || 0 }; } } return flat; } // newest wins if a line is referenced by 2 drawings
+function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const lg in b[d]) { const eb = b[d][lg], ea = a[d][lg]; if (!ea || (eb.t || 0) >= (ea.t || 0)) a[d][lg] = eb; } } return a; }
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -4259,7 +4273,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1 + TRANSCLUDE: refresh task/line-card nodes on external edits (record-scoped so child-line edits invalidate linecards too)
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC: refresh nodes + GC a trashed drawing's backref sub-map
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
@@ -4297,6 +4311,8 @@ class Plugin extends AppPlugin {
     const syncNav = (e) => { try { const r = e && e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r) this._syncImageRefsForRecord(r); else scan(); } catch (_e) { scan(); } };
     try { this.events.on('panel.navigated', syncNav); this.events.on('panel.focused', syncNav); this.events.on('lineitem.created', scan); this.events.on('lineitem.updated', scan); } catch (_e) {}
     const scanIv = setInterval(scan, 1500); reg.add(() => clearInterval(scanIv));
+    const brefT = setTimeout(() => { try { this._brefSyncLoad(); } catch (_e) {} }, 2500); reg.add(() => clearTimeout(brefT)); // BACKREF-SYNC: pull the synced index once on load (web↔desktop parity); deferred so startup isn't blocked
+    reg.add(() => { if (this._brefSyncT) clearTimeout(this._brefSyncT); });
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
@@ -4473,16 +4489,47 @@ class Plugin extends AppPlugin {
   }
   // CANVAS-BACK-1: reverse index keyed by the TARGET line/record guid → the canvas chip pointing at it. Lets the
   // cited note line fly back to the canvas (reuses _navToCanvasAnchor + the cinematic flight). Mirrors _xref plumbing.
-  _loadBackref() { try { return JSON.parse(localStorage.getItem('plexus_backref') || '{}'); } catch (_e) { return {}; } }
-  _saveBackref(x) {
-    try { localStorage.setItem('plexus_backref', JSON.stringify(x)); } catch (_e) {
-      try { const ents = Object.entries(x).sort((a, b) => (a[1] && a[1].t || 0) - (b[1] && b[1].t || 0)); const keep = {}; for (const [k, v] of ents.slice(Math.floor(ents.length / 2))) keep[k] = v; localStorage.setItem('plexus_backref', JSON.stringify(keep)); } catch (_e2) {}
-    }
-  }
-  _lookupBackref(guid) { const x = this._loadBackref(); return x[guid] || null; }
+  // BACKREF-SYNC: nested per-drawing store, hot copy in localStorage, mirrored to a synced blob (cross-device).
+  _brefStore() { if (!this._bref) { let raw = {}; try { raw = JSON.parse(localStorage.getItem('plexus_backref') || '{}'); } catch (_e) {} this._bref = pxcBrefMigrate(raw); } return this._bref; }
+  _brefSaveLocal() { try { localStorage.setItem('plexus_backref', JSON.stringify(this._bref || {})); } catch (_e) { try { const s = this._bref || {}; const ds = Object.keys(s); if (ds.length) { delete s[ds[0]]; localStorage.setItem('plexus_backref', JSON.stringify(s)); } } catch (_e2) {} } }
+  _loadBackref() { return pxcBrefFlatten(this._brefStore()); }   // flat {lineGuid:entry} — back-compat for _scanRefBadges
+  _lookupBackref(guid) { return this._loadBackref()[guid] || null; }
   _registerBackref(guid, data) {
     if (!guid || !data || !data.drawing) return;
-    const x = this._loadBackref(); x[guid] = Object.assign({ t: Date.now() }, data); this._saveBackref(x);
+    const s = this._brefStore(); (s[data.drawing] = s[data.drawing] || {})[guid] = { el: data.el, label: data.label, t: Date.now() };
+    this._brefSaveLocal(); this._brefSyncSchedule();
+  }
+  _brefPruneDrawing(drawing) { const s = this._brefStore(); if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } } // GC: drawing trashed → drop its sub-map (no ghost ↗)
+  _brefSyncSchedule() { if (this._brefSyncT) clearTimeout(this._brefSyncT); this._brefSyncT = setTimeout(() => { this._brefSyncT = null; this._brefSyncFlush(); }, 800); } // debounced + coalesced
+  // Resolve the singleton index record: cached guid → marker-title search (dedup by smallest guid) → create. All
+  // defensive; if it fails the plugin still works (localStorage stays authoritative — only cross-device sync is lost).
+  async _brefIndexRecord() {
+    let g = this._brefRecGuid; if (!g) { try { g = localStorage.getItem('plexus_backref_rec') || null; } catch (_e) {} }
+    if (g) { const r = await getRecordPoll(this, g, 2); if (r) { this._brefRecGuid = g; return r; } }
+    try { const res = await this.data.searchByQuery(BREF_REC_TITLE, 8); const hits = ((res && res.records) || []).filter((r) => (r.getName && r.getName()) === BREF_REC_TITLE); if (hits.length) { hits.sort((a, b) => (a.guid < b.guid ? -1 : 1)); const r = hits[0]; this._brefRecGuid = r.guid; try { localStorage.setItem('plexus_backref_rec', r.guid); } catch (_e) {} return r; } } catch (_e) {}
+    try { const cols = await this.data.getAllCollections(); const col = (cols || []).find(Boolean); if (col) { const ng = col.createRecord(BREF_REC_TITLE); if (typeof ng === 'string') { const r = await getRecordPoll(this, ng, 8); if (r) { this._brefRecGuid = ng; try { localStorage.setItem('plexus_backref_rec', ng); } catch (_e) {} return r; } } } } catch (_e) {}
+    return null;
+  }
+  async _brefSyncFlush() {
+    let rec = null; try { rec = await this._brefIndexRecord(); } catch (_e) {} if (!rec) return;
+    try {
+      // READ-MERGE-WRITE: pull the current remote blob and merge it into the local store BEFORE uploading, so this
+      // client's whole-store write can't wipe entries another device added since our last load (newest-t wins).
+      let line = null; const items = (await rec.getLineItems()) || [];
+      for (const li of items) { try { const b = await li.getBlob(); if (b && b.fileName === BREF_FILE) { line = li; const ab = await b.download(); if (ab) { try { pxcBrefMergeNested(this._brefStore(), pxcBrefMigrate(JSON.parse(new TextDecoder().decode(ab)))); } catch (_e) {} } break; } } catch (_e) {} }
+      this._brefSaveLocal();
+      const blob = await this.data.uploadBlob(new File([JSON.stringify(this._brefStore())], BREF_FILE, { type: 'application/json' }));
+      if (!blob) return;
+      if (!line) line = await rec.createLineItem(null, null, 'file', null, null);
+      if (line && line.setBlob) await line.setBlob(blob);
+    } catch (_e) {}
+  }
+  async _brefSyncLoad() {
+    let rec = null; try { rec = await this._brefIndexRecord(); } catch (_e) {} if (!rec) return;
+    try {
+      const items = (await rec.getLineItems()) || [];
+      for (const li of items) { let b = null; try { b = await li.getBlob(); } catch (_e) {} if (!b || b.fileName !== BREF_FILE) continue; const ab = await b.download(); if (ab) { try { const synced = JSON.parse(new TextDecoder().decode(ab)); pxcBrefMergeNested(this._brefStore(), pxcBrefMigrate(synced)); this._brefSaveLocal(); for (const v of this._views) v.dirty = true; } catch (_e) {} } break; }
+    } catch (_e) {}
   }
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
@@ -5012,10 +5059,26 @@ class Plugin extends AppPlugin {
       },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {
-        const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: 'D', el: 'E', label: 'L' });
+        const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: '__pxc_test_D__', el: 'E', label: 'L' });
         const got = this._lookupBackref(k);
-        try { const x = this._loadBackref(); delete x[k]; this._saveBackref(x); } catch (_e) {}
-        return { got, ok: !!got && got.drawing === 'D' && got.el === 'E' && got.label === 'L' };
+        try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
+        return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // BACKREF-SYNC: per-drawing sub-maps — migrate (flat→nested), flatten (newest wins), merge, prune (GC).
+      brefStoreTest: () => {
+        const flat = { L1: { drawing: 'DA', el: 'e1', label: 'a', t: 1 }, L2: { drawing: 'DB', el: 'e2', label: 'b', t: 2 } };
+        const nested = pxcBrefMigrate(flat);
+        const mig = nested.DA && nested.DA.L1 && nested.DB && nested.DB.L2;
+        const idem = JSON.stringify(pxcBrefMigrate(nested)) === JSON.stringify(nested); // migrating an already-nested store is a no-op
+        const fl = pxcBrefFlatten(nested); const flatOk = fl.L1.drawing === 'DA' && fl.L2.drawing === 'DB';
+        // two drawings ref the SAME line → newest (higher t) wins in the flat view
+        const collide = pxcBrefMigrate({}); collide.DA = { LX: { el: 'old', t: 1 } }; collide.DB = { LX: { el: 'new', t: 5 } };
+        const winNew = pxcBrefFlatten(collide).LX.el === 'new';
+        // merge keeps both drawings; prune drops one
+        const merged = pxcBrefMergeNested(pxcBrefMigrate({ DA: { L1: { el: 'e1', t: 1 } } }), { DB: { L2: { el: 'e2', t: 1 } } });
+        const mergeOk = merged.DA && merged.DB;
+        const pruned = JSON.parse(JSON.stringify(nested)); delete pruned.DA;
+        return { mig: !!mig, idem, flatOk, winNew, mergeOk: !!mergeOk, ok: !!mig && idem && flatOk && winNew && !!mergeOk && !pruned.DA && !!pruned.DB };
       },
       // B2: cause-effect JSON → elements (house-fire shape: 8 nodes / 7 edges / 1 connection).
       ceParseTest: () => {
