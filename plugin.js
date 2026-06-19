@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.2.0';
+const PLEXUS_VERSION = '1.3.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -3068,9 +3068,16 @@ class CanvasView {
       // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
       const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
       const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
+      // GRID-DRIVEN CULL: candidate set = grid query over the viewport (∪ selected, which move mid-drag before the
+      // grid re-indexes) instead of the whole array → O(visible), not O(n) per frame. The grid never drops a true
+      // overlap (verified), and inView() still does the exact test; z-order restored by sorting on _zIndex (paint order).
+      this._ensureGrid();
+      const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
+      if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
+      const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
       let drawn = 0;
-      for (const el of this.scene.elements) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
-      for (const el of this.scene.elements) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
+      for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
+      for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
       this._drawnCount = drawn;
       this.renderer.ghosts();
       this.renderer.end();
