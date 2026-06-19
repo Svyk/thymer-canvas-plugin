@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.8.0';
+const PLEXUS_VERSION = '1.8.1';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -833,7 +833,8 @@ function exportPng(scene, maxPx = 1024, opts) {
         const ctx = cv.getContext('2d');
         if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
         ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
-        for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el);
+        const _pd = PXC_DARK; PXC_DARK = false; // UX-6: export is always TRUE colour (the dark treatment is display-only)
+        try { for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el); } finally { PXC_DARK = _pd; }
         cv.toBlob((blob) => resolve(blob), 'image/png');
       } catch (_e) { resolve(null); }
     };
