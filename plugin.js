@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.5.0';
+const PLEXUS_VERSION = '1.6.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -765,12 +765,21 @@ async function getRecordPoll(plugin, guid, tries = 25) {
   return null;
 }
 // Find the record's scene-carrying file line item (the one whose blob is named SCENE_FILENAME).
-async function findSceneLine(rec) {
-  let items = null;
-  try { items = await rec.getLineItems(); } catch (_e) { return null; }
-  for (const li of (items || [])) {
-    let b = null; try { b = await li.getBlob(); } catch (_e) {} // text/heading items return null fast
-    if (b && b.fileName === SCENE_FILENAME) return li;
+async function findSceneLine(rec, tries = 8) {
+  // Retry on an EMPTY line-item list. Right after a record resolves, its line items can lag (sync); a transient
+  // empty read here used to make loadOrInit treat the record as fresh → overwrite the real scene with the empty
+  // default (the Jun-17 data-loss). An empty list retries; a populated list without the scene returns null fast.
+  for (let t = 0; t < tries; t++) {
+    let items = null;
+    try { items = await rec.getLineItems(); } catch (_e) {}
+    if (items && items.length) {
+      for (const li of items) {
+        let b = null; try { b = await li.getBlob(); } catch (_e) {} // text/heading items return null fast
+        if (b && b.fileName === SCENE_FILENAME) return li;
+      }
+      return null; // line items loaded, none carries the scene → genuinely no scene line
+    }
+    await sleep(120);
   }
   return null;
 }
@@ -894,10 +903,16 @@ async function saveScene(plugin, rec, scene, camera, view) {
   // collection has no such property, in which case we fall back to a body `file` line item.
   let sceneProp = null; try { sceneProp = rec.prop('Scene'); } catch (_e) {}
   if (sceneProp && typeof sceneProp.setFileFromBlob === 'function') {
-    try { sceneProp.setFileFromBlob(blob); mode = 'prop'; ok = true; } catch (_e) { mode = 'line'; }
-    if (mode === 'prop') {
-      // Migrate: if the scene was previously stored as a body line item, remove it so the note stays clean.
-      try { const old = (view && view._sceneLine) || await findSceneLine(rec); if (old) { try { await old.delete(); } catch (_e) {} if (view) view._sceneLine = null; } } catch (_e) {}
+    // RESPECT the boolean return — a phantom `Scene` prop (collection lacks the field) returns false; assuming
+    // success there + deleting the body line below would lose the scene. Only treat as 'prop' when it truly wrote.
+    let wrote = false; try { wrote = sceneProp.setFileFromBlob(blob) !== false; } catch (_e) { wrote = false; }
+    if (wrote) {
+      mode = 'prop'; ok = true;
+      // Migrate body→property: delete the old body line ONLY after CONFIRMING the property holds a blob on
+      // read-back (defends a phantom that returns truthy but stores nothing). Brief retry for write propagation.
+      let confirmed = false; for (let i = 0; i < 3 && !confirmed; i++) { try { const pb = await sceneProp.fileBlob(); confirmed = !!pb; } catch (_e) {} if (!confirmed) await sleep(120); }
+      if (confirmed) { try { const old = (view && view._sceneLine) || await findSceneLine(rec); if (old) { try { await old.delete(); } catch (_e) {} if (view) view._sceneLine = null; } } catch (_e) {} }
+      // not confirmed → keep BOTH the property write and the body line (loader prefers whichever loads); never delete unverified.
     }
   }
   if (mode !== 'prop') {
@@ -3211,14 +3226,17 @@ class CanvasView {
   async loadOrInit() {
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
     if (this.destroyed) return;
-    let fresh = true;
+    let fresh = true, hadStore = false; // hadStore = a scene STORE exists (prop blob or body line), load ok OR not
     if (this.rec) {
       // UX-4: prefer the `Scene` FILE PROPERTY (clean storage); fall back to a body `file` line item.
       let sceneProp = null; try { sceneProp = this.rec.prop('Scene'); } catch (_e) {}
-      if (sceneProp) { const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+      if (sceneProp) {
+        let pblob = null; try { pblob = await sceneProp.fileBlob(); } catch (_e) {} // a REAL stored scene → blob present
+        if (pblob) { hadStore = true; const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+      }
       if (fresh) {
         const line = await findSceneLine(this.rec);
-        if (line) { this._sceneLine = line; const loaded = await loadSceneFromLine(line, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
+        if (line) { this._sceneLine = line; hadStore = true; const loaded = await loadSceneFromLine(line, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
       }
       // UX-4 migration: scene loaded from the BODY but the collection now has a `Scene` property → migrate on
       // open (saveScene writes the property + deletes the body line). Auto-cleans existing flipped notes.
@@ -3238,7 +3256,11 @@ class CanvasView {
     const st = this.plugin._settings || {};
     this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
-    this.dirty = true; if (fresh && this.rec) this.saveNow();
+    this.dirty = true;
+    // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
+    // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
+    // lag), NEVER overwrite it with empty — that wiped the Jun-17 map. fresh && !hadStore = truly new → safe to seed.
+    if (fresh && this.rec && !hadStore) this.saveNow();
     try { this._buildXrefIndex(); } catch (_e) {} // cross-ref ↗ badges for elements cited by notes
     if (!fresh && st.zoomToFitOnOpen) this._fitToScene(); // S3
     if (st.openMode === 'present') setTimeout(() => { if (!this.destroyed) this._enterPresent(); }, 50); // S1
