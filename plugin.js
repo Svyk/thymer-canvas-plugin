@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.3.2';
+const PLEXUS_VERSION = '1.4.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -86,6 +86,22 @@ function pushRecentColor(c) { try { let r = JSON.parse(localStorage.getItem('ple
 function recentColors() { try { return JSON.parse(localStorage.getItem('plexus_recent_colors') || '[]'); } catch (_e) { return []; } }
 // P0.4/P0.4b: light fill tint for a stroke colour + named colour schemes (Shade Master / Color Scheme Manager).
 function tintColor(hex) { const h = (hex || '#7c5cff').replace('#', ''); const n = h.length === 3 ? h.split('').map((c) => c + c).join('') : h; const r = parseInt(n.slice(0, 2), 16) || 124, g = parseInt(n.slice(2, 4), 16) || 92, b = parseInt(n.slice(4, 6), 16) || 255; const mix = (c) => Math.round(c + (255 - c) * 0.78); return '#' + [mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, '0')).join(''); }
+// Read a Tabler icon's glyph CHAR + font-family from the live stylesheet (`.ti-<name>::before { content }`). The
+// `tabler-icons` font renders that char on a Canvas2D context via fillText. `ok:false` when the glyph is unresolvable
+// (unbundled / empty) so the drawer can reject it instead of dropping an invisible element.
+function readGlyph(iconName) {
+  try {
+    const span = document.createElement('span'); span.className = 'ti ' + iconName;
+    span.style.cssText = 'position:absolute;left:-9999px;visibility:hidden';
+    document.body.appendChild(span);
+    const cs = getComputedStyle(span, '::before');
+    let ch = (cs.content || '').replace(/^["']|["']$/g, '');
+    const fam = (getComputedStyle(span).fontFamily || 'tabler-icons').replace(/["']/g, '');
+    span.remove();
+    const ok = !!ch && ch !== 'none' && ch !== 'normal';
+    return { glyph: ok ? ch : '', fontFamily: fam || 'tabler-icons', ok };
+  } catch (_e) { return { glyph: '', fontFamily: 'tabler-icons', ok: false }; }
+}
 const COLOR_SCHEMES = {
   Plexus: ['#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#1e1e1e'],
   Cloud: ['#FF9900', '#4285F4', '#0089D6', '#326CE5', '#00A4A6'],
@@ -99,7 +115,16 @@ const COLOR_SCHEMES = {
 const _libCache = {};
 async function loadLib(url) { if (_libCache[url]) return _libCache[url]; _libCache[url] = await import(url); return _libCache[url]; }
 const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs' };
-function shapePolygon(el) { const x = el.x, y = el.y, w = el.width, h = el.height; if (el.type === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]]; if (el.type === 'ellipse') { const pts = []; for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push([x + w / 2 + Math.cos(a) * w / 2, y + h / 2 + Math.sin(a) * h / 2]); } return pts; } return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]; }
+function shapePolygon(el) {
+  const x = el.x, y = el.y, w = el.width, h = el.height, t = el.type;
+  if (t === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]];
+  if (t === 'triangle') return [[x + w / 2, y], [x + w, y + h], [x, y + h]];
+  if (t === 'parallelogram') { const s = Math.abs(w) * 0.22; return [[x + s, y], [x + w, y], [x + w - s, y + h], [x, y + h]]; }
+  if (t === 'hexagon') { const i = Math.abs(w) * 0.25; return [[x + i, y], [x + w - i, y], [x + w, y + h / 2], [x + w - i, y + h], [x + i, y + h], [x, y + h / 2]]; }
+  if (t === 'cloud') { const cx = x + w / 2, cy = y + h / 2, ax = w * 0.40, ay = h * 0.34, bump = Math.min(Math.abs(w), Math.abs(h)) * 0.18, N = 9, pts = []; for (let k = 0; k < N; k++) { const a = (k / N) * Math.PI * 2 - Math.PI / 2; pts.push([cx + Math.cos(a) * ax, cy + Math.sin(a) * ay]); const ma = a + Math.PI / N; pts.push([cx + Math.cos(ma) * (ax + bump), cy + Math.sin(ma) * (ay + bump)]); } return pts; }
+  if (t === 'ellipse') { const pts = []; for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push([x + w / 2 + Math.cos(a) * w / 2, y + h / 2 + Math.sin(a) * h / 2]); } return pts; }
+  return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+}
 // Rasterize an SVG string to a PNG File at 2× (white bg, size-capped) — used by Mermaid + LaTeX so the result
 // becomes a normal image element (no live SVG/HTML in the render loop → stays fast).
 function svgToPngFile(svg, name) {
@@ -155,8 +180,13 @@ const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PALETTE = ['#1e1e1e', '#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444'];
-const FILLS = { '#1e1e1e': 'transparent', '#7c5cff': '#efeaff', '#0ea5e9': '#e0f2fe', '#10b981': '#dcfce7', '#f59e0b': '#fef3c7', '#ef4444': '#fee2e2' };
+const PALETTE = ['#1e1e1e', '#64748b', '#7c5cff', '#6366f1', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#92400e'];
+const FILLS = {
+  '#1e1e1e': 'transparent', '#64748b': '#f1f5f9', '#7c5cff': '#efeaff', '#6366f1': '#e0e7ff',
+  '#0ea5e9': '#e0f2fe', '#06b6d4': '#cffafe', '#14b8a6': '#ccfbf1', '#10b981': '#dcfce7',
+  '#84cc16': '#ecfccb', '#f59e0b': '#fef3c7', '#f97316': '#ffedd5', '#ef4444': '#fee2e2',
+  '#ec4899': '#fce7f3', '#a855f7': '#f3e8ff', '#92400e': '#fef0e7',
+};
 const TAG_COLORS = ['#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#14b8a6'];
 function tagColor(s) { s = String(s || ''); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return TAG_COLORS[Math.abs(h) % TAG_COLORS.length]; }
 const TOOLS = [
@@ -175,6 +205,36 @@ const TOOLS = [
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
+// The rough.js bbox-shaped primitives (bindable to arrows, resizable/rotatable, nudge-rebind). Extends across the
+// original rect/ellipse/diamond + the visual-thinking shapes so all the membership checks stay in one place.
+const ROUGH_SHAPES = ['rectangle', 'ellipse', 'diamond', 'triangle', 'roundrect', 'parallelogram', 'cylinder', 'hexagon', 'cloud'];
+function isRoughShape(t) { return ROUGH_SHAPES.indexOf(t) >= 0; }
+// The shape-picker flyout — the 6 new shapes. Cells render a MINI HAND-DRAWN PREVIEW of the actual shape (clearer
+// than a substitute glyph, and several Tabler shape glyphs aren't bundled). SHAPE_DRAW maps id → its painter
+// (function declarations hoist, so referencing them in this const is safe).
+const SHAPE_PICKER = [
+  { id: 'triangle', title: 'Triangle' },
+  { id: 'roundrect', title: 'Rounded rectangle' },
+  { id: 'parallelogram', title: 'Parallelogram (I/O)' },
+  { id: 'cylinder', title: 'Cylinder (database)' },
+  { id: 'hexagon', title: 'Hexagon (module)' },
+  { id: 'cloud', title: 'Cloud (network / external)' },
+];
+const SHAPE_DRAW = { triangle: roughTriangle, roundrect: roughRoundRect, parallelogram: roughParallelogram, cylinder: roughCylinder, hexagon: roughHexagon, cloud: roughCloud };
+// ~99 curated Tabler icons for visual thinking — EVERY name validated against Thymer's bundled ~440-glyph subset
+// live (2026-06-18), so none render blank. A glyph is dropped as a real `icon` scene element (move/resize/rotate/colour/export).
+const ICON_CATALOG = [
+  { group: 'People',        names: ['ti-user', 'ti-users', 'ti-id', 'ti-friends', 'ti-mood-happy', 'ti-crown', 'ti-hand-grab', 'ti-eye', 'ti-brain'] },
+  { group: 'Arrows & flow', names: ['ti-arrow-right', 'ti-arrow-left', 'ti-arrow-up', 'ti-arrow-down', 'ti-arrows-exchange', 'ti-arrow-back-up', 'ti-arrow-forward-up', 'ti-refresh'] },
+  { group: 'Objects',       names: ['ti-adjustments', 'ti-tools', 'ti-bulb', 'ti-key', 'ti-lock', 'ti-paperclip', 'ti-pin', 'ti-trash', 'ti-scissors', 'ti-hammer'] },
+  { group: 'Tech & data',   names: ['ti-database', 'ti-server', 'ti-cpu', 'ti-cloud', 'ti-code', 'ti-terminal', 'ti-share', 'ti-chart-bar', 'ti-chart-line', 'ti-table'] },
+  { group: 'Status',        names: ['ti-check', 'ti-x', 'ti-alert-triangle', 'ti-circle-check', 'ti-ban', 'ti-flag', 'ti-star', 'ti-heart', 'ti-bell', 'ti-bookmark'] },
+  { group: 'Nature',        names: ['ti-sun', 'ti-moon', 'ti-umbrella', 'ti-tree', 'ti-mountain', 'ti-droplet', 'ti-flame', 'ti-leaf', 'ti-map', 'ti-world'] },
+  { group: 'Time',          names: ['ti-clock', 'ti-calendar', 'ti-hourglass', 'ti-alarm', 'ti-history', 'ti-calendar-event', 'ti-stopwatch'] },
+  { group: 'Communication', names: ['ti-message', 'ti-news', 'ti-mail', 'ti-phone-call', 'ti-microphone', 'ti-speakerphone', 'ti-rocket', 'ti-quote', 'ti-at', 'ti-message-circle'] },
+  { group: 'Business',      names: ['ti-coin', 'ti-cash', 'ti-currency-dollar', 'ti-wallet', 'ti-shopping-cart', 'ti-building-store', 'ti-briefcase', 'ti-receipt', 'ti-target', 'ti-trophy'] },
+  { group: 'UI & misc',     names: ['ti-settings', 'ti-search', 'ti-filter', 'ti-folder', 'ti-file', 'ti-link', 'ti-plus', 'ti-circle-minus', 'ti-menu-2', 'ti-dots', 'ti-layout-dashboard', 'ti-layout-grid', 'ti-list', 'ti-photo', 'ti-brush'] },
+];
 // Ray-casting point-in-polygon — used by the lasso select to test element centers against the loop.
 function pointInPoly(x, y, poly) {
   let inside = false;
@@ -310,6 +370,67 @@ function roughDiamond(ctx, x, y, w, h, opts, seed) {
   roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
   ctx.restore();
 }
+// ── Visual-thinking shapes (hand-drawn, reuse roughSeg/hachure; same jitter language as rect/diamond) ──
+function _roughFillPoly(ctx, x, y, w, h, pts, opts, rng) { // shared: clip to a polygon path + hachure (or solid)
+  if (!opts.fill || opts.fill === 'transparent') return;
+  ctx.save(); ctx.beginPath(); pts.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.clip();
+  if (opts.fillStyle === 'solid') { ctx.globalAlpha = opts.opacity == null ? 1 : opts.opacity; ctx.fillStyle = opts.fill; ctx.fill(); }
+  else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng);
+  ctx.restore();
+}
+function roughTriangle(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
+  const A = [x + w / 2, y], B = [x + w, y + h], C = [x, y + h];
+  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, [A, B, C], opts, rng);
+  roughSeg(ctx, A[0], A[1], B[0], B[1], rng, r); roughSeg(ctx, B[0], B[1], C[0], C[1], rng, r); roughSeg(ctx, C[0], C[1], A[0], A[1], rng, r);
+  ctx.restore();
+}
+function roughParallelogram(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4, s = Math.abs(w) * 0.22;
+  const P = [[x + s, y], [x + w, y], [x + w - s, y + h], [x, y + h]];
+  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
+  for (let k = 0; k < P.length; k++) { const a = P[k], b = P[(k + 1) % P.length]; roughSeg(ctx, a[0], a[1], b[0], b[1], rng, r); }
+  ctx.restore();
+}
+function roughHexagon(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4, i = Math.abs(w) * 0.25;
+  const P = [[x + i, y], [x + w - i, y], [x + w, y + h / 2], [x + w - i, y + h], [x + i, y + h], [x, y + h / 2]];
+  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
+  for (let k = 0; k < P.length; k++) { const a = P[k], b = P[(k + 1) % P.length]; roughSeg(ctx, a[0], a[1], b[0], b[1], rng, r); }
+  ctx.restore();
+}
+function roughRoundRect(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
+  const k = Math.min(Math.min(Math.abs(w), Math.abs(h)) * 0.18, 24);
+  ctx.save(); applyStroke(ctx, opts);
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, k); else ctx.rect(x, y, w, h); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  roughSeg(ctx, x + k, y, x + w - k, y, rng, r); roughSeg(ctx, x + w, y + k, x + w, y + h - k, rng, r);
+  roughSeg(ctx, x + w - k, y + h, x + k, y + h, rng, r); roughSeg(ctx, x, y + h - k, x, y + k, rng, r);
+  const corner = (cx, cy, a0) => { ctx.beginPath(); for (let j = 0; j <= 4; j++) { const a = a0 + (j / 4) * (Math.PI / 2); const px = cx + Math.cos(a) * k + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * k + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
+  corner(x + k, y + k, Math.PI); corner(x + w - k, y + k, -Math.PI / 2); corner(x + w - k, y + h - k, 0); corner(x + k, y + h - k, Math.PI / 2);
+  ctx.restore();
+}
+function roughCylinder(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
+  const e = Math.min(Math.abs(h) * 0.18, 18), rx = w / 2, cx = x + w / 2;
+  ctx.save(); applyStroke(ctx, opts);
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.rect(x, y + e / 2, w, h - e); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  const arc = (cy, a0, a1) => { ctx.beginPath(); const N = 18; for (let j = 0; j <= N; j++) { const a = a0 + (j / N) * (a1 - a0); const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * (e / 2) + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
+  roughSeg(ctx, x, y + e / 2, x, y + h - e / 2, rng, r); roughSeg(ctx, x + w, y + e / 2, x + w, y + h - e / 2, rng, r);
+  arc(y + h - e / 2, 0, Math.PI);          // bottom front lip
+  arc(y + e / 2, 0, Math.PI * 2);          // top cap ellipse
+  ctx.restore();
+}
+function roughCloud(ctx, x, y, w, h, opts, seed) {
+  const rng = mulberry32((seed | 0) || 1);
+  const cx = x + w / 2, cy = y + h / 2, ax = w * 0.40, ay = h * 0.34, N = 9, bump = Math.min(Math.abs(w), Math.abs(h)) * 0.18;
+  const base = []; for (let k = 0; k < N; k++) { const a = (k / N) * Math.PI * 2 - Math.PI / 2; base.push([cx + Math.cos(a) * ax, cy + Math.sin(a) * ay, a]); }
+  const path = () => { ctx.beginPath(); for (let k = 0; k < N; k++) { const p0 = base[k], p1 = base[(k + 1) % N]; let a1 = p1[2]; if (a1 < p0[2]) a1 += Math.PI * 2; const ma = (p0[2] + a1) / 2; const b = bump + (rng() * 2 - 1) * 2; const mx = cx + Math.cos(ma) * (ax + b), my = cy + Math.sin(ma) * (ay + b); if (k === 0) ctx.moveTo(p0[0], p0[1]); ctx.quadraticCurveTo(mx, my, p1[0], p1[1]); } ctx.closePath(); };
+  ctx.save(); applyStroke(ctx, opts);
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); path(); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  path(); ctx.stroke();
+  ctx.restore();
+}
 // Per-point stroke radius from local speed (point spacing): slow strokes go THICK, fast strokes go THIN —
 // the natural-ink look (perfect-freehand-lite). Lightly smoothed so width transitions don't stair-step.
 function freedrawRadii(pts, baseW) {
@@ -364,6 +485,17 @@ function drawText(ctx, el) {
   for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
   ctx.restore();
 }
+// Icon = one Tabler glyph drawn in the `tabler-icons` font, scaled to the element box (resize "just works"). Coloured
+// by strokeColor, centred. The drawElement rotation wrapper rotates it for free.
+function drawIcon(ctx, el) {
+  if (!el.glyph) return;
+  const sz = Math.min(Math.abs(el.width), Math.abs(el.height)) || el.fontSize || 24;
+  ctx.save();
+  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  ctx.font = sz + 'px "' + (el.fontFamily || 'tabler-icons') + '"'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  ctx.fillText(el.glyph, el.x + el.width / 2, el.y + el.height / 2);
+  ctx.restore();
+}
 function drawArrowhead(ctx, fromX, fromY, toX, toY, size) {
   const ang = Math.atan2(toY - fromY, toX - fromX), len = size || 14, spread = 0.45;
   ctx.beginPath();
@@ -396,8 +528,15 @@ function drawElement(ctx, el) {
   if (el.type === 'rectangle') roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'triangle') roughTriangle(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'roundrect') roughRoundRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'parallelogram') roughParallelogram(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'cylinder') roughCylinder(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'hexagon') roughHexagon(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
+  else if (el.type === 'cloud') roughCloud(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'freedraw') drawFreedraw(ctx, el);
   else if (el.type === 'text') drawText(ctx, el);
+  else if (el.type === 'icon') drawIcon(ctx, el);
   else if (el.type === 'arrow' || el.type === 'line') drawLinear(ctx, el);
   if (rotated) ctx.restore();
 }
@@ -442,6 +581,15 @@ function makeText(wx, wy, style) {
     id: newId(), type: 'text', x: wx, y: wy, width: 8, height: (style.fontSize || 24) * 1.25, angle: 0,
     text: '', fontSize: style.fontSize || 24, fontFamily: style.fontFamily || PLEXUS_DEFAULT_FONT, textAlign: 'left',
     strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+    strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+function makeIcon(x, y, size, iconName, style) {
+  const g = readGlyph(iconName);
+  return {
+    id: newId(), type: 'icon', x, y, width: size, height: size, angle: 0,
+    glyph: g.glyph, iconName, fontFamily: g.fontFamily, fontSize: size,
+    strokeColor: (style && style.stroke) || '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
     strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
@@ -556,13 +704,20 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
     const v = ((wx - cx) / rx) ** 2 + ((wy - cy) / ry) ** 2;
     if (filled) return v <= 1.04;
     return Math.abs(Math.sqrt(v) - 1) < (tol / Math.min(rx, ry)) + 0.14;
+  }
+  // Slanted/concave shapes — exact polygon test (wx,wy are already un-rotated; shapePolygon verts are un-rotated too).
+  if (el.type === 'triangle' || el.type === 'parallelogram' || el.type === 'hexagon' || el.type === 'cloud') {
+    const poly = shapePolygon(el);
+    if (filled) return pointInPoly(wx, wy, poly);
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) if (distToSeg(wx, wy, poly[j][0], poly[j][1], poly[i][0], poly[i][1]) <= tol + (el.strokeWidth || 2)) return true;
+    return false;
   }
   if (filled) return true;
   return Math.abs(wx - minx) < tol || Math.abs(wx - maxx) < tol || Math.abs(wy - miny) < tol || Math.abs(wy - maxy) < tol;
@@ -618,18 +773,27 @@ async function loadScene(rec, tries = 1) {
 function exportPng(scene, maxPx = 1024, opts) {
   opts = opts || {};
   return new Promise((resolve) => {
+    const run = () => {
+      try {
+        const b = sceneBounds(scene); const pad = opts.padding != null ? opts.padding : 24;
+        const w = b.w + pad * 2, h = b.h + pad * 2; // S8: explicit scale, else fit to maxPx
+        const scale = opts.scale ? opts.scale : Math.min(2, maxPx / Math.max(w, h, 1));
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
+        const ctx = cv.getContext('2d');
+        if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
+        ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
+        for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el);
+        cv.toBlob((blob) => resolve(blob), 'image/png');
+      } catch (_e) { resolve(null); }
+    };
+    // CRITICAL: if the scene has icon elements, ensure the Tabler font is LOADED before rasterizing — Canvas2D fillText
+    // of an unloaded web font silently draws tofu/blank. (Only gates when icons are present; first export only.)
     try {
-      const b = sceneBounds(scene); const pad = opts.padding != null ? opts.padding : 24;
-      const w = b.w + pad * 2, h = b.h + pad * 2; // S8: explicit scale, else fit to maxPx
-      const scale = opts.scale ? opts.scale : Math.min(2, maxPx / Math.max(w, h, 1));
-      const cv = document.createElement('canvas');
-      cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
-      const ctx = cv.getContext('2d');
-      if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
-      ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
-      for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el);
-      cv.toBlob((blob) => resolve(blob), 'image/png');
-    } catch (_e) { resolve(null); }
+      const hasIcon = scene.elements && scene.elements.some((e) => e.type === 'icon' && !e.isDeleted);
+      if (hasIcon && document.fonts && !document.fonts.check('24px "tabler-icons"')) { document.fonts.load('24px "tabler-icons"').then(run, run); return; }
+    } catch (_e) {}
+    run();
   });
 }
 function svgEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -650,6 +814,10 @@ function exportSvg(scene) {
     if (el.type === 'rectangle') p.push(`<rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="2" ${common}${rot}/>`);
     else if (el.type === 'ellipse') p.push(`<ellipse cx="${el.x + el.width / 2}" cy="${el.y + el.height / 2}" rx="${Math.abs(el.width / 2)}" ry="${Math.abs(el.height / 2)}" ${common}${rot}/>`);
     else if (el.type === 'diamond') { const mx = el.x + el.width / 2, my = el.y + el.height / 2; p.push(`<polygon points="${mx},${el.y} ${el.x + el.width},${my} ${mx},${el.y + el.height} ${el.x},${my}" ${common}${rot}/>`); }
+    else if (el.type === 'triangle' || el.type === 'parallelogram' || el.type === 'hexagon' || el.type === 'cloud') { const pts = shapePolygon(el).map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polygon points="${pts}" ${common}${rot}/>`); }
+    else if (el.type === 'roundrect') { const k = Math.min(Math.min(Math.abs(el.width), Math.abs(el.height)) * 0.18, 24); p.push(`<rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="${k.toFixed(1)}" ${common}${rot}/>`); }
+    else if (el.type === 'cylinder') { const e = Math.min(Math.abs(el.height) * 0.18, 18), rx = el.width / 2, ry = e / 2, cx = el.x + el.width / 2; p.push(`<g${rot}><path d="M${el.x},${(el.y + ry).toFixed(1)} L${el.x},${(el.y + el.height - ry).toFixed(1)} A${rx.toFixed(1)},${ry.toFixed(1)} 0 0 0 ${el.x + el.width},${(el.y + el.height - ry).toFixed(1)} L${el.x + el.width},${(el.y + ry).toFixed(1)}" fill="${fillc}" stroke="${sc}" stroke-width="${sw}" opacity="${op}"/><ellipse cx="${cx}" cy="${(el.y + ry).toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="${fillc}" stroke="${sc}" stroke-width="${sw}" opacity="${op}"/></g>`); }
+    else if (el.type === 'icon') { const sz = Math.min(Math.abs(el.width), Math.abs(el.height)) || el.fontSize || 24; p.push(`<text x="${(el.x + el.width / 2).toFixed(1)}" y="${(el.y + el.height / 2).toFixed(1)}" font-family="tabler-icons" font-size="${sz}" fill="${sc}" text-anchor="middle" dominant-baseline="central" opacity="${op}"${rot}>${svgEsc(el.glyph || '')}</text>`); }
     else if (el.type === 'text') { const fs = el.fontSize || 24, ff = svgEsc((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT), lines = String(el.text || '').split('\n'); const ts = lines.map((ln, i) => `<tspan x="${el.x}" dy="${i === 0 ? fs : (fs * 1.25).toFixed(1)}">${svgEsc(ln)}</tspan>`).join(''); p.push(`<text font-family="${ff}" font-size="${fs}" fill="${sc}" opacity="${op}">${ts}</text>`); }
     else if (el.type === 'arrow' || el.type === 'line') { const pts = (el.points || []).map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
     else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
@@ -881,6 +1049,26 @@ class CanvasView {
       b.addEventListener('click', () => { this.tool = t.id; this._syncToolbar(); this.iCv.focus(); });
       bar.appendChild(b); this._toolBtns[t.id] = b;
     }
+    // Shapes flyout — 6 visual-thinking shapes behind ONE button (mini hand-drawn previews; keeps the bar from bloating).
+    const shapeWrap = document.createElement('div'); shapeWrap.className = 'pxc-shape-wrap';
+    const shapeBtn = document.createElement('button'); shapeBtn.className = 'pxc-tool'; shapeBtn.title = 'More shapes — triangle, cylinder (database), hexagon, cloud…';
+    shapeBtn.innerHTML = '<span class="ti ti-box"></span>';
+    const flyout = document.createElement('div'); flyout.className = 'pxc-shape-flyout'; flyout.style.display = 'none';
+    const mkPrev = (id) => { const cv = document.createElement('canvas'); cv.width = 30; cv.height = 30; cv.style.cssText = 'width:20px;height:20px;display:block'; try { SHAPE_DRAW[id](cv.getContext('2d'), 4, 5, 22, 20, { stroke: '#cdd3df', strokeWidth: 1.6, roughness: 1 }, 7); } catch (_e) {} return cv; };
+    for (const sp of SHAPE_PICKER) {
+      const sb = document.createElement('button'); sb.className = 'pxc-tool'; sb.title = sp.title; sb.appendChild(mkPrev(sp.id));
+      sb.addEventListener('click', (e) => { e.stopPropagation(); this.tool = sp.id; this._syncToolbar(); flyout.style.display = 'none'; this.iCv.focus(); });
+      flyout.appendChild(sb);
+    }
+    shapeBtn.addEventListener('click', (e) => { e.stopPropagation(); flyout.style.display = flyout.style.display === 'none' ? 'flex' : 'none'; });
+    const closeFly = (ev) => { if (flyout.style.display !== 'none' && !shapeWrap.contains(ev.target)) flyout.style.display = 'none'; };
+    document.addEventListener('pointerdown', closeFly); this._localDisposers.push(() => document.removeEventListener('pointerdown', closeFly));
+    shapeWrap.appendChild(shapeBtn); shapeWrap.appendChild(flyout); bar.appendChild(shapeWrap); this._toolBtns['_shapes'] = shapeBtn;
+    // Icon library launcher (drawer of ~90 Tabler symbols).
+    const iconBtn = document.createElement('button'); iconBtn.className = 'pxc-tool'; iconBtn.title = 'Icons — drop a symbol on the board';
+    iconBtn.innerHTML = '<span class="ti ti-mood-happy"></span>';
+    iconBtn.addEventListener('click', () => this.plugin._openIconGlyphLibrary());
+    bar.appendChild(iconBtn);
     const sep = document.createElement('div'); sep.className = 'pxc-sep'; bar.appendChild(sep); this._swatches = {};
     for (const c of PALETTE) {
       const s = document.createElement('button'); s.className = 'pxc-swatch'; s.title = c; s.style.background = c;
@@ -912,7 +1100,8 @@ class CanvasView {
     if (panel) { try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); } }
   }
   _syncToolbar() {
-    if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === this.tool);
+    const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
+    if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
     if (this._swatches) for (const c in this._swatches) this._swatches[c].classList.toggle('active', c === this.strokeColor);
   }
   _resize() {
@@ -1327,7 +1516,7 @@ class CanvasView {
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
   _bindableAt(wx, wy, excludeId) {
     const tol = 8 / this.camera.zoom;
-    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId) continue; if ((el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') && hitElement(el, wx, wy, tol)) return el; }
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId) continue; if (isRoughShape(el.type) && hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   _updateBindings() {
@@ -1371,7 +1560,7 @@ class CanvasView {
   }
   _bringForward() { this._stepZ(1); }
   _sendBackward() { this._stepZ(-1); }
-  _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
+  _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (isRoughShape(el.type)) shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
   // CP-4: align / distribute the selection to its bounding box (Excalidraw parity precision tools).
   _align(mode) {
     const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type !== 'frame');
@@ -1511,7 +1700,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (sel.type === 'rectangle' || sel.type === 'ellipse' || sel.type === 'diamond' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
+        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -1573,7 +1762,7 @@ class CanvasView {
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
-      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (m.el.type === 'rectangle' || m.el.type === 'ellipse' || m.el.type === 'diamond') shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (isRoughShape(m.el.type)) shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
     };
@@ -2356,7 +2545,7 @@ class CanvasView {
   }
   // P2: Boolean ops on shapes (polybool, lazy-loaded). op = 'union' | 'difference' | 'intersect'.
   async _boolean(op) {
-    const sel = [...this.selected].map((id) => this._byId(id)).filter((e) => e && (e.type === 'rectangle' || e.type === 'ellipse' || e.type === 'diamond'));
+    const sel = [...this.selected].map((id) => this._byId(id)).filter((e) => e && isRoughShape(e.type));
     if (sel.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ shapes (rect/ellipse/diamond).', dismissible: true }); } catch (_e) {} return; }
     let pb; try { const m = await loadLib(LIB.polybool); pb = m.default || m; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not load the boolean lib.', dismissible: true }); } catch (_e) {} return; }
     const poly = (el) => ({ regions: [shapePolygon(el)], inverted: false });
@@ -3202,7 +3391,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (single.type === 'rectangle' || single.type === 'ellipse' || single.type === 'diamond' || single.type === 'record' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
+    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -3289,7 +3478,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Icons (symbol library)', icon: 'ti-mood-happy', onSelected: () => this._openIconGlyphLibrary() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library (your #icon records)', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
@@ -3785,6 +3975,45 @@ class Plugin extends AppPlugin {
   }
   // P0.3: Icon Library — a floating palette of records tagged #icon. Click an icon to drop a live board-card
   // reference onto the canvas; Thymer backlinks then track every drawing that uses that icon (Nicole's loop).
+  // Preloaded glyph library — ~99 curated Tabler symbols, searchable + categorized. Click → drops an `icon` element
+  // at viewport centre (a real, move/resize/rotate/colour/export-able scene element). Reuses the .pxc-il-* drawer CSS.
+  async _openIconGlyphLibrary() {
+    const v0 = this._activeView();
+    if (!v0) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-iconlib';
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Icons'; box.appendChild(title);
+    const search = document.createElement('input'); search.className = 'pxc-il-search'; search.placeholder = 'Search icons…'; box.appendChild(search);
+    const grid = document.createElement('div'); grid.className = 'pxc-il-grid'; box.appendChild(grid);
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Done';
+    close.addEventListener('click', () => overlay.remove()); box.appendChild(close);
+    overlay.appendChild(box); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    const drop = (name) => {
+      const view = this._activeView() || v0; if (view) {
+        const c = view.camera.screenToWorld(view.cssW / 2, view.cssH / 2);
+        const el = makeIcon(view._snap(c.x - 24), view._snap(c.y - 24), 48, name, { stroke: view.strokeColor });
+        if (!el.glyph) { try { this.ui.addToaster({ title: 'Plexus: that icon isn’t available.', dismissible: true }); } catch (_e) {} return; }
+        view.scene.elements.push(el); view.selected.clear(); view.selected.add(el.id); view.dirty = true; view.scheduleSave();
+      }
+      overlay.remove();
+    };
+    const render = (q) => {
+      grid.innerHTML = ''; q = (q || '').trim().toLowerCase();
+      for (const cat of ICON_CATALOG) {
+        const hits = cat.names.filter((n) => !q || n.includes(q));
+        if (!hits.length) continue;
+        const h = document.createElement('div'); h.className = 'pxc-il-cat'; h.textContent = cat.group; grid.appendChild(h);
+        for (const name of hits) {
+          const cell = document.createElement('button'); cell.className = 'pxc-il-cell'; cell.title = name.replace('ti-', '');
+          cell.innerHTML = '<span class="ti ' + name + ' pxc-il-glyph"></span><span class="pxc-il-cap">' + name.replace('ti-', '') + '</span>';
+          cell.addEventListener('click', () => drop(name)); grid.appendChild(cell);
+        }
+      }
+    };
+    let st; search.addEventListener('input', () => { clearTimeout(st); st = setTimeout(() => render(search.value), 80); }); // debounce
+    render('');
+  }
   async _openIconLibrary() {
     const v0 = this._activeView();
     if (!v0) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first, then the Icon Library.', dismissible: true }); } catch (_e) {} return; }
@@ -4288,6 +4517,12 @@ const BASE_CSS = `
 .pxc-il-thumb.pxc-gempty { background: var(--sidebar-bg-hover); }
 .pxc-il-cap { font-size: 10px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 76px; }
 .pxc-il-empty { color: var(--color-text-600); font-size: 13px; padding: 16px 4px; grid-column: 1 / -1; }
+.pxc-il-cat { grid-column: 1 / -1; font-size: 11px; font-weight: 600; color: var(--color-text-600); margin-top: 8px; letter-spacing: .02em; }
+.pxc-il-glyph { font-size: 28px; color: var(--color-text-400); line-height: 1; }
+.pxc-il-search { width: 100%; box-sizing: border-box; padding: 7px 9px; margin-bottom: 10px; background: var(--input-bg-color); color: var(--color-text-400); border: 1px solid var(--cards-border-color); border-radius: 6px; font-size: 13px; }
+/* Shape-picker flyout */
+.pxc-host .pxc-root .pxc-shape-wrap { position: relative; display: inline-flex; }
+.pxc-host .pxc-root .pxc-shape-flyout { position: absolute; top: 100%; left: 0; margin-top: 4px; display: flex; gap: 3px; padding: 5px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.18); z-index: 20; }
 /* P0.4/P0.4b: Colour tool */
 .pxc-colortool { min-width: 360px; max-width: 420px; }
 .pxc-ct-sec { margin-bottom: 10px; }
