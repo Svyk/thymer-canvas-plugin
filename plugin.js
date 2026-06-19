@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.14.0';
+const PLEXUS_VERSION = '1.15.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1054,7 +1054,11 @@ function ceFishbonePositions(nodes, kids, rootId, ox, oy, BW, BH) {
   let oc = 0; for (const n of nodes) if (!placed[n.id]) { pos[n.id] = { x: ox - 60, y: oy + (oc++) * VGAP, w: BW, h: BH }; placed[n.id] = true; }
   return { pos, lines };
 }
-function elementsFromCauseEffect(chart, ox, oy, layout) {
+// CE-BRAIN: the body line written on a CAUSE record pointing at its EFFECT. An OUTBOUND ref makes the effect the
+// cause's INFERRED child in Plexus Brain (brain plugin.js:156-166), so focusing the effect shows its causes as
+// parents/roots — the RCA convention. Brain reads `s.text.guid`.
+function ceEdgeSegments(effGuid, effText) { return [{ type: 'text', text: '→ ' }, { type: 'ref', text: { guid: effGuid, title: effText || '' } }]; }
+function elementsFromCauseEffect(chart, ox, oy, layout, chartId) {
   ox = ox || 0; oy = oy || 0; const out = [];
   if (!chart || typeof chart !== 'object') return out;
   const nodes = Array.isArray(chart.nodes) ? chart.nodes : [];
@@ -1082,8 +1086,8 @@ function elementsFromCauseEffect(chart, ox, oy, layout) {
   for (const n of nodes) {
     const p = pos[n.id]; if (!p) continue; const x = p.x, y = p.y;
     const role = CE_ROLE_COLOR[n.role] || CE_ROLE_COLOR.neutral;
-    if (mode === 'pentagon' && n.id === rootId) { const pent = cePentagon(x, y, BW, BH, role); pent.ceRole = n.role || 'neutral'; pent.ceNodeId = n.id; if (n.category) pent.ceCategory = n.category; out.push(pent); }
-    else { const box = makeRect(x, y, BW, BH, { type: 'rectangle', stroke: role, fill: tintColor(role), fillStyle: 'solid' }); box.roughness = 0; box.ceRole = n.role || 'neutral'; box.ceNodeId = n.id; if (n.category) box.ceCategory = n.category; out.push(box); }
+    if (mode === 'pentagon' && n.id === rootId) { const pent = cePentagon(x, y, BW, BH, role); pent.ceRole = n.role || 'neutral'; pent.ceNodeId = n.id; pent.ceText = n.text || ''; if (chartId) pent.ceChartId = chartId; if (n.category) pent.ceCategory = n.category; out.push(pent); }
+    else { const box = makeRect(x, y, BW, BH, { type: 'rectangle', stroke: role, fill: tintColor(role), fillStyle: 'solid' }); box.roughness = 0; box.ceRole = n.role || 'neutral'; box.ceNodeId = n.id; box.ceText = n.text || ''; if (chartId) box.ceChartId = chartId; if (n.category) box.ceCategory = n.category; out.push(box); }
     const star = n.role === 'primary' ? '★ ' : ''; const label = String(n.text || '');
     const catM = label.match(/^([^:]{1,32}:)\s*([\s\S]*)$/);
     if (catM) { const head = makeText(x + 9, y + 8, { fontSize: 13, stroke: '#1e1e1e' }); head.text = star + catM[1]; head.fontFamily = 'system-ui, sans-serif'; measureText(head); out.push(head);
@@ -3622,8 +3626,10 @@ class CanvasView {
     const prim = chart.nodes.filter((n) => n && n.role === 'primary').length;
     if (prim !== 1) { try { this.plugin.ui.addToaster({ title: 'Plexus: chart should have exactly one "primary" effect (found ' + prim + ').', dismissible: true }); } catch (_e) {} }
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 120, chart.layout); // CE-FISHBONE: a pasted chart may specify "layout":"fishbone"|"pentagon"
+    const chartId = 'ce' + newId(); // CE-BRAIN: stamp + store the structure so it can be promoted to records later
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 120, chart.layout, chartId); // CE-FISHBONE: a pasted chart may specify "layout":"fishbone"|"pentagon"
     if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to draw from that chart.', dismissible: true }); } catch (_e) {} return; }
+    this._storeCeChart(chartId, chart);
     this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Cause & effect: ' + els.length + ' element(s) imported.', dismissible: true }); } catch (_e) {}
@@ -3637,11 +3643,53 @@ class CanvasView {
       { id: 'c3', text: 'Unknown — needs evidence', role: 'neutral', terminator: 'question' },
     ], edges: [{ effect: 'p', cause: 'c1' }, { effect: 'c1', cause: 'c2' }, { effect: 'c1', cause: 'c3' }], connections: [] };
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 80, layout);
+    const chartId = 'ce' + newId();
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 80, layout, chartId);
+    this._storeCeChart(chartId, chart);
     this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
     this.dirty = true; this.scheduleSave();
     const how = layout === 'fishbone' ? 'fishbone spine (bones alternate up/down)' : layout === 'pentagon' ? 'pentagon head + spine' : 'right-branching tree';
     try { this.plugin.ui.addToaster({ title: 'Cause-&-effect starter added (' + how + ') — edit the boxes.', dismissible: true }); } catch (_e) {}
+  }
+  // CE-BRAIN: persist a chart's structure (nodes + edges) in the scene so it can be promoted to records + Brain edges.
+  _storeCeChart(chartId, chart) {
+    if (!this.scene.ceCharts) this.scene.ceCharts = {};
+    this.scene.ceCharts[chartId] = {
+      nodes: (chart.nodes || []).map((n) => ({ id: n.id, text: n.text || '' })),
+      edges: (chart.edges || []).map((e) => ({ effect: e.effect, cause: e.cause })),
+      promoted: {}, edgesDone: {},
+    };
+  }
+  // CE-BRAIN: materialize ce nodes as Thymer records + write each cause→effect link as a ref on the CAUSE record
+  // pointing at the EFFECT (so Brain renders causes as parents/roots). Idempotent via the per-chart promoted/edgesDone
+  // maps stored in the scene — re-running reuses records (recreates only trashed ones) and never duplicates ref lines.
+  async _promoteCauseEffect() {
+    const charts = this.scene.ceCharts || {};
+    let ids = [];
+    for (const id of this.selected) { const el = this._byId(id); if (el && el.ceChartId && ids.indexOf(el.ceChartId) < 0) ids.push(el.ceChartId); }
+    if (!ids.length) ids = Object.keys(charts);
+    ids = ids.filter((id) => charts[id] && charts[id].nodes && charts[id].nodes.length);
+    if (!ids.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no cause-effect chart to promote — import or create one first.', dismissible: true }); } catch (_e) {} return; }
+    const col = await this._pickCollection('Promote cause-effect nodes into collection:');
+    if (!col) return;
+    let nodeCount = 0, edgeCount = 0;
+    for (const id of ids) {
+      const meta = charts[id]; meta.promoted = meta.promoted || {}; meta.edgesDone = meta.edgesDone || {};
+      const text = {}; for (const n of meta.nodes) text[n.id] = n.text || '(cause)';
+      for (const n of meta.nodes) { // node → record (idempotent; recreate a trashed one)
+        let g = meta.promoted[n.id];
+        if (g) { const ex = await getRecordPoll(this.plugin, g, 2); if (!ex) g = null; }
+        if (!g) { try { g = col.createRecord(text[n.id]); } catch (_e) {} if (typeof g === 'string') { meta.promoted[n.id] = g; nodeCount++; await getRecordPoll(this.plugin, g, 8); for (const e of meta.edges) if (e.cause === n.id || e.effect === n.id) delete meta.edgesDone[e.effect + '>' + e.cause]; } } // recreated guid (trashed node) → any edge touching it is stale → rewrite the ref line
+      }
+      for (const e of meta.edges) { // cause→effect ref line on the CAUSE record (effect = inferred child)
+        const key = e.effect + '>' + e.cause; if (meta.edgesDone[key]) continue;
+        const cg = meta.promoted[e.cause], eg = meta.promoted[e.effect]; if (!cg || !eg) continue;
+        const causeRec = await getRecordPoll(this.plugin, cg, 4); if (!causeRec) continue;
+        try { await causeRec.createLineItem(null, null, 'ulist', ceEdgeSegments(eg, text[e.effect]), null); meta.edgesDone[key] = true; edgeCount++; } catch (_e) {}
+      }
+    }
+    this.dirty = true; this.scheduleSave(); // NOTE: the ceCharts promoted/edgesDone maps are intentionally NOT undo-isolated — promote creates real Thymer records (an external side effect), so an undo across a promote can desync the maps; re-promote then self-heals via the getRecordPoll/recreate path above.
+    try { this.plugin.ui.addToaster({ title: 'Promoted ' + nodeCount + ' record(s) + ' + edgeCount + ' cause→effect link(s) — open Plexus Brain to graph them.', dismissible: true }); } catch (_e) {}
   }
   // P2: CSV → bar chart. Paste/enter `label,value` rows; generates editable bars + labels.
   async _chartFromCsv() {
@@ -4182,6 +4230,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (fishbone)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect('fishbone'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (pentagon)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect('pentagon'); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import cause-effect chart (JSON)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._ceImportJson(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Promote cause-effect to records (Brain)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._promoteCauseEffect(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
@@ -4991,6 +5040,17 @@ class Plugin extends AppPlugin {
         return { boxes, arrows, connectors, terms, primaries, fishBoxes, fishBones, fishArrows, pentRootType: pentRoot && pentRoot.type, pentSpine,
           ok: boxes === 8 && arrows === 7 && connectors >= 1 && terms >= 1 && primaries === 1 &&
               fishBoxes === 8 && fishBones >= 3 && fishArrows === 0 && pentRoot && pentRoot.type === 'line' && pentSpine >= 1 && noStrayHeads === true };
+      },
+      // CE-BRAIN: build-time chartId/ceText stamping + the cause→effect ref-segment shape Brain reads (s.text.guid).
+      cePromoteTest: () => {
+        const chart = { nodes: [{ id: 'p', text: 'Effect', role: 'primary' }, { id: 'a', text: 'Cause A' }], edges: [{ effect: 'p', cause: 'a' }] };
+        const els = elementsFromCauseEffect(chart, 0, 0, 'tree', 'CHART1');
+        const pBox = els.find((e) => e.ceNodeId === 'p'), aBox = els.find((e) => e.ceNodeId === 'a');
+        const segs = ceEdgeSegments('EFFGUID', 'Effect'), refSeg = segs.find((s) => s.type === 'ref');
+        const guidsFound = segs.filter((s) => s.type === 'ref' && s.text && s.text.guid).map((s) => s.text.guid); // mimic Brain's refGuidsFromLineItems
+        return { chartId: pBox && pBox.ceChartId, ceText: aBox && aBox.ceText, refGuid: refSeg && refSeg.text.guid,
+          ok: !!pBox && pBox.ceChartId === 'CHART1' && pBox.ceText === 'Effect' && !!aBox && aBox.ceText === 'Cause A' &&
+              !!refSeg && refSeg.text.guid === 'EFFGUID' && segs[0].type === 'text' && guidsFound.length === 1 && guidsFound[0] === 'EFFGUID' };
       },
       // Phase 10 E14: re-date in place — create an Event, set its Scheduled datetime, return for MCP verify.
       scheduleTest: async () => {

@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.15.0 — CE-BRAIN: promote cause-effect to records (2026-06-19, plan: staged-finding-ritchie Phase C2) — Phase C COMPLETE
+"Plexus: Promote cause-effect to records (Brain)" materializes ce nodes as real Thymer records + writes each
+cause→effect link so Plexus Brain graphs them.
+- **Direction (verified against Brain):** the ref line is written on the **CAUSE** record pointing at the **EFFECT**
+  (`ceEdgeSegments` → `{type:'ref',text:{guid,title}}` on a `ulist` line). Brain reads an outbound ref as an INFERRED
+  child (effect = cause's child) and the incoming ref as an INFERRED parent (cause = effect's parent) → focusing the
+  effect surfaces its **causes as parents/roots** (RCA convention). Confirmed against `plexus-brain/plugin.js:52,151,166`.
+- **Structure storage:** the import/create callers stamp `box.ceChartId` + `box.ceText` (5th builder param) and store the
+  chart in `scene.ceCharts[chartId] = {nodes, edges, promoted, edgesDone}` (plain JSON; rides snapshot/undo/save).
+- **Idempotency:** node creation keyed on `meta.promoted[id]` (recreate only a trashed record); edges keyed on
+  `edgesDone['effect>cause']`. **Review-caught fix:** recreating a trashed node now **invalidates `edgesDone` for every
+  edge touching it** so the link is rewritten against the live record (else the cause→effect ref was silently lost).
+  `ceCharts` maps are intentionally not undo-isolated (promote is an external side effect; re-promote self-heals).
+- **Targeting:** chartIds from selected ce elements, else all `scene.ceCharts`; old (pre-v1.15) charts → graceful "no
+  chart to promote" toaster. `_pickCollection` reused for the target.
+- **Verify:** 9/9 node asserts (chartId/ceText stamping, back-compat omit, pentagon-root stamp, ref-segment guid Brain
+  reads, tree regression) + adversarial `code-reviewer` (direction CONFIRMED; HIGH stale-edge defect found + fixed).
+
 ## ✅ v1.14.0 — CE-FISHBONE: fishbone-spine + pentagon layouts (2026-06-19, plan: staged-finding-ritchie Phase C1)
 `elementsFromCauseEffect(chart, ox, oy, layout)` now takes a 4th `layout` arg: `'tree'` (default, unchanged) |
 `'fishbone'` | `'pentagon'`. Pure geometry, no SDK.
