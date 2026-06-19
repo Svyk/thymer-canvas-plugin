@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.8.1';
+const PLEXUS_VERSION = '1.9.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -97,6 +97,15 @@ function _cssLum(css) {
 // UX-6 dark mode: when PXC_DARK, lighten an INK colour (stroke/text/icon) that's too dark to read on a dark canvas.
 // Only touches near-dark inks (L<0.4) — vivid colours and white pass through unchanged, so it adapts, not inverts.
 // (Excalidraw/zsviczian-style luminance-aware ink; refine the curve once the NotebookLM research lands.)
+// A2: detect an in-progress `@` (record) / `@@` (line) reference at the caret in a text element being edited.
+// Requires the `@` to sit at start-of-text or after whitespace (so "email@x" does NOT trigger). Returns
+// {mode:'record'|'line', query, triggerStart} (triggerStart = index of the first '@') or null.
+function pxcParseRefTrigger(text, caret) {
+  const upto = String(text == null ? '' : text).slice(0, Math.max(0, caret | 0));
+  const m = upto.match(/(?:^|\s)(@@?)([^\s@]{0,40})$/);
+  if (!m) return null;
+  return { mode: m[1] === '@@' ? 'line' : 'record', query: m[2], triggerStart: caret - m[1].length - m[2].length };
+}
 let PXC_DARK = false;
 function adaptInk(hex, dark) {
   const d = dark == null ? PXC_DARK : dark;
@@ -131,7 +140,12 @@ const COLOR_SCHEMES = {
   Sunset: ['#fd7e14', '#ff6b6b', '#f06595', '#cc5de8', '#845ef7'],
   Mono: ['#111111', '#444444', '#777777', '#aaaaaa', '#cccccc'],
   Ocean: ['#03045e', '#0077b6', '#00b4d8', '#90e0ef', '#caf0f8'],
+  'Cause & Effect': ['#7c5cff', '#0ea5e9', '#10b981', '#64748b', '#ef4444'],
 };
+// Cause-&-Effect (Apollo/Sologic RCA) palette: role → box colour; terminator → circle colour; orange cross-link.
+const CE_ROLE_COLOR = { primary: '#7c5cff', action: '#0ea5e9', condition: '#10b981', neutral: '#64748b' };
+const CE_TERM_COLOR = { end: '#ef4444', question: '#0ea5e9' };
+const CE_CONNECTOR_COLOR = '#f97316';
 /* P2: heavy libs lazy-loaded from CDN on first use + cached (same pattern Smart Connections uses for
    transformers.js — keeps plugin.js lean, cold start untouched). */
 const _libCache = {};
@@ -911,6 +925,53 @@ function elementsFromAiJson(arr, ox, oy) {
     else if (t === 'arrow' || t === 'line') { const e = makeLinear(x, y, t === 'line' ? 'line' : 'arrow', { stroke: color, strokeWidth: 2 }); e.points = [[x, y], [x + w, y + h]]; linearBBox(e); out.push(e); }
     else { const e = makeRect(x, y, w, h, { type: (t === 'ellipse' || t === 'diamond') ? t : 'rectangle', stroke: color, fill: FILLS[color] || '#efeaff', fillStyle: 'solid' }); out.push(e); if (it.text) { const lbl = makeText(x + 9, y + h / 2 - 10, { fontSize: 14, stroke: '#1e1e1e' }); lbl.text = String(it.text); measureText(lbl); out.push(lbl); } }
   }
+  return out;
+}
+// B2: pure builder — a /cause-effect-chart RCA JSON → native canvas elements (role-coloured boxes + ★ primary +
+// red/blue terminator circles + grey effect→cause arrows + orange "Connects to" cross-links), right-branching tree.
+// Schema: {nodes:[{id,text,role,terminator?,category?}], edges:[{effect,cause}], connections:[{from,to,label}]}.
+function elementsFromCauseEffect(chart, ox, oy) {
+  ox = ox || 0; oy = oy || 0; const out = [];
+  if (!chart || typeof chart !== 'object') return out;
+  const nodes = Array.isArray(chart.nodes) ? chart.nodes : [];
+  const edges = Array.isArray(chart.edges) ? chart.edges : [];
+  const conns = Array.isArray(chart.connections) ? chart.connections : [];
+  const byId = {}; for (const n of nodes) if (n && n.id != null) byId[n.id] = n;
+  const kids = {}, isEffect = {};
+  for (const e of edges) { if (!e || byId[e.effect] == null || byId[e.cause] == null) continue; (kids[e.effect] = kids[e.effect] || []).push(e.cause); isEffect[e.effect] = true; }
+  let rootId = null; for (const n of nodes) if (n.role === 'primary') { rootId = n.id; break; } if (rootId == null && nodes.length) rootId = nodes[0].id;
+  if (rootId == null) return out;
+  const HGAP = 240, VGAP = 80, BW = 152, BH = 50; let leaf = 0; const rowOf = {}, depthOf = {}, seen = {};
+  const place = (id, depth) => {
+    if (seen[id]) return rowOf[id] || 0; seen[id] = true; depthOf[id] = depth;
+    const ks = kids[id] || [];
+    if (!ks.length) { rowOf[id] = leaf++; return rowOf[id]; }
+    const rs = ks.map((k) => place(k, depth + 1)); rowOf[id] = (rs[0] + rs[rs.length - 1]) / 2; return rowOf[id];
+  };
+  place(rootId, 0);
+  for (const n of nodes) if (!seen[n.id]) { depthOf[n.id] = 0; rowOf[n.id] = leaf++; seen[n.id] = true; }
+  const pos = {};
+  for (const n of nodes) {
+    const role = CE_ROLE_COLOR[n.role] || CE_ROLE_COLOR.neutral;
+    const x = ox + (depthOf[n.id] || 0) * HGAP, y = oy + (rowOf[n.id] || 0) * VGAP; pos[n.id] = { x, y, w: BW, h: BH };
+    const box = makeRect(x, y, BW, BH, { type: 'rectangle', stroke: role, fill: tintColor(role), fillStyle: 'solid' });
+    box.roughness = 0; box.ceRole = n.role || 'neutral'; box.ceNodeId = n.id; if (n.category) box.ceCategory = n.category; out.push(box);
+    const star = n.role === 'primary' ? '★ ' : ''; const label = String(n.text || '');
+    const catM = label.match(/^([^:]{1,32}:)\s*([\s\S]*)$/);
+    if (catM) { const head = makeText(x + 9, y + 8, { fontSize: 13, stroke: '#1e1e1e' }); head.text = star + catM[1]; head.fontFamily = 'system-ui, sans-serif'; measureText(head); out.push(head);
+      const body = makeText(x + 9, y + 26, { fontSize: 12, stroke: '#1e1e1e' }); body.text = catM[2]; measureText(body); out.push(body); }
+    else { const lbl = makeText(x + 9, y + 16, { fontSize: 13, stroke: '#1e1e1e' }); lbl.text = star + label; measureText(lbl); out.push(lbl); }
+    if (n.terminator && !isEffect[n.id]) {
+      const tcol = CE_TERM_COLOR[n.terminator];
+      if (tcol) { const cx = x + BW + 16, cy = y + BH / 2; const circ = makeRect(cx - 11, cy - 11, 22, 22, { type: 'ellipse', stroke: tcol, fill: tintColor(tcol), fillStyle: 'solid' }); circ.roughness = 0; circ.ceTerminator = n.terminator; circ.ceFor = n.id; out.push(circ);
+        if (n.terminator === 'question') { const q = makeText(cx - 4, cy - 9, { fontSize: 15, stroke: tcol }); q.text = '?'; measureText(q); out.push(q); } }
+    }
+  }
+  for (const e of edges) { const a = pos[e.effect], b = pos[e.cause]; if (!a || !b) continue;
+    const ar = makeLinear(0, 0, 'arrow', { stroke: '#94a3b8', strokeWidth: 2 }); ar.points = [[a.x + a.w + 4, a.y + a.h / 2], [b.x - 4, b.y + b.h / 2]]; ar.endArrowhead = 'arrow'; linearBBox(ar); out.push(ar); }
+  for (const c of conns) { const a = pos[c.from], b = pos[c.to]; if (!a || !b) continue;
+    const ar = makeLinear(0, 0, 'arrow', { stroke: CE_CONNECTOR_COLOR, strokeWidth: 2 }); ar.ceConnector = true; ar.points = [[a.x + a.w / 2, a.y + a.h], [b.x + b.w / 2, b.y + b.h]]; ar.endArrowhead = 'arrow'; linearBBox(ar); out.push(ar);
+    const mid = makeText((a.x + b.x) / 2 + a.w / 2, (a.y + b.y) / 2 + a.h + 4, { fontSize: 11, stroke: CE_CONNECTOR_COLOR }); mid.text = c.label || 'Connects to'; measureText(mid); out.push(mid); }
   return out;
 }
 async function saveScene(plugin, rec, scene, camera, view) {
@@ -1924,9 +1985,9 @@ class CanvasView {
     const onDblClick = (e) => {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
-      if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && hit.refGuid) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
+      if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
       if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
-      if (hit && hit.type === 'text') { if (hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record (S10: honors openInNewPanel)
+      if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
       else if (hit && hit.type === 'record') { this._openCard(hit); }
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'board') { this._openCard(hit); }
@@ -2000,6 +2061,7 @@ class CanvasView {
     el.width = nw; el.height = nh; el.x = ncx - nw / 2; el.y = ncy - nh / 2; el.angle = a;
   }
   _editText(el) {
+    try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
     this.editingId = el.id;
     const ta = document.createElement('textarea'); ta.className = 'pxc-textedit'; this._ta = ta;
@@ -2014,18 +2076,95 @@ class CanvasView {
     place(); this.wrap.appendChild(ta);
     const grow = () => { ta.style.height = '0px'; ta.style.height = ta.scrollHeight + 'px'; };
     setTimeout(() => { ta.focus(); ta.select(); grow(); }, 0);
-    const onInput = () => { el.text = ta.value; measureText(el); place(); grow(); this.dirty = true; };
+    this._refPick = { open: false, mode: null, query: '', triggerStart: 0, rows: [], idx: 0, seq: 0, alias: '', dom: null, timer: null }; // A2 picker state
+    try { this._injectRefPickerCss(); } catch (_e) {}
+    const onInput = () => { el.text = ta.value; measureText(el); place(); grow(); this.dirty = true; this._refDetect(ta, el); };
     const commit = () => {
+      this._closeRefPicker();
       el.text = ta.value; measureText(el);
       if (!String(el.text).trim()) el.isDeleted = true;
       this.editingId = null; this._ta = null; try { ta.remove(); } catch (_e) {}
       this.dirty = true; this.scheduleSave();
     };
+    this._refCommit = commit; // _applyRefChip uses this to finalize a caret-only chip
     ta.addEventListener('input', onInput);
     ta.addEventListener('blur', commit);
-    ta.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Escape') { ev.preventDefault(); ta.blur(); } if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); } });
+    ta.addEventListener('keydown', (ev) => {
+      // A3 alias: capture the highlighted text the instant before '@' replaces it.
+      if (ev.key === '@' && ta.selectionStart !== ta.selectionEnd) this._refPick.alias = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+      if (this._refPick.open) { // A2 picker owns these keys while open
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); this._refMove(1); return; }
+        if (ev.key === 'ArrowUp') { ev.preventDefault(); this._refMove(-1); return; }
+        if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); ev.stopPropagation(); this._refChoose(ta, el); return; }
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); this._closeRefPicker(); return; }
+      }
+      ev.stopPropagation();
+      if (ev.key === 'Escape') { ev.preventDefault(); ta.blur(); }
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); }
+    });
     ta.addEventListener('pointerdown', (ev) => ev.stopPropagation());
     ta.addEventListener('wheel', (ev) => ev.stopPropagation());
+  }
+  // ── A2/A3 inline @/@@ reference picker (dropdown over the text-edit textarea) ──
+  _injectRefPickerCss() {
+    if (document.getElementById('plexus-refpick-css')) return;
+    const s = document.createElement('style'); s.id = 'plexus-refpick-css';
+    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}';
+    document.head.appendChild(s);
+  }
+  _refDetect(ta, el) {
+    const trig = pxcParseRefTrigger(ta.value, ta.selectionStart);
+    if (!trig) { this._closeRefPicker(); return; }
+    const rp = this._refPick; rp.open = true; rp.mode = trig.mode; rp.query = trig.query; rp.triggerStart = trig.triggerStart;
+    if (rp.timer) clearTimeout(rp.timer);
+    if (!trig.query) { rp.rows = []; rp.seq++; this._renderRefPicker(ta); return; } // bare @/@@ → show the prompt, skip the search
+    rp.timer = setTimeout(() => this._runRefSearch(trig.query, trig.mode), 180);
+    this._renderRefPicker(ta);
+  }
+  async _runRefSearch(query, mode) {
+    const rp = this._refPick; if (!rp || !rp.open) return;
+    const seq = ++rp.seq;
+    let res = null; try { res = await this.plugin.data.searchByQuery(query || '', 8); } catch (_e) {}
+    if (seq !== rp.seq || !rp.open || !this._ta) return; // stale result or editor closed
+    const rows = [];
+    if (mode === 'record') { for (const r of (res && res.records || []).slice(0, 8)) rows.push({ kind: 'record', guid: r.guid, label: (r.getName && r.getName()) || 'Untitled', sub: 'record' }); }
+    else { for (const li of (res && res.lines || []).slice(0, 8)) { let recGuid = null, parent = ''; try { const pr = li.getRecord && li.getRecord(); recGuid = pr && pr.guid; parent = (pr && pr.getName && pr.getName()) || ''; } catch (_e) {} rows.push({ kind: 'line', lineGuid: li.guid, guid: recGuid, label: lineTextOf(li) || '(line)', sub: parent || 'line' }); } }
+    rp.rows = rows; rp.idx = 0; this._renderRefPicker(this._ta);
+  }
+  _renderRefPicker(ta) {
+    const rp = this._refPick; if (!rp || !rp.open || !ta) return;
+    let dom = rp.dom; if (!dom) { dom = document.createElement('div'); dom.className = 'pxc-refpicker'; this.wrap.appendChild(dom); rp.dom = dom; }
+    dom.classList.toggle('pxc-dark', !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark());
+    dom.innerHTML = '';
+    if (!rp.rows.length) { const e = document.createElement('div'); e.className = 'pxc-refempty'; e.textContent = rp.query ? 'No matches' : (rp.mode === 'line' ? 'Type to find a line…' : 'Type to find a record…'); dom.appendChild(e); }
+    rp.rows.forEach((row, i) => {
+      const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '');
+      const a = document.createElement('div'); a.className = 'r1'; a.textContent = (rp.mode === 'line' ? '@@ ' : '@ ') + row.label; r.appendChild(a);
+      const b = document.createElement('div'); b.className = 'r2'; b.textContent = row.sub; r.appendChild(b);
+      r.addEventListener('mousedown', (ev) => { ev.preventDefault(); rp.idx = i; this._refChoose(ta, this._byId(this.editingId)); });
+      dom.appendChild(r);
+    });
+    const wr = this.wrap.getBoundingClientRect(), tr = ta.getBoundingClientRect();
+    dom.style.left = (tr.left - wr.left) + 'px'; dom.style.top = (tr.bottom - wr.top + 4) + 'px';
+  }
+  _refMove(d) { const rp = this._refPick; if (!rp.rows.length) return; rp.idx = (rp.idx + d + rp.rows.length) % rp.rows.length; this._renderRefPicker(this._ta); }
+  _refChoose(ta, el) { const rp = this._refPick; const row = rp.rows[rp.idx]; if (!row || !el) { this._closeRefPicker(); return; } this._applyRefChip(ta, el, row); }
+  _closeRefPicker() { const rp = this._refPick; if (!rp) return; if (rp.timer) clearTimeout(rp.timer); if (rp.dom) { try { rp.dom.remove(); } catch (_e) {} } rp.dom = null; rp.open = false; rp.rows = []; }
+  _applyRefChip(ta, el, row) {
+    const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
+    const before = ta.value.slice(0, rp.triggerStart), after = ta.value.slice(ta.selectionStart);
+    const opts = { kind: row.kind, guid: row.guid, lineGuid: row.lineGuid, label: row.label, alias: alias };
+    this._closeRefPicker();
+    if (!before.trim() && !after.trim()) { // caret-only → this element becomes the chip; close the editor
+      this._configureRef(el, opts); this._indexBackref(el);
+      if (this._refCommit) this._refCommit();
+      try { this.plugin.ui.addToaster({ title: 'Reference added — double-click to open.', dismissible: true }); } catch (_e) {}
+    } else { // mid-text → strip the @token, spawn a sibling chip to the right, keep editing the host
+      el.text = before + after; measureText(el);
+      const chip = this._makeRefElement(opts, el.x + Math.abs(el.width) + 12, el.y);
+      this.scene.elements.push(chip); this._indexBackref(chip);
+      ta.value = el.text; this.dirty = true; this.scheduleSave();
+    }
   }
   _imgFor(fileId) { return this.plugin._imgCacheGet(fileId, this.scene.files); } // S9: shared LRU decode cache
   _drawImage(ctx, el) {
@@ -2159,6 +2298,7 @@ class CanvasView {
   }
   // S10: single open path for record/board cards (and @@ ref nodes) — honors the openInNewPanel setting.
   _openCard(el) {
+    if (el.refKind === 'line' && el.refLineGuid) { this._openRefLine(el); return; } // A4: line ref → jump to the line
     const st = this.plugin._settings || {};
     const newPanel = st.openInNewPanel !== false; // default ON = side panel (today's behavior)
     const guid = el.recordGuid || el.refGuid;
@@ -2610,6 +2750,39 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: node.mmFolded ? 'Branch folded.' : 'Branch unfolded.', dismissible: true }); } catch (_e) {}
   }
   // P1.6 (v1): insert an @@ REFERENCE NODE — a clickable text chip linked to a record (double-click opens it).
+  // A1: stamp ref props onto an existing text element (record OR line). Shared by the command, the inline @@ picker,
+  // and AI flows. `refGuid` = record guid (record kind) OR the PARENT record (line kind, so nav has a fallback).
+  _configureRef(el, opts) {
+    const kind = opts.kind === 'line' ? 'line' : 'record';
+    el.isRef = true; el.refKind = kind;
+    el.refGuid = opts.guid || el.refGuid || null;
+    if (kind === 'line') el.refLineGuid = opts.lineGuid || el.refLineGuid || null; else delete el.refLineGuid;
+    el.refLabel = opts.label || el.refLabel || 'record';
+    if (opts.alias != null && String(opts.alias).trim()) el.refAlias = String(opts.alias).trim();
+    el.text = (kind === 'line' ? '@@' : '@') + (el.refAlias || el.refLabel || 'ref');
+    el.strokeColor = kind === 'line' ? '#0ea5e9' : '#7c5cff'; // line refs cyan, record refs purple
+    measureText(el);
+    return el;
+  }
+  _makeRefElement(opts, x, y) { const el = makeText(this._snap(x), this._snap(y), { fontSize: 16, stroke: '#7c5cff' }); return this._configureRef(el, opts); }
+  // CANVAS-BACK-1: index this chip under the guid it POINTS AT, so the note side can fly back to it (cinematic).
+  _indexBackref(el) {
+    // Only LINE refs surface a note-side ↗ badge — `_scanRefBadges` matches `.listitem[data-guid]` (line guids);
+    // a record guid never matches a listitem, so indexing record refs would be dead storage. Record→canvas flyback
+    // (record-page header badge) is deferred to EAPI-3 along with cross-device sync.
+    if (!el || !el.isRef || el.refKind !== 'line' || !el.refLineGuid) return;
+    try { this.plugin._registerBackref(el.refLineGuid, { drawing: this.recordGuid, el: el.id, label: el.refAlias || el.refLabel || 'ref' }); } catch (_e) {}
+  }
+  // A4: open a line ref → jump to the exact LINE (Nav-plugin pulse); fall back to a fresh panel, then the parent record.
+  async _openRefLine(el) {
+    const lg = el.refLineGuid; if (!lg) { if (el.refGuid) this._openCard({ refGuid: el.refGuid }); return; }
+    const here = this.panel || (this.plugin.ui.getActivePanel && this.plugin.ui.getActivePanel());
+    if (here) { try { const ok = await here.navigateTo({ itemGuid: lg, highlight: true }); if (ok) return; } catch (_e) {} }
+    let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
+    if (panel) { try { const ok = await panel.navigateTo({ itemGuid: lg, highlight: true }); if (ok) return; } catch (_e) {} }
+    if (el.refGuid) { this._openRecord(el.refGuid); return; } // line gone → open its parent record
+    try { this.plugin.ui.addToaster({ title: 'Plexus: the referenced line could not be found.', dismissible: true }); } catch (_e) {}
+  }
   async _insertRef() {
     const q = await this._promptText('Reference a record — search:', '');
     if (!q) return null;
@@ -2617,9 +2790,8 @@ class CanvasView {
     if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: no record matched “' + q + '”.', dismissible: true }); } catch (_e) {} return null; }
     const name = (rec.getName && rec.getName()) || 'record';
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-    const el = makeText(this._snap(c.x), this._snap(c.y), { fontSize: 16, stroke: '#7c5cff' });
-    el.text = '@' + name; el.refGuid = rec.guid; el.isRef = true; measureText(el);
-    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
+    const el = this._makeRefElement({ kind: 'record', guid: rec.guid, label: name }, c.x, c.y);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._indexBackref(el); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Reference inserted — double-click to open ' + name + '.', dismissible: true }); } catch (_e) {}
     return el.id;
   }
@@ -3075,6 +3247,35 @@ class CanvasView {
     this.selected.clear(); for (const e of els) { this.scene.elements.push(e); this.selected.add(e.id); }
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
+  }
+  // B3: import a /cause-effect-chart JSON → native RCA elements at the viewport centre.
+  async _ceImportJson() {
+    const raw = await this._promptText('Paste a cause-effect chart JSON (from /cause-effect-chart):', '');
+    if (!raw) return;
+    let chart = null; try { chart = JSON.parse(raw); } catch (_e) { const m = String(raw).match(/\{[\s\S]*\}/); if (m) { try { chart = JSON.parse(m[0]); } catch (_e2) {} } }
+    if (!chart || !Array.isArray(chart.nodes) || !chart.nodes.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: not a valid cause-effect chart (needs a "nodes" array).', dismissible: true }); } catch (_e) {} return; }
+    const prim = chart.nodes.filter((n) => n && n.role === 'primary').length;
+    if (prim !== 1) { try { this.plugin.ui.addToaster({ title: 'Plexus: chart should have exactly one "primary" effect (found ' + prim + ').', dismissible: true }); } catch (_e) {} }
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 120);
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to draw from that chart.', dismissible: true }); } catch (_e) {} return; }
+    this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Cause & effect: ' + els.length + ' element(s) imported.', dismissible: true }); } catch (_e) {}
+  }
+  // B3: scaffold a starter cause-&-effect (right-branching) the user fleshes out.
+  _newCauseEffect() {
+    const chart = { nodes: [
+      { id: 'p', text: 'Effect / problem', role: 'primary' },
+      { id: 'c1', text: 'Cause', role: 'action' },
+      { id: 'c2', text: 'Condition: a standing state', role: 'condition', terminator: 'end' },
+      { id: 'c3', text: 'Unknown — needs evidence', role: 'neutral', terminator: 'question' },
+    ], edges: [{ effect: 'p', cause: 'c1' }, { effect: 'c1', cause: 'c2' }, { effect: 'c1', cause: 'c3' }], connections: [] };
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const els = elementsFromCauseEffect(chart, c.x - 120, c.y - 80);
+    this.selected.clear(); for (const e of els) { this.scene.elements.push(e); if (e.ceRole) this.selected.add(e.id); }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Cause-&-effect starter added — edit the boxes; causes branch to the right.', dismissible: true }); } catch (_e) {}
   }
   // P2: CSV → bar chart. Paste/enter `label,value` rows; generates editable bars + labels.
   async _chartFromCsv() {
@@ -3611,6 +3812,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fold / unfold mind-map branch', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmToggleFold(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind-map layout (cycle direction)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmCycleLayout(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin / unpin mind-map node', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mmTogglePin(n); else { try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } } }); // CP-3 v3b
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New cause-and-effect (fishbone)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._newCauseEffect(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Import cause-effect chart (JSON)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._ceImportJson(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
@@ -3672,7 +3875,7 @@ class Plugin extends AppPlugin {
     document.addEventListener('click', onDocClick, true); reg.add(() => document.removeEventListener('click', onDocClick, true));
     // Overlay a ↗ badge onto each pasted image-reference: scan on navigation + a light interval backstop.
     try { this._injectImgRefCss(); } catch (_e) {}
-    const scan = () => { try { this._scanImageBadges(); } catch (_e) {} };
+    const scan = () => { try { this._scanImageBadges(); } catch (_e) {} try { this._scanRefBadges(); } catch (_e) {} };
     // On navigation, also reconstruct the index from synced image-blob filenames (web↔desktop parity).
     const syncNav = (e) => { try { const r = e && e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r) this._syncImageRefsForRecord(r); else scan(); } catch (_e) { scan(); } };
     try { this.events.on('panel.navigated', syncNav); this.events.on('panel.focused', syncNav); this.events.on('lineitem.created', scan); this.events.on('lineitem.updated', scan); } catch (_e) {}
@@ -3851,10 +4054,23 @@ class Plugin extends AppPlugin {
     const x = this._loadXref(); x[lineGuid] = Object.assign({ t: Date.now() }, data); this._saveXref(x);
     for (const v of this._views) { if (v.recordGuid === data.drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } }
   }
+  // CANVAS-BACK-1: reverse index keyed by the TARGET line/record guid → the canvas chip pointing at it. Lets the
+  // cited note line fly back to the canvas (reuses _navToCanvasAnchor + the cinematic flight). Mirrors _xref plumbing.
+  _loadBackref() { try { return JSON.parse(localStorage.getItem('plexus_backref') || '{}'); } catch (_e) { return {}; } }
+  _saveBackref(x) {
+    try { localStorage.setItem('plexus_backref', JSON.stringify(x)); } catch (_e) {
+      try { const ents = Object.entries(x).sort((a, b) => (a[1] && a[1].t || 0) - (b[1] && b[1].t || 0)); const keep = {}; for (const [k, v] of ents.slice(Math.floor(ents.length / 2))) keep[k] = v; localStorage.setItem('plexus_backref', JSON.stringify(keep)); } catch (_e2) {}
+    }
+  }
+  _lookupBackref(guid) { const x = this._loadBackref(); return x[guid] || null; }
+  _registerBackref(guid, data) {
+    if (!guid || !data || !data.drawing) return;
+    const x = this._loadBackref(); x[guid] = Object.assign({ t: Date.now() }, data); this._saveBackref(x);
+  }
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-imgref-css';
-    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}';
     document.head.appendChild(s);
   }
   // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
@@ -3872,6 +4088,21 @@ class Plugin extends AppPlugin {
       badge.title = 'Open the drawing and zoom to “' + (entry.label || 'this reference') + '”';
       badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
       wrap.appendChild(badge);
+    }
+  }
+  // CANVAS-BACK-1: pin a ↗ on each note line/record that a canvas @@/@ chip points at → click flies to the canvas
+  // chip (cinematic, via _navToCanvasAnchor). Inline badge (plain text lines have no image to attach to).
+  _scanRefBadges() {
+    let idx; try { idx = this._loadBackref(); } catch (_e) { return; }
+    let any = false; for (const k in idx) { any = true; break; } if (!any) return;
+    for (const li of document.querySelectorAll('.listitem[data-guid]')) {
+      const g = li.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing) continue;
+      if (li.querySelector(':scope .plexus-backref-badge')) continue;
+      const host = li.querySelector('.lineitem-text') || li.querySelector('.line-div') || li;
+      const badge = document.createElement('span'); badge.className = 'plexus-backref-badge'; badge.textContent = '↗';
+      badge.title = 'Zoom to “' + (entry.label || 'this') + '” on the canvas';
+      badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
+      host.appendChild(badge);
     }
   }
   // Cross-ref encoded in the image blob filename (synced metadata → works on web AND desktop, not just the
@@ -4292,6 +4523,47 @@ class Plugin extends AppPlugin {
         const sample = [{ type: 'rectangle', x: 0, y: 0, w: 120, h: 60, text: 'Ingest', color: '#7c5cff' }, { type: 'ellipse', x: 190, y: 0, w: 90, h: 90, text: 'Transform' }, { type: 'arrow', x: 120, y: 30, w: 70, h: 15 }, { type: 'text', x: 0, y: 130, text: 'pipeline' }];
         const els = elementsFromAiJson(sample, 0, 0); const types = els.map((e) => e.type);
         return { count: els.length, types, ok: els.length === 6 && types.includes('rectangle') && types.includes('ellipse') && types.includes('arrow') && types.filter((t) => t === 'text').length === 3 };
+      },
+      // A2: @/@@ trigger parser (the highest-risk UX gate).
+      refTriggerTest: () => {
+        const t = (s, c) => pxcParseRefTrigger(s, c == null ? s.length : c);
+        const a = t('@@oreg'), b = t('hello @bob'), c2 = t('a@@ b'), d = t('email@x'), e = t('@');
+        return { a, b, c: c2, d, e, ok:
+          !!a && a.mode === 'line' && a.query === 'oreg' && a.triggerStart === 0 &&
+          !!b && b.mode === 'record' && b.query === 'bob' && b.triggerStart === 6 &&
+          c2 === null && d === null && !!e && e.mode === 'record' && e.query === '' };
+      },
+      // A1/A3: ref-chip configuration (record vs line, alias precedence, @/@@ prefix).
+      refChipTest: () => {
+        const view = v(); if (!view) return { error: 'no view' };
+        const r = makeText(0, 0, { fontSize: 16 }); view._configureRef(r, { kind: 'record', guid: 'REC1', label: 'Oregon' });
+        const l = makeText(0, 0, { fontSize: 16 }); view._configureRef(l, { kind: 'line', guid: 'REC2', lineGuid: 'LINE1', label: 'a snippet', alias: 'see here' });
+        return { r: { kind: r.refKind, guid: r.refGuid, text: r.text }, l: { kind: l.refKind, line: l.refLineGuid, text: l.text },
+          ok: r.refKind === 'record' && r.refGuid === 'REC1' && r.text === '@Oregon' && r.isRef === true && r.width > 0 &&
+              l.refKind === 'line' && l.refGuid === 'REC2' && l.refLineGuid === 'LINE1' && l.text === '@@see here' };
+      },
+      // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
+      backrefRoundTripTest: () => {
+        const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: 'D', el: 'E', label: 'L' });
+        const got = this._lookupBackref(k);
+        try { const x = this._loadBackref(); delete x[k]; this._saveBackref(x); } catch (_e) {}
+        return { got, ok: !!got && got.drawing === 'D' && got.el === 'E' && got.label === 'L' };
+      },
+      // B2: cause-effect JSON → elements (house-fire shape: 8 nodes / 7 edges / 1 connection).
+      ceParseTest: () => {
+        const chart = { nodes: [
+          { id: 'p', text: 'House burned', role: 'primary' }, { id: 'a', text: 'Fire', role: 'neutral' },
+          { id: 'b', text: 'Fuel', role: 'neutral', terminator: 'end' }, { id: 'c', text: 'Heat', role: 'neutral', terminator: 'end' },
+          { id: 'd', text: 'Oxygen', role: 'neutral', terminator: 'end' }, { id: 'e', text: 'Ignition: drapery', role: 'neutral', terminator: 'end' },
+          { id: 'f', text: 'Unknown', role: 'neutral', terminator: 'question' }, { id: 'g', text: 'Drapery near heater', role: 'neutral' },
+        ], edges: [
+          { effect: 'p', cause: 'a' }, { effect: 'a', cause: 'b' }, { effect: 'a', cause: 'c' }, { effect: 'a', cause: 'd' },
+          { effect: 'c', cause: 'e' }, { effect: 'e', cause: 'f' }, { effect: 'e', cause: 'g' },
+        ], connections: [{ from: 'g', to: 'c', label: 'Connects to' }] };
+        const els = elementsFromCauseEffect(chart, 0, 0);
+        const boxes = els.filter((e) => e.ceRole).length, arrows = els.filter((e) => e.type === 'arrow' && !e.ceConnector).length;
+        const connectors = els.filter((e) => e.ceConnector).length, terms = els.filter((e) => e.ceTerminator).length, primaries = els.filter((e) => e.ceRole === 'primary').length;
+        return { boxes, arrows, connectors, terms, primaries, ok: boxes === 8 && arrows === 7 && connectors >= 1 && terms >= 1 && primaries === 1 };
       },
       // Phase 10 E14: re-date in place — create an Event, set its Scheduled datetime, return for MCP verify.
       scheduleTest: async () => {
