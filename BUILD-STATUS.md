@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.12.0 — TRANSCLUDE: live embed vs ref at insert time (2026-06-19, plan: staged-finding-ritchie Phase B2)
+The @/@@ picker now offers **ref vs transclude**: every result row has a ⧉ "embed" button (or Shift+Enter) that drops
+a **live read-only card** instead of a link.
+- **Record transclude** reuses the existing `record` card element wholesale (already a live transclusion — no fork).
+- **Line transclude** = NEW `linecard` element (`makeLineCard`): embeds the line's text + its child lines, cyan accent.
+  `_lineFor` cache mirrors `_taskFor` (record-gone/line-gone guards); `getLineItems()` AND `getChildren()` both
+  awaited + null-normalized (**getChildren returns a Promise — caught in review**). Wired into BOTH render dispatch
+  sites, `hitElement` bbox whitelist, the resize-handle hit-test AND **draw** allowlist (review caught the draw
+  omission — also fixed the inherited `task` gap), and dblclick (→ jumps to the source line).
+- **Live refresh:** `onRecChange` calls `_invalidateLinesForRecord(g)` on record.updated + all lineitem.* — record-
+  scoped so a CHILD-line edit (event carries the parent recordGuid) invalidates the card too. `entry.recordGuid` stored.
+- **`_applyTranscludeRow`:** strips the @token from the host (re-syncs `el.runs` via the same `applyFlatEdit` machinery),
+  drops the card below the editing element. Rejects a line row with no parent record (toaster). Forward-nav-only.
+- **Verify:** 4/4 node asserts (`lineCardTest`: shape + bbox hit) + adversarial `code-reviewer` (all 6 invariants;
+  fixed the handle-draw omission). Record/ref/create paths byte-unchanged. PNG/SVG export no-op on linecard (like
+  record/task today).
+
 ## ✅ v1.11.0 — SEARCH-CREATE: create-if-missing in the @-ref picker (2026-06-19, plan: staged-finding-ritchie Phase B1)
 When the `@`-ref picker finds no exact-title record, a green "＋ Create '<query>'" row appears; choosing it opens an
 in-panel collection picker, creates the record, and binds it as a ref — Thymer-native @-create.

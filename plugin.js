@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.11.0';
+const PLEXUS_VERSION = '1.12.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -781,6 +781,15 @@ function makeTaskNode(x, y, w, h, lineGuid, recordGuid) {
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+// TRANSCLUDE: a live read-only embed of a single LINE (its text + child lines), backed by lineGuid on recordGuid.
+// Text re-fetched via _lineFor; repaints on lineitem.* (record-scoped invalidation covers child edits).
+function makeLineCard(x, y, w, h, lineGuid, recordGuid) {
+  return {
+    id: newId(), type: 'linecard', x, y, width: w, height: h, angle: 0, lineGuid, recordGuid,
+    strokeColor: '#0ea5e9', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
 // Phase 9 E2: a LIVE query node — runs a searchByQuery and lists matching records, re-runs on changes.
 function makeQueryNode(x, y, w, h, query) {
   return {
@@ -847,7 +856,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -1124,6 +1133,7 @@ class Canvas2DRenderer {
     const v = this.view, ctx = this.ctx, t = el.type;
     if (t === 'image') v._drawImage(ctx, el);
     else if (t === 'record') v._drawRecordCard(ctx, el);
+    else if (t === 'linecard') v._drawLineCard(ctx, el);
     else if (t === 'query') v._drawQueryNode(ctx, el);
     else if (t === 'board') v._drawBoardCard(ctx, el);
     else if (t === 'task') v._drawTaskNode(ctx, el);
@@ -1187,7 +1197,7 @@ class WebGLRenderer {
   element(el) {
     const v = this.view, ctx = this.ctx, t = el.type;
     if (this.gl && t === 'image' && !el.angle && !el.isDeleted) { const img = v._imgFor && v._imgFor(el.fileId); if (img && img.complete && img.naturalWidth) { this._images.push({ el, img }); return; } }
-    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
+    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
   end() {
@@ -1923,7 +1933,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
+        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -2094,6 +2104,7 @@ class CanvasView {
       if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
       else if (hit && hit.type === 'record') { this._openCard(hit); }
+      else if (hit && hit.type === 'linecard') { this._openCard({ refKind: 'line', refLineGuid: hit.lineGuid, refGuid: hit.recordGuid }); } // TRANSCLUDE: dblclick jumps to the source line
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'board') { this._openCard(hit); }
       else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
@@ -2210,7 +2221,7 @@ class CanvasView {
       if (this._refPick.open) { // A2 picker owns these keys while open
         if (ev.key === 'ArrowDown') { ev.preventDefault(); this._refMove(1); return; }
         if (ev.key === 'ArrowUp') { ev.preventDefault(); this._refMove(-1); return; }
-        if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); ev.stopPropagation(); this._refChoose(ta, el); return; }
+        if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); ev.stopPropagation(); if (ev.shiftKey) { const row = this._refPick.rows[this._refPick.idx]; if (row && !row.create) row.transclude = true; } this._refChoose(ta, el); return; } // Shift+Enter = transclude
         if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); this._closeRefPicker(); return; }
       }
       ev.stopPropagation();
@@ -2224,7 +2235,7 @@ class CanvasView {
   _injectRefPickerCss() {
     if (document.getElementById('plexus-refpick-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-refpick-css';
-    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}.pxc-refrow.pxc-create .r1{color:#16a34a;font-weight:700}.pxc-collist{max-height:280px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px}.pxc-colrow{padding:7px 10px;border-radius:6px;cursor:pointer;font:13px/1.2 system-ui,sans-serif}.pxc-colrow:hover,.pxc-colrow.active{background:rgba(124,92,255,.18)}';
+    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{position:relative;padding:6px 34px 6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refembed{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:rgba(14,165,233,.14);color:#0ea5e9;border-radius:5px;cursor:pointer;font-size:13px;line-height:1;padding:4px 7px}.pxc-refembed:hover{background:rgba(14,165,233,.3)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}.pxc-refrow.pxc-create .r1{color:#16a34a;font-weight:700}.pxc-collist{max-height:280px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px}.pxc-colrow{padding:7px 10px;border-radius:6px;cursor:pointer;font:13px/1.2 system-ui,sans-serif}.pxc-colrow:hover,.pxc-colrow.active{background:rgba(124,92,255,.18)}';
     document.head.appendChild(s);
   }
   _refDetect(ta, el) {
@@ -2258,6 +2269,7 @@ class CanvasView {
       const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '') + (row.create ? ' pxc-create' : '');
       const a = document.createElement('div'); a.className = 'r1'; a.textContent = row.create ? ('＋ Create “' + row.label + '”') : ((rp.mode === 'line' ? '@@ ' : '@ ') + row.label); r.appendChild(a);
       const b = document.createElement('div'); b.className = 'r2'; b.textContent = row.sub; r.appendChild(b);
+      if (!row.create) { const emb = document.createElement('button'); emb.className = 'pxc-refembed'; emb.textContent = '⧉'; emb.title = 'Transclude (live embed) — or Shift+Enter'; emb.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.transclude = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(emb); } // TRANSCLUDE
       r.addEventListener('mousedown', (ev) => { ev.preventDefault(); rp.idx = i; this._refChoose(ta, this._byId(this.editingId)); });
       dom.appendChild(r);
     });
@@ -2269,6 +2281,7 @@ class CanvasView {
   _closeRefPicker() { const rp = this._refPick; if (!rp) return; if (rp.timer) clearTimeout(rp.timer); if (rp.dom) { try { rp.dom.remove(); } catch (_e) {} } rp.dom = null; rp.open = false; rp.rows = []; }
   _applyRefChip(ta, el, row) {
     if (row && row.create) { this._applyCreateRef(ta, el, row); return; } // SEARCH-CREATE
+    if (row && row.transclude) { this._applyTranscludeRow(ta, el, row); return; } // TRANSCLUDE
     const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
     const before = ta.value.slice(0, rp.triggerStart), after = ta.value.slice(ta.selectionStart);
     const opts = { kind: row.kind, guid: row.guid, lineGuid: row.lineGuid, label: row.label, alias: alias };
@@ -2291,6 +2304,26 @@ class CanvasView {
       this.dirty = true; this.scheduleSave();
       try { this.plugin.ui.addToaster({ title: 'Inline reference added.', dismissible: true }); } catch (_e) {} // inline line refs are forward-nav only (no note-side badge) by design
     }
+  }
+  // TRANSCLUDE: the user chose "embed" (⧉ button / Shift+Enter). Strip the @token from the host text, then drop a LIVE
+  // read-only card below the editing element — a record target reuses the existing record card (already live), a line
+  // target uses the new linecard. Forward-nav-only (dblclick jumps to source); no note-side badge by design.
+  _applyTranscludeRow(ta, el, row) {
+    if (row.kind === 'line' && !row.guid) { this._closeRefPicker(); try { this.plugin.ui.addToaster({ title: 'Plexus: can’t embed this line (no parent record).', dismissible: true }); } catch (_e) {} return; }
+    const rp = this._refPick; const start = rp.triggerStart, flat = ta.value, before = flat.slice(0, start), after = flat.slice(ta.selectionStart);
+    this._closeRefPicker();
+    ta.value = before + after; // transclude is a separate card, not inline text → remove the @token
+    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs)) delete el.runs; }
+    el.text = ta.value; if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
+    if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value);
+    if (this._refRefresh) this._refRefresh();
+    const ny = el.y + Math.abs(el.height || 0) + 16;
+    const card = (row.kind === 'line' && row.lineGuid)
+      ? makeLineCard(this._snap(el.x), this._snap(ny), 300, 150, row.lineGuid, row.guid)
+      : makeRecordCard(this._snap(el.x), this._snap(ny), 260, 160, row.guid);
+    this.scene.elements.push(card);
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Transcluded “' + (row.label || '') + '” (live embed).', dismissible: true }); } catch (_e) {}
   }
   // SEARCH-CREATE: the user chose "Create '<query>'". Capture the splice context, strip just the '@' so the editor
   // commits a non-empty, literal-@-free value (NO blur race against the modal), then create + bind asynchronously.
@@ -2757,6 +2790,49 @@ class CanvasView {
     return null;
   }
   _invalidateTask(lineGuid) { if (this._taskCache && this._taskCache.has(lineGuid)) { this._taskCache.delete(lineGuid); this.dirty = true; } }
+  // TRANSCLUDE: live line-card cache (text + children). Mirrors _taskFor's gone-guards; null-normalizes
+  // getLineItems()/getChildren() (Go-nil / unresolved → []). Stores recordGuid so a child-line edit (which fires
+  // with the parent's recordGuid, not this line's guid) invalidates the card via _invalidateLinesForRecord.
+  _lineFor(el) {
+    if (!this._lineCache) this._lineCache = new Map();
+    const key = el.lineGuid; if (!key) return null;
+    const c = this._lineCache.get(key); if (c) return c.ready ? c : null;
+    const entry = { ready: false, text: '', children: [], title: '', recordGuid: el.recordGuid }; this._lineCache.set(key, entry);
+    (async () => {
+      try {
+        const rec = await this.plugin.data.getRecord(el.recordGuid); if (!rec) { entry.text = '(record gone)'; entry.ready = true; this.dirty = true; return; }
+        try { entry.title = (rec.getName && rec.getName()) || ''; } catch (_e) {}
+        const items = (await rec.getLineItems()) || [];
+        const li = items.find((x) => x.guid === key);
+        if (!li) { entry.text = '(line gone)'; entry.ready = true; this.dirty = true; return; }
+        entry.text = lineTextOf(li);
+        let kids = []; try { if (li.getChildren) kids = (await li.getChildren()) || []; } catch (_e) {} // getChildren() returns a Promise — must await
+        entry.children = (kids || []).map(lineTextOf).filter(Boolean).slice(0, 12);
+        entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateLine(lineGuid) { if (this._lineCache && this._lineCache.has(lineGuid)) { this._lineCache.delete(lineGuid); this.dirty = true; } }
+  _invalidateLinesForRecord(g) { if (!this._lineCache) return; let ch = false; for (const [k, v] of this._lineCache) { if (v && v.recordGuid === g) { this._lineCache.delete(k); ch = true; } } if (ch) this.dirty = true; }
+  _drawLineCard(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
+    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#0ea5e9'; ctx.stroke();
+    ctx.save(); ctx.clip();
+    const data = this._lineFor(el); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
+    ctx.fillStyle = el.strokeColor || '#0ea5e9'; ctx.fillRect(x, y, 4, h); // cyan accent stripe (a transcluded LINE)
+    ctx.textBaseline = 'top';
+    if (!data) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
+    if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
+    ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
+    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
+    for (const ln of data.children) { if (ty > y + h - 14) break; ctx.fillText(this._clipText(ctx, '• ' + ln, maxW), tx, ty); ty += 16; }
+    ctx.restore(); ctx.restore();
+  }
   async _toggleTaskNode(el) {
     const t = this._taskFor(el); if (!t || !t.li) return; // not loaded yet — ignore the click
     const next = t.done ? 'none' : 'done';
@@ -3884,7 +3960,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
+    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -4023,7 +4099,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1: refresh task nodes on external edits
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1 + TRANSCLUDE: refresh task/line-card nodes on external edits (record-scoped so child-line edits invalidate linecards too)
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
@@ -4760,6 +4836,12 @@ class Plugin extends AppPlugin {
         const out = spliceRunRange(baseRuns, 5, 11, { t: 'ref', kind: 'record', guid: 'NEW', label: 'Oregon' });
         const flat = flattenRuns(out), ref = out.find((r) => r.t === 'ref');
         return { noExact, exact, bare, flat, ok: noExact === false && exact === true && bare === true && flat === 'note Oregon end' && flat.indexOf('@') === -1 && !!ref && ref.guid === 'NEW' };
+      },
+      // TRANSCLUDE: linecard element shape + bbox hit-test (verifies the hit/resize whitelist edits).
+      lineCardTest: () => {
+        const el = makeLineCard(10, 10, 200, 100, 'L1', 'R1');
+        const inside = hitElement(el, 60, 40, 4), outside = hitElement(el, 999, 999, 4);
+        return { type: el.type, inside, outside, ok: el.type === 'linecard' && el.lineGuid === 'L1' && el.recordGuid === 'R1' && inside === true && outside === false };
       },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {
