@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.13.0 — IMG-REF: image-target references (2026-06-19, plan: staged-finding-ritchie Phase B3) — Phase B COMPLETE
+A ref whose target is an **image attachment line**, rendered as a violet `▣` chip, opened in an in-panel **lightbox**.
+- **Scope = attachment LINES, not records.** Sidesteps the unreliable `getBanner()` "is-image" detection (Blocker 1) by
+  probing the line's `getBlob().contentType` directly (the reliable signal). Image RECORDS (banner) are a coded fallback
+  but not surfaced in v1.
+- **Detection:** `_probeImageRows` async-probes each `@@` line row's `getBlob()`; image rows show a 🖼 button (replacing
+  ⧉). `row._li` (live SDK line item) is transient-on-the-picker-row only — never reaches a scene element / the save path.
+- **Resolve (Blocker 2 — no getLineItemByGuid):** the chip stores `refGuid`=PARENT record + `refLineGuid`=attachment
+  line; `_openImageRef` resolves via `getRecord(refGuid)→getLineItems()→find(refLineGuid)→getBlob()`. Null-blob → falls
+  back to jumping to the line/record.
+- **Lightbox `_showLightbox`:** `blob.download()`→ArrayBuffer→Blob→objectURL→`<img>`; capture-phase Esc (beats the
+  canvas key handler), backdrop closes, image-click doesn't; `close()` is idempotent and revokes the objectURL + removes
+  the listener (no leak). Reuses the existing banner→blob→objectURL pattern.
+- **`_configureRef` kind='image':** violet `#a855f7`, `▣ ` prefix; record/line branches byte-unchanged. Image refs are
+  forward-only (`_indexBackref` skips refKind!=='line'). No scene-thumbnail (avoids the transient-fileId bloat blocker).
+- **Verify:** 8/8 node asserts (`imgRefTest` + record/line back-compat) + adversarial `code-reviewer` = **CLEAN**.
+
 ## ✅ v1.12.0 — TRANSCLUDE: live embed vs ref at insert time (2026-06-19, plan: staged-finding-ritchie Phase B2)
 The @/@@ picker now offers **ref vs transclude**: every result row has a ⧉ "embed" button (or Shift+Enter) that drops
 a **live read-only card** instead of a link.

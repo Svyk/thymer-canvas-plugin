@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.12.0';
+const PLEXUS_VERSION = '1.13.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2235,7 +2235,7 @@ class CanvasView {
   _injectRefPickerCss() {
     if (document.getElementById('plexus-refpick-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-refpick-css';
-    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{position:relative;padding:6px 34px 6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refembed{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:rgba(14,165,233,.14);color:#0ea5e9;border-radius:5px;cursor:pointer;font-size:13px;line-height:1;padding:4px 7px}.pxc-refembed:hover{background:rgba(14,165,233,.3)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}.pxc-refrow.pxc-create .r1{color:#16a34a;font-weight:700}.pxc-collist{max-height:280px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px}.pxc-colrow{padding:7px 10px;border-radius:6px;cursor:pointer;font:13px/1.2 system-ui,sans-serif}.pxc-colrow:hover,.pxc-colrow.active{background:rgba(124,92,255,.18)}';
+    s.textContent = '.pxc-refpicker{position:absolute;z-index:30;min-width:220px;max-width:340px;max-height:240px;overflow-y:auto;background:var(--cards-bg,#fff);border:1px solid var(--cards-border-color,#d0d0d0);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;font:13px/1.3 system-ui,sans-serif;color:#1e1e1e}.pxc-refpicker.pxc-dark{background:#1b1f2a;border-color:#333a4a;color:#e6e8ee}.pxc-refrow{position:relative;padding:6px 34px 6px 8px;border-radius:6px;cursor:pointer;display:flex;flex-direction:column;gap:1px}.pxc-refrow.active{background:rgba(124,92,255,.18)}.pxc-refembed{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:rgba(14,165,233,.14);color:#0ea5e9;border-radius:5px;cursor:pointer;font-size:13px;line-height:1;padding:4px 7px}.pxc-refembed:hover{background:rgba(14,165,233,.3)}.pxc-imgbtn{background:rgba(168,85,247,.16)}.pxc-imgbtn:hover{background:rgba(168,85,247,.34)}.pxc-refrow .r1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refrow .r2{font-size:11px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pxc-refempty{padding:8px;opacity:.6;font-size:12px}.pxc-refrow.pxc-create .r1{color:#16a34a;font-weight:700}.pxc-collist{max-height:280px;overflow-y:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px}.pxc-colrow{padding:7px 10px;border-radius:6px;cursor:pointer;font:13px/1.2 system-ui,sans-serif}.pxc-colrow:hover,.pxc-colrow.active{background:rgba(124,92,255,.18)}';
     document.head.appendChild(s);
   }
   _refDetect(ta, el) {
@@ -2254,10 +2254,22 @@ class CanvasView {
     if (seq !== rp.seq || !rp.open || !this._ta) return; // stale result or editor closed
     const rows = [];
     if (mode === 'record') { for (const r of (res && res.records || []).slice(0, 8)) rows.push({ kind: 'record', guid: r.guid, label: (r.getName && r.getName()) || 'Untitled', sub: 'record' }); }
-    else { for (const li of (res && res.lines || []).slice(0, 8)) { let recGuid = null, parent = ''; try { const pr = li.getRecord && li.getRecord(); recGuid = pr && pr.guid; parent = (pr && pr.getName && pr.getName()) || ''; } catch (_e) {} rows.push({ kind: 'line', lineGuid: li.guid, guid: recGuid, label: lineTextOf(li) || '(line)', sub: parent || 'line' }); } }
+    else { for (const li of (res && res.lines || []).slice(0, 8)) { let recGuid = null, parent = ''; try { const pr = li.getRecord && li.getRecord(); recGuid = pr && pr.guid; parent = (pr && pr.getName && pr.getName()) || ''; } catch (_e) {} rows.push({ kind: 'line', lineGuid: li.guid, guid: recGuid, label: lineTextOf(li) || '(line)', sub: parent || 'line', _li: li }); } } // _li (transient) → image probe
     // SEARCH-CREATE: no exact-title record? offer a "Create" row (record mode only — a line can't exist without a record).
     if (mode === 'record' && query && query.trim() && !pxcHasExactTitle(rows, query)) rows.push({ kind: 'record', create: true, label: query.trim(), sub: 'Create new record' });
     rp.rows = rows; rp.idx = 0; this._renderRefPicker(this._ta);
+    if (mode === 'line') this._probeImageRows(rows, seq); // IMG-REF: detect image attachment lines, then re-render with a 🖼 affordance
+  }
+  // IMG-REF: probe each line row for an image blob (the reliable signal — getBanner is unreliable per the SDK). Sets
+  // row.image so the picker shows a 🖼 button. Async + post-render so rows appear instantly; badges follow.
+  async _probeImageRows(rows, seq) {
+    let any = false;
+    for (const row of rows) {
+      if (row.kind !== 'line' || !row._li || !row.guid) continue; // need a parent record guid to resolve the line later
+      try { const blob = await row._li.getBlob(); if (blob && /^image\//.test(blob.contentType || '')) { row.image = true; any = true; } } catch (_e) {}
+    }
+    const rp = this._refPick;
+    if (any && rp && rp.open && rp.seq === seq && this._ta) this._renderRefPicker(this._ta);
   }
   _renderRefPicker(ta) {
     const rp = this._refPick; if (!rp || !rp.open || !ta) return;
@@ -2269,7 +2281,8 @@ class CanvasView {
       const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '') + (row.create ? ' pxc-create' : '');
       const a = document.createElement('div'); a.className = 'r1'; a.textContent = row.create ? ('＋ Create “' + row.label + '”') : ((rp.mode === 'line' ? '@@ ' : '@ ') + row.label); r.appendChild(a);
       const b = document.createElement('div'); b.className = 'r2'; b.textContent = row.sub; r.appendChild(b);
-      if (!row.create) { const emb = document.createElement('button'); emb.className = 'pxc-refembed'; emb.textContent = '⧉'; emb.title = 'Transclude (live embed) — or Shift+Enter'; emb.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.transclude = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(emb); } // TRANSCLUDE
+      if (row.image) { const ib = document.createElement('button'); ib.className = 'pxc-refembed pxc-imgbtn'; ib.textContent = '🖼'; ib.title = 'Insert image reference (opens a lightbox)'; ib.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.imageRef = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(ib); } // IMG-REF
+      else if (!row.create) { const emb = document.createElement('button'); emb.className = 'pxc-refembed'; emb.textContent = '⧉'; emb.title = 'Transclude (live embed) — or Shift+Enter'; emb.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.transclude = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(emb); } // TRANSCLUDE
       r.addEventListener('mousedown', (ev) => { ev.preventDefault(); rp.idx = i; this._refChoose(ta, this._byId(this.editingId)); });
       dom.appendChild(r);
     });
@@ -2281,6 +2294,7 @@ class CanvasView {
   _closeRefPicker() { const rp = this._refPick; if (!rp) return; if (rp.timer) clearTimeout(rp.timer); if (rp.dom) { try { rp.dom.remove(); } catch (_e) {} } rp.dom = null; rp.open = false; rp.rows = []; }
   _applyRefChip(ta, el, row) {
     if (row && row.create) { this._applyCreateRef(ta, el, row); return; } // SEARCH-CREATE
+    if (row && row.imageRef) { this._applyImageRefRow(ta, el, row); return; } // IMG-REF
     if (row && row.transclude) { this._applyTranscludeRow(ta, el, row); return; } // TRANSCLUDE
     const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
     const before = ta.value.slice(0, rp.triggerStart), after = ta.value.slice(ta.selectionStart);
@@ -2324,6 +2338,60 @@ class CanvasView {
     this.scene.elements.push(card);
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Transcluded “' + (row.label || '') + '” (live embed).', dismissible: true }); } catch (_e) {}
+  }
+  // IMG-REF: drop a violet image-ref chip; dblclick opens the attachment in a lightbox. Stores the PARENT record guid
+  // (refGuid) + the attachment line guid (refLineGuid) — there's no getLineItemByGuid, so the open path resolves the
+  // line through getRecord(refGuid)→getLineItems()→find. Forward-nav-only (no note-side badge).
+  _applyImageRefRow(ta, el, row) {
+    const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
+    const start = rp.triggerStart, flat = ta.value, before = flat.slice(0, start), after = flat.slice(ta.selectionStart);
+    this._closeRefPicker();
+    ta.value = before + after; // an image ref is a standalone chip, not inline text → remove the @token
+    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs)) delete el.runs; }
+    el.text = ta.value; if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
+    if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value);
+    if (this._refRefresh) this._refRefresh();
+    const chip = this._makeRefElement({ kind: 'image', guid: row.guid, lineGuid: row.lineGuid, label: row.label, alias }, el.x, el.y + Math.abs(el.height || 0) + 12);
+    this.scene.elements.push(chip); this.selected.clear(); this.selected.add(chip.id);
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Image reference added — double-click to open.', dismissible: true }); } catch (_e) {}
+  }
+  async _openImageRef(el) {
+    let blob = null;
+    try {
+      if (el.refLineGuid && el.refGuid) { // attachment line (the v1 path)
+        const rec = await this.plugin.data.getRecord(el.refGuid);
+        const items = rec ? (await rec.getLineItems()) || [] : [];
+        const li = items.find((x) => x.guid === el.refLineGuid);
+        if (li && li.getBlob) blob = await li.getBlob();
+      } else if (el.refGuid) { // image RECORD (banner) fallback — rarely reached in v1
+        const rec = await this.plugin.data.getRecord(el.refGuid);
+        const fv = rec && rec.getBanner && rec.getBanner();
+        if (fv) blob = await this.plugin.data.getBlobFromPropertyFileValue(fv);
+      }
+    } catch (_e) {}
+    if (!blob) { // nothing to show → fall back to jumping to the line/record
+      if (el.refLineGuid) this._openRefLine({ refLineGuid: el.refLineGuid, refGuid: el.refGuid });
+      else if (el.refGuid) this._openRecord(el.refGuid);
+      else { try { this.plugin.ui.addToaster({ title: 'Plexus: the referenced image could not be found.', dismissible: true }); } catch (_e) {} }
+      return;
+    }
+    this._showLightbox(blob, el.refLabel || 'Image');
+  }
+  async _showLightbox(blob, title) {
+    try { this._injectRefPickerCss(); } catch (_e) {}
+    let url = null;
+    try { const ab = await blob.download(); if (ab) url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); } catch (_e) {}
+    if (!url) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not load the image.', dismissible: true }); } catch (_e) {} return; }
+    const ov = document.createElement('div'); ov.className = 'pxc-modal pxc-lightbox';
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+    const close = () => { try { ov.remove(); } catch (_e) {} try { URL.revokeObjectURL(url); } catch (_e) {} try { document.removeEventListener('keydown', onKey, true); } catch (_e) {} };
+    ov.addEventListener('pointerdown', (e) => { e.stopPropagation(); close(); }); // backdrop closes
+    ov.addEventListener('wheel', (e) => e.stopPropagation());
+    const img = document.createElement('img'); img.className = 'pxc-lightbox-img'; img.src = url; img.alt = title;
+    img.addEventListener('pointerdown', (e) => e.stopPropagation()); // clicking the image itself doesn't close
+    ov.appendChild(img); this.wrap.appendChild(ov);
+    document.addEventListener('keydown', onKey, true);
   }
   // SEARCH-CREATE: the user chose "Create '<query>'". Capture the splice context, strip just the '@' so the editor
   // commits a non-empty, literal-@-free value (NO blur race against the modal), then create + bind asynchronously.
@@ -2512,6 +2580,7 @@ class CanvasView {
   }
   // S10: single open path for record/board cards (and @@ ref nodes) — honors the openInNewPanel setting.
   _openCard(el) {
+    if (el.refKind === 'image') { this._openImageRef(el); return; } // IMG-REF: open the attachment/banner in a lightbox
     if (el.refKind === 'line' && el.refLineGuid) { this._openRefLine(el); return; } // A4: line ref → jump to the line
     const st = this.plugin._settings || {};
     const newPanel = st.openInNewPanel !== false; // default ON = side panel (today's behavior)
@@ -3010,14 +3079,15 @@ class CanvasView {
   // A1: stamp ref props onto an existing text element (record OR line). Shared by the command, the inline @@ picker,
   // and AI flows. `refGuid` = record guid (record kind) OR the PARENT record (line kind, so nav has a fallback).
   _configureRef(el, opts) {
-    const kind = opts.kind === 'line' ? 'line' : 'record';
+    const kind = opts.kind === 'line' ? 'line' : (opts.kind === 'image' ? 'image' : 'record'); // IMG-REF: image target opens a lightbox
     el.isRef = true; el.refKind = kind;
-    el.refGuid = opts.guid || el.refGuid || null;
-    if (kind === 'line') el.refLineGuid = opts.lineGuid || el.refLineGuid || null; else delete el.refLineGuid;
+    el.refGuid = opts.guid || el.refGuid || null;                                  // image: the PARENT record guid (to resolve the line)
+    if (kind === 'line' || kind === 'image') el.refLineGuid = opts.lineGuid || el.refLineGuid || null; else delete el.refLineGuid; // image: the attachment line guid
     el.refLabel = opts.label || el.refLabel || 'record';
     if (opts.alias != null && String(opts.alias).trim()) el.refAlias = String(opts.alias).trim();
-    el.text = (kind === 'line' ? '@@' : '@') + (el.refAlias || el.refLabel || 'ref');
-    el.strokeColor = kind === 'line' ? '#0ea5e9' : '#7c5cff'; // line refs cyan, record refs purple
+    const pfx = kind === 'line' ? '@@' : (kind === 'image' ? '▣ ' : '@');
+    el.text = pfx + (el.refAlias || el.refLabel || 'ref');
+    el.strokeColor = kind === 'line' ? '#0ea5e9' : (kind === 'image' ? '#a855f7' : '#7c5cff'); // line cyan, record purple, image violet
     measureText(el);
     return el;
   }
@@ -4843,6 +4913,13 @@ class Plugin extends AppPlugin {
         const inside = hitElement(el, 60, 40, 4), outside = hitElement(el, 999, 999, 4);
         return { type: el.type, inside, outside, ok: el.type === 'linecard' && el.lineGuid === 'L1' && el.recordGuid === 'R1' && inside === true && outside === false };
       },
+      // IMG-REF: image-ref chip carries refKind=image + parent record (refGuid) + attachment line (refLineGuid).
+      imgRefTest: () => {
+        const view = v(); if (!view) return { error: 'no view' };
+        const el = makeText(0, 0, { fontSize: 16 });
+        view._configureRef(el, { kind: 'image', guid: 'RECP', lineGuid: 'IMGLINE', label: 'photo.png' });
+        return { kind: el.refKind, guid: el.refGuid, line: el.refLineGuid, text: el.text, ok: el.refKind === 'image' && el.refGuid === 'RECP' && el.refLineGuid === 'IMGLINE' && el.isRef === true && el.text.indexOf('photo.png') !== -1 && el.strokeColor === '#a855f7' };
+      },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {
         const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: 'D', el: 'E', label: 'L' });
@@ -5259,6 +5336,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-modal-box { background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 12px; padding: 16px; min-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
 .pxc-host .pxc-root .pxc-modal-label { font-size: 13px; color: var(--color-text-400); margin-bottom: 8px; }
 .pxc-host .pxc-root .pxc-modal-input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--cards-border-color); border-radius: 7px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 14px; outline: none; }
+.pxc-host .pxc-root .pxc-lightbox { background: rgba(0,0,0,.72); cursor: zoom-out; }
+.pxc-host .pxc-root .pxc-lightbox-img { max-width: 92%; max-height: 92%; border-radius: 8px; box-shadow: 0 12px 48px rgba(0,0,0,.5); cursor: default; }
 .pxc-settings-overlay { position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.32); }
 .pxc-settings-box { min-width: 340px; max-width: 440px; padding: 18px 20px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.3); color: var(--color-text-400); font-family: var(--font-family, system-ui, sans-serif); }
 .pxc-settings-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; color: var(--color-text-100); }
