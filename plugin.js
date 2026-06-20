@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.43.0';
+const PLEXUS_VERSION = '1.44.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1379,7 +1379,7 @@ async function _writeBannerTextInline(plugin, rec, scene) {
 const RENDERER_BACKEND = 'canvas2d'; // 'canvas2d' (current) | 'webgl' (Task 8)
 class Canvas2DRenderer {
   constructor(view) { this.view = view; this.ctx = null; this.kind = 'canvas2d'; }
-  begin(ctx, camera, dpr) { this.ctx = ctx; const z = camera.zoom, d = dpr; ctx.setTransform(z * d, 0, 0, z * d, -camera.x * z * d, -camera.y * z * d); }
+  begin(ctx, camera, dpr, pad) { this.ctx = ctx; const z = camera.zoom, d = dpr, P = pad || 0; ctx.setTransform(z * d, 0, 0, z * d, (-camera.x * z + P) * d, (-camera.y * z + P) * d); } // pad = render-pad offset (px) for the oversized compositor-pan static layer; 0 for the viewport-sized overlay
   grid() { this.view._drawGrid(this.ctx); }
   frame(el) { this.view._drawFrame(this.ctx, el); }
   element(el) {
@@ -1436,9 +1436,9 @@ class WebGLRenderer {
       return gl;
     } catch (_e) { this.gl = null; return null; }
   }
-  begin(sctx, camera, dpr) {
-    this.ctx = sctx; this.camera = camera; this.dpr = dpr; this._images = [];
-    sctx.setTransform(camera.zoom * dpr, 0, 0, camera.zoom * dpr, -camera.x * camera.zoom * dpr, -camera.y * camera.zoom * dpr);
+  begin(sctx, camera, dpr, pad) {
+    this.ctx = sctx; this.camera = camera; this.dpr = dpr; this._images = []; const P = pad || 0; // P is 0 in WebGL mode (the GL canvas + staticCv stay viewport-sized — compositor pan is canvas2d-only)
+    sctx.setTransform(camera.zoom * dpr, 0, 0, camera.zoom * dpr, (-camera.x * camera.zoom + P) * dpr, (-camera.y * camera.zoom + P) * dpr);
     const gl = this._ensureGL(); if (!gl) return;
     const W = this.view.staticCv.width, H = this.view.staticCv.height;
     if (this.glCv.width !== W || this.glCv.height !== H) { this.glCv.width = W; this.glCv.height = H; }
@@ -1600,10 +1600,19 @@ class CanvasView {
     // scroller overflows and the absolute toolbar (with the Note button) drifts off as you scroll. CSS neutralizes
     // that box; trim any residual overshoot here so the panel never scrolls.
     if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) { h = Math.max(160, h - (scroller.scrollHeight - scroller.clientHeight)); this.wrap.style.height = h + 'px'; }
-    const w = this.wrap.clientWidth || this.host.clientWidth || 600;
-    for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
-    this.cssW = w; this.cssH = h; this._cacheValid = false; this._dragLayerValid = false; this._marginValid = false; // canvas resized → all caches stale, incl. the margin (its dimensions derive from cssW/cssH)
+    const w = this.wrap.clientWidth || this.host.clientWidth || 600, d = this.dpr;
+    // COMPOSITOR PAN: staticCv is OVERSIZED by a render-pad P on each side and positioned at (-P,-P), so a pan can be done by
+    // CSS-translating this pre-rendered layer (GPU compositor, O(1)) and only re-raster when the pan exceeds the pad. P=0 in
+    // WebGL mode (the GL canvas is viewport-sized). iCv stays viewport-sized — it carries pointer events + the overlay/handles.
+    const P = (RENDERER_BACKEND === 'webgl') ? 0 : Math.max(300, Math.min(800, Math.round(Math.min(w, h) * 0.75)));
+    this._renderPad = P;
+    this.iCv.width = Math.round(w * d); this.iCv.height = Math.round(h * d); this.iCv.style.width = w + 'px'; this.iCv.style.height = h + 'px';
+    this.staticCv.width = Math.round((w + 2 * P) * d); this.staticCv.height = Math.round((h + 2 * P) * d);
+    this.staticCv.style.width = (w + 2 * P) + 'px'; this.staticCv.style.height = (h + 2 * P) + 'px';
+    this.staticCv.style.left = (-P) + 'px'; this.staticCv.style.top = (-P) + 'px'; this.staticCv.style.right = 'auto'; this.staticCv.style.bottom = 'auto'; this.staticCv.style.transform = '';
+    this.cssW = w; this.cssH = h; this._staticRasterCam = null; this._dragLayerValid = false; // force a fresh raster at the new size
   }
+  _schedulePanEnd() { if (this._panEndT) clearTimeout(this._panEndT); this._panEndT = setTimeout(() => { this._panEndT = null; if (!this.destroyed) { this._panMode = false; this.dirty = true; } }, 150); } // wheel/trackpad pan has no pointerup → after 150ms idle, drop compositor mode so the next render re-rasters the oversized layer crisp at the final camera
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
   // Lazily (re)build the spatial index + an id→array-index map (for z-order) + a cached scene-bounds. Invalidated
@@ -1921,8 +1930,8 @@ class CanvasView {
   _drawGrid(ctx) {
     if (!this._gridOn()) return;
     const st = this.plugin._settings || {};
-    const gs = this._gridSize(), z = this.camera.zoom;
-    const x0 = this.camera.x, y0 = this.camera.y, x1 = x0 + this.cssW / z, y1 = y0 + this.cssH / z;
+    const gs = this._gridSize(), z = this.camera.zoom, Pw = (this._renderPad || 0) / z; // extend over the oversized static layer's pad so panned-in edges show grid
+    const x0 = this.camera.x - Pw, y0 = this.camera.y - Pw, x1 = this.camera.x + this.cssW / z + Pw, y1 = this.camera.y + this.cssH / z + Pw;
     const sx = Math.floor(x0 / gs) * gs, sy = Math.floor(y0 / gs) * gs;
     const op = Math.max(0, Math.min(100, st.gridOpacity == null ? 28 : st.gridOpacity)) / 100; // S5
     const col = st.gridDynamic ? (st.darkMode ? 'rgba(255,255,255,' + op + ')' : 'rgba(0,0,0,' + op + ')') : hexToRgba(st.gridColor || '#7c5cff', op);
@@ -2171,8 +2180,11 @@ class CanvasView {
   _eyedropper() { this._eyedrop = true; try { this.wrap.style.cursor = 'crosshair'; } catch (_e) {} try { this.plugin.ui.addToaster({ title: 'Eyedropper: click any pixel to sample its colour.', dismissible: true }); } catch (_e) {} }
   _sampleAt(e) {
     try {
-      const r = this.wrap.getBoundingClientRect(), dpr = this.dpr || window.devicePixelRatio || 1;
-      const px = Math.round((e.clientX - r.left) * dpr), py = Math.round((e.clientY - r.top) * dpr);
+      const r = this.wrap.getBoundingClientRect(), dpr = this.dpr || window.devicePixelRatio || 1, P = this._renderPad || 0, rc = this._staticRasterCam, z = this.camera.zoom;
+      // staticCv buffer is OVERSIZED + CSS-positioned at (-P) and may carry a pan transform (tx,ty); the buffer pixel under a
+      // viewport click is at (clickX + P - tx)*dpr (MED: review — was sampling P px off after the canvas became oversized).
+      const tx = rc ? Math.round((rc.x - this.camera.x) * z) : 0, ty = rc ? Math.round((rc.y - this.camera.y) * z) : 0;
+      const px = Math.round((e.clientX - r.left + P - tx) * dpr), py = Math.round((e.clientY - r.top + P - ty) * dpr);
       const d = this.staticCv.getContext('2d').getImageData(px, py, 1, 1).data;
       const hex = '#' + [d[0], d[1], d[2]].map((c) => c.toString(16).padStart(2, '0')).join('');
       this.strokeColor = hex; this._syncToolbar && this._syncToolbar();
@@ -2215,6 +2227,7 @@ class CanvasView {
     const onDown = (e) => {
       host.focus();
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // self-heal: a prior drag that was cancelled (no pointerup) left the static-layer blit locked on
+      if (this._panMode) { this._panMode = false; if (this._panEndT) { clearTimeout(this._panEndT); this._panEndT = null; } } // a new gesture (drag/click) ends any wheel-pan still in compositor mode → the next render re-rasters crisp (HIGH: review)
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
@@ -2305,7 +2318,7 @@ class CanvasView {
       }
       moved = true; clearLP(); // S10: any drag cancels a pending long-press open
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
-      if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._lastCamChange = this._now(); this.dirty = true; return; }
+      if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._panMode = true; this._lastCamChange = this._now(); this.dirty = true; return; } // _panMode → render() translates the oversized layer via CSS transform (compositor pan), no raster
       const w = this._worldAt(e);
       if (mode === 'laser') { this._laser.push({ x: w.x, y: w.y, t: Date.now() }); this.dirty = true; return; } // S6
       if (mode === 'pen' && created) {
@@ -2365,7 +2378,7 @@ class CanvasView {
         }
       }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
-      else if (mode === 'pan' && moved) { this._saveCamera(); }
+      else if (mode === 'pan' && moved) { this._saveCamera(); this._panMode = false; } // pan ended → next render full-rasters the oversized layer at the new camera + resets the CSS transform
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
@@ -2373,7 +2386,7 @@ class CanvasView {
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
       this.dirty = true;
     };
-    const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; this._lastCamChange = this._now(); } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll. PAN branch sets _lastCamChange to ARM the camera-blit fast-path (line ~4713 `moving` gate) — pointer-drag pan sets it (2301) but wheel/trackpad pan didn't, so every trackpad-pan frame fell through to a full crisp re-render (the lag, worst zoomed-in with upscaled images). Zoom branch intentionally omits it (keeps wheel-zoom's crisp per-frame render, no blur regression).
+    const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); if (this._panMode) { this._panMode = false; if (this._panEndT) { clearTimeout(this._panEndT); this._panEndT = null; } } } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; this._panMode = true; this._schedulePanEnd(); this._lastCamChange = this._now(); } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll. PAN branch arms _panMode (compositor CSS-translate) + schedules a debounced end (wheel has no pointerup) so the layer re-rasters crisp when the trackpad pan stops. PAN branch sets _lastCamChange to ARM the camera-blit fast-path (line ~4713 `moving` gate) — pointer-drag pan sets it (2301) but wheel/trackpad pan didn't, so every trackpad-pan frame fell through to a full crisp re-render (the lag, worst zoomed-in with upscaled images). Zoom branch intentionally omits it (keeps wheel-zoom's crisp per-frame render, no blur regression).
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if (this._present) { // present mode: read-only; Esc exits, arrows/space step through frame-slides (P0.5)
@@ -2437,7 +2450,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } }; // drag interrupted (no pointerup) → drop the static-layer blit, crisp re-render
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze, crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4724,41 +4737,39 @@ class CanvasView {
     const dragMovers = (this._elDrag && this.selected.size && !glMode) ? this._dragMovers() : null;
     const dragIds = dragMovers ? new Set(dragMovers.map((e) => e.id)) : null;
     const frozenDrag = !!(dragMovers && this._dragLayerValid); // staticCv already holds the static scene → don't touch it
-    if (!frozenDrag) {
+    const P = this._renderPad || 0;
+    // COMPOSITOR PAN: while actively panning at a fixed zoom, translate the pre-rendered OVERSIZED static layer on the GPU
+    // compositor — ZERO scene work per frame, so a 100K-shape board pans exactly as smoothly as one image. Re-raster only when
+    // the pan nears the pad edge (|d|>0.8P) or stops. The overlay (handles/selection) still redraws below, so it tracks the pan.
+    let compositorPan = false;
+    const rc = this._staticRasterCam;
+    if (this._panMode && !frozenDrag && !dragMovers && !glMode && P > 0 && rc && rc.zoom === z) {
+      const dx = (rc.x - this.camera.x) * z, dy = (rc.y - this.camera.y) * z;
+      if (Math.abs(dx) <= P * 0.8 && Math.abs(dy) <= P * 0.8) { this.staticCv.style.transform = 'translate3d(' + Math.round(dx) + 'px,' + Math.round(dy) + 'px,0)'; compositorPan = true; }
+    }
+    if (!compositorPan && !frozenDrag) {
+      // FULL RASTER into the OVERSIZED staticCv (viewport + pad P each side) at the current camera; reset the CSS transform.
       sctx.setTransform(1, 0, 0, 1, 0, 0);
       if (glMode) { sctx.clearRect(0, 0, this.staticCv.width, this.staticCv.height); }
       else { sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height); }
-      // CAMERA MOTION: blit the cached scene bitmap transformed instead of re-rendering — O(1); a settle does one crisp
-      // render when motion stops. Skipped while element-dragging (camera is fixed; we want the frozen-static path).
-      const cc = this._cacheCam, moving = !glMode && (!!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110));
-      const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
-      if (!dragMovers && moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
-        // PAN: blit the margin-padded cache when it's warm + at the same camera as the viewport cache (so the revealed
-        // edges show cached content instead of blank); otherwise fall back to the viewport cache (M=0 = the old blit).
-        const useMargin = this._marginValid && this._marginCv && this._marginCovers(); // COVERAGE not exact-match: usable for any same-zoom camera within ±M of _marginCam, so pan→pause→pan keeps the padded cache instead of dropping to the blank-edged viewport cache
-        const blitCam = useMargin ? this._marginCam : cc, blitCv = useMargin ? this._marginCv : this._cacheCv, M = useMargin ? (this._marginPx || 0) : 0;
-        const o = pxcMarginBlitOffset(blitCam, this.camera, M, d);
-        sctx.setTransform(o.s, 0, 0, o.s, Math.round(o.tx), Math.round(o.ty)); sctx.drawImage(blitCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0); // ROUND to integer device px: a fractional blit offset makes drawImage interpolate (the blur seen while panning); pixel-aligned = crisp
-        this._scheduleSettle();
-      } else {
-        // Crisp full render. When dragging, this is the ONE build frame: render statics EXCLUDING movers, then FREEZE
-        // staticCv (movers + ghosts draw on iCv below); _dragLayerValid=true makes subsequent frames skip staticCv.
-        this.renderer.begin(sctx, this.camera, d);
-        this.renderer.grid();
-        const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
-        const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
-        this._ensureGrid();
-        const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
-        if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
-        const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
-        const ex = dragIds; let drawn = 0;
-        for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // frames behind everything
-        for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
-        this._drawnCount = drawn;
-        if (!dragMovers) this.renderer.ghosts(); // while dragging, ghosts draw on iCv so they track live
-        this.renderer.end();
-        if (dragMovers) this._dragLayerValid = true; else this._refreshCache();
-      }
+      this.staticCv.style.transform = ''; // ALWAYS clear a leaked pan transform when rebuilding the static layer — else an element-drag (dragMovers) freezes the shifted layer (HIGH: review). Only the rasterCam write is drag-gated.
+      if (!dragMovers) this._staticRasterCam = { x: this.camera.x, y: this.camera.y, zoom: z }; // the layer now matches the camera → translate from here
+      this.renderer.begin(sctx, this.camera, d, P); // +P offset draws into the oversized canvas (positioned at -P → net on-screen unchanged)
+      this.renderer.grid();
+      const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80;
+      const pw = P / z, vx0 = this.camera.x - pw - m, vy0 = this.camera.y - pw - m, vx1 = this.camera.x + (this.cssW + P) / z + m, vy1 = this.camera.y + (this.cssH + P) / z + m; // cull the PADDED region (fills the oversized canvas)
+      const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
+      this._ensureGrid();
+      const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0); // O(visible) — independent of total scene size, so the re-raster stays cheap at 100K
+      if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
+      const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
+      const ex = dragIds; let drawn = 0;
+      for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // frames behind everything
+      for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
+      this._drawnCount = drawn;
+      if (!dragMovers) this.renderer.ghosts(); // while dragging, ghosts draw on iCv so they track live
+      this.renderer.end();
+      if (dragMovers) this._dragLayerValid = true;
     }
     // interactive layer — the moving elements (during a drag) + selection / transform handles
     const ictx = this.iCv.getContext('2d');
@@ -4980,7 +4991,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -5854,6 +5865,20 @@ class Plugin extends AppPlugin {
         return { n: live, seedMs: +seedMs.toFixed(1), byId200Ms: byId, updateBindingsMs: bind, renderMs: render, hitTest50Ms: hit, sceneBoundsMs: bounds, snapshotMs: snap, snapshotKB: snapKB };
       },
       benchReset: () => { const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' }; const before = v.scene.elements.length; v.scene.elements = []; v.selected.clear(); v._cacheValid = false; v._gridDirty = true; v.dirty = true; return { cleared: before }; },
+      // PAN SCALE: prove panning is O(1) — compositorPanPerFrameMs should be ~0 and FLAT regardless of element count (a 100K
+      // board pans as smoothly as one image), while fullRasterMs (the occasional boundary-cross re-render) is O(visible).
+      // Console: `__plexusCanvas.test.bench(100000); __plexusCanvas.test.panScaleBench()` then compare to bench(100).
+      panScaleBench: () => {
+        const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' };
+        const n = v.scene.elements.filter((e) => !e.isDeleted).length;
+        const time = (fn, reps) => { reps = reps || 30; const s = performance.now(); for (let i = 0; i < reps; i++) fn(); return +((performance.now() - s) / reps).toFixed(3); };
+        v._panMode = false; v._staticRasterCam = null; v.render(); // warm
+        const fullRasterMs = time(() => { v._staticRasterCam = null; v.render(); }, 8); // O(visible) re-center
+        v._staticRasterCam = { x: v.camera.x, y: v.camera.y, zoom: v.camera.zoom }; v._panMode = true;
+        const compositorPanPerFrameMs = time(() => { v.camera.x += 1; v.render(); }, 60); // CSS-transform fast path (no raster)
+        v._panMode = false; v._staticRasterCam = null; v.dirty = true;
+        return { n, renderPad: v._renderPad, fullRasterMs, compositorPanPerFrameMs, note: 'compositorPanPerFrameMs ~0 & flat across n = O(1) pan' };
+      },
       // P1.0: a frame owns the elements whose centre is inside it (move-together unit).
       frameTest: () => {
         const v = this._activeView(); if (!v) return { ok: false, reason: 'no view' };

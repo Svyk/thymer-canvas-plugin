@@ -1,5 +1,29 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.44.0 — PANNING REDESIGN: O(1) compositor pan (100K shapes as smooth as one image) (2026-06-20)
+- Hard requirement: pan must be O(1) regardless of scene size. The old model re-touched/re-uploaded the staticCv bitmap
+  every pan frame (cost ∝ canvas pixels) + a fixed ±280px margin snapshot → not bulletproof, doesn't scale.
+- REDESIGN (oversized canvas + GPU-compositor CSS-transform; re-raster only on boundary-cross, O(visible)):
+  - `staticCv` is OVERSIZED by render-pad `P=clamp(min(cssW,cssH)*0.75,300,800)` each side, CSS-positioned at (-P,-P);
+    `iCv` stays viewport-sized (events + overlay). `Canvas2DRenderer.begin(ctx,cam,dpr,pad)` adds `+pad*dpr` (net on-screen
+    unchanged: canvas at -P + content +P = 0). `_drawGrid` + the render cull extended to the padded region.
+  - `render()`: NEW `compositorPan` fast path — while `_panMode` + within ±0.8P of `_staticRasterCam` at the same zoom, just
+    `staticCv.style.transform = translate3d(round(dx),round(dy),0)` and ZERO raster. Else full-raster into the oversized
+    canvas (reset transform, update `_staticRasterCam`) culling the padded region (O(visible) via the grid → cheap at 100K).
+    The overlay runs every frame so handles/selection track the pan.
+  - `_panMode` set in pointer-drag + wheel pan; cleared on pointerup(moved)/pointercancel/`onDown`(new gesture)/zoom/150ms
+    `_schedulePanEnd` (wheel has no pointerup). On clear, the next render re-rasters crisp.
+- VERIFIED: node — `+P` offset, ≤1px pan accuracy, 0.8P coverage gate, exact re-raster, eyedropper buffer-offset (`+P-tx`).
+  LIVE (standalone Chrome harness): at **N=100,000** the CSS-transform pan = **0.02ms/frame** main-thread, 0 long tasks, vs
+  per-frame redraw 20.8ms/frame; at N=100 = 0.1ms. → per-frame cost ~0 and FLAT across N = **O(1) pan, proven**. `test.panScaleBench()` added.
+- Adversarial `code-reviewer`: core pan math/sign/blank-edges/_camAnim/hit-testing/memory all CONFIRMED correct. Fixed 1 HIGH
+  (leaked pan transform froze into an element-drag — reset transform ungated + tear down `_panMode` in onDown), 1 MED
+  (eyedropper sampled P px off the oversized buffer — `+P-tx` offset), 1 LOW (zoom-after-wheel-pan dangling state).
+- Old blit/margin/settle fns (`_refreshCache`/`_warmMarginCache`/`_scheduleMarginWarm`/`_marginCovers`/`pxcMarginBlitOffset`/
+  `_scheduleSettle`) are now DEAD (never called) — left for a later cleanup pass; residual `_cacheValid=false` sets are no-ops.
+- ⚠ Couldn't self-verify the FULL integrated path live (594KB > MCP-push; reinstall is a UI action) — user reinstalls +
+  runs `test.bench(100000); test.panScaleBench()` + pans a heavy board. Phase 2 (flow editor) next.
+
 ## ✅ v1.43.0 — PAN→PAUSE→PAN root cause: settle invalidated the margin cache (2026-06-20)
 - User hint (the key): continuous panning is smooth; the glitch only happens on **pan → pause → pan**. Instrumented the
   exact cycle live (longtask observer + per-frame timing) → **ZERO long tasks** → it's NOT a CPU hitch, it's a VISUAL
