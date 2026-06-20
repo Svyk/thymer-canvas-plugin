@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.47.0';
+const PLEXUS_VERSION = '1.48.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -758,6 +758,10 @@ function pxcClusterByThreshold(vecs, threshold) {
   return Array.from(groups.values());
 }
 function drawText(ctx, el) {
+  if (el.midBinding && (el.text || (el.runs && el.runs.length))) { // CONNECTION LABEL: a subtle pill behind the text so it reads over the connector line
+    const w = Math.abs(el.width) || 0, h = Math.abs(el.height) || 0;
+    if (w > 0 && h > 0) { ctx.save(); const pad = 3, rad = 5; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(el.x - pad, el.y - pad, w + pad * 2, h + pad * 2, rad); else ctx.rect(el.x - pad, el.y - pad, w + pad * 2, h + pad * 2); ctx.fillStyle = PXC_DARK ? 'rgba(28,31,40,0.88)' : 'rgba(255,255,255,0.92)'; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = PXC_DARK ? 'rgba(124,92,255,0.55)' : 'rgba(124,92,255,0.4)'; ctx.stroke(); ctx.restore(); }
+  }
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
   ctx.save();
@@ -791,6 +795,17 @@ function routedPoints(el) {
   const a = el.points[0], b = el.points[1], ax = a[0], ay = a[1], bx = b[0], by = b[1];
   if (Math.abs(bx - ax) >= Math.abs(by - ay)) { const mx = (ax + bx) / 2; return [[ax, ay], [mx, ay], [mx, by], [bx, by]]; }
   const my = (ay + by) / 2; return [[ax, ay], [ax, my], [bx, my], [bx, by]];
+}
+// CONNECTION LABEL: the point at 50% of a polyline's arc length — where a connector's midpoint label sits (handles 2-pt
+// straight lines + elbowed 4-pt routes). Pure, world coords.
+function pxcPolyMidpoint(pts) {
+  if (!pts || pts.length < 2) return null;
+  if (pts.length === 2) return { x: (pts[0][0] + pts[1][0]) / 2, y: (pts[0][1] + pts[1][1]) / 2 };
+  const seg = []; let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) { const l = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]); seg.push(l); total += l; }
+  let half = total / 2;
+  for (let i = 0; i < seg.length; i++) { if (half <= seg[i] || i === seg.length - 1) { const t = seg[i] > 0 ? half / seg[i] : 0; return { x: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, y: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t }; } half -= seg[i]; }
+  return { x: pts[0][0], y: pts[0][1] };
 }
 function drawLinear(ctx, el) {
   const pts = routedPoints(el); if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
@@ -2056,27 +2071,40 @@ class CanvasView {
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
   _bindableAt(wx, wy, excludeId) {
     const tol = 8 / this.camera.zoom;
-    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId) continue; if (isRoughShape(el.type) && hitElement(el, wx, wy, tol)) return el; }
+    // CONNECTIONS: bind an endpoint to ANY content element (card / linecard / image / text-label / shape / board / …) so you
+    // can connect anything. Never bind to another connector's body (arrow/line) or a big frame container. hitElement is bbox
+    // for non-shapes (good enough) + precise for rough shapes; _gridTopFirst gives z-order so the topmost element wins.
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue; if (hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   _updateBindings() {
-    // PERF (architecture review 80/20): this runs on EVERY pointermove during a drag and used to call the O(n)
-    // _byId twice per arrow → O(arrows × n) per frame — the only per-frame super-linear cost in the codebase.
-    // Build a local id→element Map ONCE (lazily, only if a bound arrow exists) → O(n + arrows). No global state.
+    // PERF: runs on EVERY pointermove during a drag. ONE O(n) scan collects bound arrows + connection-label text elements;
+    // EARLY-RETURN when nothing is bound (the common case → no per-frame cost on connection-free scenes). The idMap (id→el)
+    // is built lazily on first lookup. The fixpoint below resolves CHAINS (arrow → label → arrow) so an arrow bound to a
+    // label settles on the label's moved position in the same call (was a 1-pass lag that never settled on drop).
     let idMap = null;
     const lookup = (id) => { if (!idMap) { idMap = new Map(); for (const e of this.scene.elements) if (!e.isDeleted) idMap.set(e.id, e); } return idMap.get(id) || null; };
+    const arrows = [], labels = [];
     for (const el of this.scene.elements) {
-      if (el.isDeleted || (el.type !== 'arrow' && el.type !== 'line') || !el.points || el.points.length < 2) continue;
+      if (el.isDeleted) continue;
+      if ((el.type === 'arrow' || el.type === 'line') && el.points && el.points.length >= 2 && (el.startBinding || el.endBinding)) arrows.push(el);
+      else if (el.type === 'text' && el.midBinding) labels.push(el);
+    }
+    if (!arrows.length && !labels.length) return; // nothing bound → zero work
+    const updArrow = (el) => {
       let changed = false;
       if (el.startBinding) { const s = lookup(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(s, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; }
       if (el.endBinding) { const s = lookup(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(s, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
       if (changed) linearBBox(el);
-    }
+    };
+    const updLabel = (el) => { if (!el.midBinding) return; const a = lookup(el.midBinding.arrowId); if (!a || a.isDeleted || (a.type !== 'arrow' && a.type !== 'line')) { el.midBinding = null; return; } const m = pxcPolyMidpoint(routedPoints(a)); if (m) { el.x = m.x - (Math.abs(el.width) || 0) / 2; el.y = m.y - (Math.abs(el.height) || 0) / 2; } }; // guard: a label freed in an earlier fixpoint pass must not crash a later pass
+    const passes = labels.length ? 3 : 1; // arrows→labels→arrows… resolves chained connectors (passes iterate the small arrays, not the scene → cheap)
+    for (let i = 0; i < passes; i++) { for (const a of arrows) updArrow(a); if (!labels.length) break; for (const l of labels) updLabel(l); }
   }
   _cloneEl(el, dx, dy) {
     const c = JSON.parse(JSON.stringify(el)); c.id = newId(); c.x = (c.x || 0) + dx; c.y = (c.y || 0) + dy; c.seed = newSeed();
     if (c.points) c.points = c.points.map(([px, py]) => [px + dx, py + dy]);
-    c.startBinding = null; c.endBinding = null; return c; // image fileId is shared on purpose
+    c.startBinding = null; c.endBinding = null; c.midBinding = null; return c; // image fileId is shared on purpose; a clone is UNBOUND (parity with start/endBinding — never cross-link a cloned label to the original connector)
   }
   _copy() { this.plugin._clipboard = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => JSON.parse(JSON.stringify(el))); }
   _paste() { const cb = this.plugin._clipboard; if (cb && cb.length) { this.selected.clear(); for (const c of this._cloneBatch(cb, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); return; } this._pasteSystemImage(); }
@@ -2115,7 +2143,7 @@ class CanvasView {
   }
   _bringForward() { this._stepZ(1); }
   _sendBackward() { this._stepZ(-1); }
-  _nudge(dx, dy) { if (!this.selected.size) return; let shp = false; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); if (isRoughShape(el.type)) shp = true; } if (shp) this._updateBindings(); this.dirty = true; this.scheduleSave(); }
+  _nudge(dx, dy) { if (!this.selected.size) return; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); } this._updateBindings(); this.dirty = true; this.scheduleSave(); } // CONNECTIONS: rebind any bound target (not just rough shapes); _updateBindings early-returns when nothing is bound
   // CP-4: align / distribute the selection to its bounding box (Excalidraw parity precision tools).
   _align(mode) {
     const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type !== 'frame');
@@ -2335,7 +2363,7 @@ class CanvasView {
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
-      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } let shp = false; for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; if (isRoughShape(m.el.type)) shp = true; } if (shp) this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
     };
@@ -2437,11 +2465,12 @@ class CanvasView {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
-      if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
-      if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
+      if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
+      if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
       else if (hit && hit.type === 'record') { if ((w.y - hit.y) < 28) this._openCard(hit); else this._editCardBody(hit); } // title band → open the record (rename there); body → edit body lines inline (writes back)
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
+      else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'rollup') { this._promptText('Roll-up query:', hit.query).then((q) => { if (q == null) return; this._promptText('Aggregation (count | %done | sum:Prop | avg:Prop):', hit.agg || 'count').then((a) => { if (a == null) return; hit.query = q; hit.agg = a; this._invalidateRollups(); this.dirty = true; this.scheduleSave(); }); }); } // ROLL-UP: dblclick edits query + agg
       else if (hit && hit.type === 'table') { const cell = this._tableCellAt(hit, w.x, w.y); if (cell && cell.prop) this._editTableCell(hit, cell); else this._configureTable(hit); } // LIVE TABLE: dblclick a data cell edits it; header/title/empty reconfigures
@@ -2524,6 +2553,18 @@ class CanvasView {
     }
     el.width = nw; el.height = nh; el.x = ncx - nw / 2; el.y = ncy - nh / 2; el.angle = a;
   }
+  _editConnLabel(arrow) {
+    // CONNECTION: find the label bound to this connector, else create one at its midpoint. The label is a normal text element
+    // (selectable, can carry @/@@ refs, and is itself BINDABLE → a new arrow can connect from it = chaining). It tracks the
+    // connector's midpoint via midBinding (see _updateBindings).
+    let label = this.scene.elements.find((e) => !e.isDeleted && e.type === 'text' && e.midBinding && e.midBinding.arrowId === arrow.id);
+    if (!label) {
+      const m = pxcPolyMidpoint(routedPoints(arrow)) || { x: (arrow.x || 0) + (Math.abs(arrow.width) || 0) / 2, y: (arrow.y || 0) + (Math.abs(arrow.height) || 0) / 2 };
+      label = makeText(m.x, m.y, { stroke: this.strokeColor, fontSize: 16 }); label.midBinding = { arrowId: arrow.id };
+      this.scene.elements.push(label); this._gridDirty = true;
+    }
+    this.selected.clear(); this.selected.add(label.id); this._editText(label);
+  }
   _editText(el) {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
@@ -2559,6 +2600,7 @@ class CanvasView {
     const commit = () => {
       this._closeRefPicker(); syncRuns();
       if (!String(el.text).trim()) el.isDeleted = true;
+      else if (el.midBinding) this._updateBindings(); // CONNECTION LABEL: re-center on the connector midpoint now that it has a measured size
       this.editingId = null; this._ta = null; this._refPrevFlat = null; this._refSetPrevFlat = null; this._refRefresh = null; try { ta.remove(); } catch (_e) {}
       this.dirty = true; this.scheduleSave();
     };
@@ -4993,6 +5035,7 @@ class CanvasView {
   scheduleSave() {
     this._miniDirty = true; // MINIMAP: scene changed → rebuild dot cache on next paint
     this._cacheValid = false; this._gridDirty = true; // content changed → rebuild render cache + spatial index lazily
+    try { this._updateBindings(); } catch (_e) {} // CONNECTIONS: settle arrow/label bindings + free any dangling midBinding BEFORE the snapshot — so the saved geometry matches the display (no orphan label at a dead midpoint after a connector delete; chained-arrow positions settled on drop; no display≠saved divergence). Cheap: _updateBindings early-returns when nothing is bound.
     // edit save: record an undo step (push the prior committed state, snapshot the new one)
     if (this._committed !== undefined) { this._undo.push(this._committed); this._trimUndo(); this._redo = []; }
     this._committed = this._snapshot();
@@ -5916,6 +5959,34 @@ class Plugin extends AppPlugin {
         const compositorPanPerFrameMs = time(() => { v.camera.x += 1; v.render(); }, 60); // CSS-transform fast path (no raster)
         v._panMode = false; v._staticRasterCam = null; v.dirty = true;
         return { n, renderPad: v._renderPad, fullRasterMs, compositorPanPerFrameMs, note: 'compositorPanPerFrameMs ~0 & flat across n = O(1) pan' };
+      },
+      // CONNECTIONS (Phase 2): bind an arrow to ANY element + a midpoint label that tracks the connector. Verifies binding
+      // attaches to a card's bbox edge, the label centers on the live midpoint, and both FOLLOW when an endpoint moves.
+      connTest: () => {
+        const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no view' };
+        const ok = []; const a = (c, m) => ok.push((c ? 'ok ' : 'FAIL ') + m);
+        const card = makeRect(0, 0, 200, 120, { type: 'rectangle' }); card.type = 'record'; card.recordGuid = 'fake'; // a non-shape target
+        const tgt = makeRect(600, 400, 160, 90, { type: 'rectangle' }); tgt.type = 'image'; tgt.fileId = 'fake';
+        const arrow = makeLinear(100, 60, 'arrow', { stroke: '#7c5cff' }); arrow.points = [[100, 60], [680, 445]]; arrow.startBinding = { elementId: card.id }; arrow.endBinding = { elementId: tgt.id }; linearBBox(arrow);
+        v.scene.elements.push(card, tgt, arrow); v._gridDirty = true;
+        a(!!v._bindableAt(100, 60, arrow.id), '_bindableAt finds the (non-shape) record card');
+        v._updateBindings();
+        a(arrow.points[0][0] > 195 && arrow.points[0][0] <= 210, 'start endpoint snapped to the card bbox edge (~x=200..205) got ' + arrow.points[0][0].toFixed(1));
+        // label
+        const label = makeText(0, 0, { stroke: '#7c5cff', fontSize: 16 }); label.text = 'because'; label.midBinding = { arrowId: arrow.id }; label.width = 60; label.height = 18;
+        v.scene.elements.push(label); v._updateBindings();
+        const mid = pxcPolyMidpoint(routedPoints(arrow));
+        a(Math.abs(label.x + label.width / 2 - mid.x) < 0.5 && Math.abs(label.y + label.height / 2 - mid.y) < 0.5, 'label centered on connector midpoint');
+        // move the target → arrow end + label follow
+        const lx0 = label.x; tgt.x += 300; tgt.y += 200; v._updateBindings();
+        a(label.x !== lx0, 'label followed when the bound target moved');
+        a(arrow.endBinding != null && arrow.points[1][0] > 880, 'end endpoint followed the moved target');
+        // free on connector delete
+        arrow.isDeleted = true; v._updateBindings();
+        a(label.midBinding == null && !label.isDeleted, 'label freed (not deleted) when its connector is gone');
+        // cleanup
+        for (const e of [card, tgt, arrow, label]) e.isDeleted = true; v._gridDirty = true; v.dirty = true;
+        return { pass: ok.every((s) => s.startsWith('ok')), results: ok };
       },
       // P1.0: a frame owns the elements whose centre is inside it (move-together unit).
       frameTest: () => {

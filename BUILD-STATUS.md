@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.48.0 — LABELED CONNECTIONS: arrow binds anything + a connectable midpoint label (Connections Phase 2) (2026-06-20)
+- Heptabase-style connections. (1) `_bindableAt` (:2077) now binds an arrow/line endpoint to ANY content element via
+  `hitElement` (card/image/linecard/text/board/shape), excluding only arrow/line/frame (was: ROUGH_SHAPES only). (2)
+  Double-click a connector (new `onDblClick` arrow/line case → `_editConnLabel`) creates/edits a midpoint LABEL — a normal
+  `text` element with `el.midBinding={arrowId}`. The label is selectable, can carry `@`/`@@` refs, and is itself BINDABLE →
+  a new arrow can connect FROM it = chaining (text→arrow→text→image). (3) `pxcPolyMidpoint` (arc-length 50%) places it;
+  `drawText` draws a light/dark pill behind it. Connections are ordinary scene elements (serialize/undo/O(1)-pan apply).
+- 3-lens adversarial review (workflow) → fixed every real bug it found: **HIGH** `_cloneEl` now nulls `midBinding` (was
+  cross-linking a cloned label to the ORIGINAL connector); **HIGH** the live-drag rebind was gated on rough shapes only so
+  bound cards/images/labels FROZE mid-drag — `onMove`/`_nudge` now always `_updateBindings()` (early-returns when nothing
+  bound); **HIGH** chained connectors lagged a pass + never settled on drop — `_updateBindings` restructured to ONE scan +
+  early-return + a **fixpoint** (arrows→labels→arrows ×3) that settles chains in one call; **MED** orphan-on-delete +
+  display≠saved divergence — `scheduleSave` now `_updateBindings()` BEFORE the snapshot (frees dangling midBindings, settles
+  on drop, consistent save); dblclick xref/link branches guarded so the label editor is always reachable.
+- node-tested: midpoint (6 cases) + the full `_updateBindings` (early-return, centering, label-as-bind-target, chaining
+  fixpoint SETTLES, orphan-free) — the node test caught a real crash (a freed label re-processed in a later fixpoint pass →
+  null.arrowId), fixed with an `if(!el.midBinding)return` guard. `test.connLabel`→ `test.connTest()` runtime hook added.
+- DEFERRED (noted, not blocking): binding to a large element snaps to its bbox edge anywhere inside it (intended
+  connect-anything; the `_bindHover` indicator shows it); a label pins to the connector midpoint (can't be nudged — a
+  `midBinding.offset` is a later enhancement); z-order: a label sits on its connector's hot zone.
+- NEXT: Phase 3 — connection → backref (the note side lights up via the existing `_scanRefBadges`/`_openBackrefPicker`/`_flashAnchor`).
+
 ## ✅ v1.47.0 — transclusion cards: dark-mode + live-transclusion GLOW (Connections plan Phase 1) (2026-06-20)
 - User: cards were hardcoded light (`#fff`/`#1e1e1e`/`#5f6368`) → unreadable on a dark theme; wanted a glow so a card reads
   as a live transclusion. Plan: `~/.claude/plans/staged-finding-ritchie.md` (dark-mode+glow → connections, phased).
