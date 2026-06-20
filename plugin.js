@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.24.0';
+const PLEXUS_VERSION = '1.25.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -878,6 +878,19 @@ function makeQueryNode(x, y, w, h, query) {
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+// LIVE TABLE: a query → records×properties grid; edit a cell → writes the typed property. cols = property names.
+function makeTable(x, y, w, h, query, cols) {
+  return {
+    id: newId(), type: 'table', x, y, width: w, height: h, angle: 0, query: query || '', cols: cols || [],
+    strokeColor: '#7c5cff', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+// LIVE TABLE: which (col, row-index) a point falls in. ri 0 = header; col 0 = the Name column. Pure + node-tested.
+function pxcTableCellIndex(x, y, width, nCol, rowH, wx, wy) {
+  const colW = width / Math.max(1, nCol);
+  return { col: Math.max(0, Math.min(nCol - 1, Math.floor((wx - x) / colW))), ri: Math.max(0, Math.floor((wy - y) / rowH)), colW };
+}
 // ROLL-UP CARDS: a query bound to a live AGGREGATE (count / %done / sum|avg|min|max of a typed property) — a KPI tile.
 function makeRollup(x, y, w, h, query, agg) {
   return {
@@ -944,7 +957,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'rollup' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'rollup' || el.type === 'table' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -1266,6 +1279,7 @@ class Canvas2DRenderer {
     else if (t === 'linecard') v._drawLineCard(ctx, el);
     else if (t === 'query') v._drawQueryNode(ctx, el);
     else if (t === 'rollup') v._drawRollupNode(ctx, el);
+    else if (t === 'table') v._drawTableNode(ctx, el);
     else if (t === 'board') v._drawBoardCard(ctx, el);
     else if (t === 'task') v._drawTaskNode(ctx, el);
     else drawElement(ctx, el);
@@ -1328,7 +1342,7 @@ class WebGLRenderer {
   element(el) {
     const v = this.view, ctx = this.ctx, t = el.type;
     if (this.gl && t === 'image' && !el.angle && !el.isDeleted) { const img = v._imgFor && v._imgFor(el.fileId); if (img && img.complete && img.naturalWidth) { this._images.push({ el, img }); return; } }
-    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
+    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'table') v._drawTableNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
   end() {
@@ -2065,7 +2079,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'board' || sel.type === 'frame')) {
+        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'table' || sel.type === 'board' || sel.type === 'frame')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -2241,6 +2255,7 @@ class CanvasView {
       else if (hit && hit.type === 'linecard') { this._openCard({ refKind: 'line', refLineGuid: hit.lineGuid, refGuid: hit.recordGuid }); } // TRANSCLUDE: dblclick jumps to the source line
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'rollup') { this._promptText('Roll-up query:', hit.query).then((q) => { if (q == null) return; this._promptText('Aggregation (count | %done | sum:Prop | avg:Prop):', hit.agg || 'count').then((a) => { if (a == null) return; hit.query = q; hit.agg = a; this._invalidateRollups(); this.dirty = true; this.scheduleSave(); }); }); } // ROLL-UP: dblclick edits query + agg
+      else if (hit && hit.type === 'table') { const cell = this._tableCellAt(hit, w.x, w.y); if (cell && cell.prop) this._editTableCell(hit, cell); else this._configureTable(hit); } // LIVE TABLE: dblclick a data cell edits it; header/title/empty reconfigures
       else if (hit && hit.type === 'board') { this._openCard(hit); }
       else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
@@ -2889,6 +2904,103 @@ class CanvasView {
   _insertRollup(query, agg, wx, wy) {
     if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
     const el = makeRollup(this._snap(wx - 90), this._snap(wy - 60), 180, 120, query, agg);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  // LIVE TABLE: schema-safe typed-property write (shared with Bulk-Brush semantics) — choice→setChoice, confirmed
+  // datetime→DateTime, else raw string (never a forced Number/object onto an unconfirmed-type field). Returns bool.
+  _writeProp(rec, name, value) {
+    if (!rec || !rec.prop) return false; const p = rec.prop(name); if (!p) return false;
+    let opts = null; try { opts = p.choices && p.choices(); } catch (_e) {}
+    if (opts && opts.length) { try { return p.setChoice(value) !== false; } catch (_e) { return false; } }
+    let curDate = null; try { curDate = p.date && p.date(); } catch (_e) {}
+    const cls = pxcClassifyValue(value);
+    if (curDate != null && cls.kind === 'date') { try { p.set(DateTime.parseDateTimeString(cls.iso).value()); return true; } catch (_e) { try { p.set(value); return true; } catch (_e2) { return false; } } }
+    try { p.set(value); return true; } catch (_e) { return false; }
+  }
+  _tableGeom(el) { const nCol = (el.cols || []).length + 1; return { nCol, colW: el.width / Math.max(1, nCol), rowH: 26 }; } // +1 = the Name column
+  _tableFor(el) {
+    if (!this._tableCache) this._tableCache = new Map();
+    const key = (el.query || '') + '\x1f' + (el.cols || []).join(',');
+    const c = this._tableCache.get(key); if (c) return c.ready ? c : null;
+    const entry = { ready: false, rows: [] }; this._tableCache.set(key, entry);
+    (async () => {
+      try {
+        const res = await this.plugin.data.searchByQuery(el.query || '', 50); const recs = (res && res.records) || [];
+        const rows = [];
+        for (const r of recs.slice(0, 50)) {
+          const cells = (el.cols || []).map((name) => { let v = ''; try { const p = r.prop && r.prop(name); if (p) v = (p.choiceLabel && p.choiceLabel()) || (p.text && p.text()) || (p.number && p.number() != null ? String(p.number()) : '') || (p.date && p.date() ? pxcMsToIsoLocal(p.date().getTime()) : '') || ''; } catch (_e) {} return String(v || ''); });
+          rows.push({ guid: r.guid, title: (r.getName && r.getName()) || 'Untitled', cells });
+        }
+        entry.rows = rows; entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateTables() { if (this._tableCache && this._tableCache.size) { this._tableCache.clear(); this.dirty = true; } }
+  _drawTableNode(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2), g = this._tableGeom(el);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill(); ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#7c5cff'; ctx.stroke();
+    ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h); ctx.clip();
+    const cols = ['Name'].concat(el.cols || []), data = this._tableFor(el);
+    ctx.fillStyle = '#f3f0ff'; ctx.fillRect(x, y, w, g.rowH);
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = '#5b4bd6';
+    cols.forEach((cn, ci) => ctx.fillText(this._clipText(ctx, cn, g.colW - 10), x + ci * g.colW + 6, y + g.rowH / 2));
+    ctx.strokeStyle = '#e8e5f5'; ctx.lineWidth = 1;
+    for (let ci = 1; ci < g.nCol; ci++) { ctx.beginPath(); ctx.moveTo(x + ci * g.colW, y); ctx.lineTo(x + ci * g.colW, y + h); ctx.stroke(); }
+    if (!data) { ctx.fillStyle = '#9aa0a6'; ctx.font = '12px system-ui, sans-serif'; ctx.fillText('Loading…', x + 8, y + g.rowH + 14); ctx.restore(); ctx.restore(); return; }
+    if (!cols.length || cols.length === 1) { ctx.fillStyle = '#9aa0a6'; ctx.font = '12px system-ui, sans-serif'; ctx.fillText('Double-click to set columns', x + 8, y + g.rowH + 14); }
+    let ry = y + g.rowH;
+    for (const row of data.rows) {
+      if (ry + g.rowH > y + h) break;
+      ctx.strokeStyle = '#eeeeee'; ctx.beginPath(); ctx.moveTo(x, ry); ctx.lineTo(x + w, ry); ctx.stroke();
+      ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, row.title, g.colW - 10), x + 6, ry + g.rowH / 2);
+      ctx.fillStyle = '#3c4043'; row.cells.forEach((cv, ci) => ctx.fillText(this._clipText(ctx, cv, g.colW - 10), x + (ci + 1) * g.colW + 6, ry + g.rowH / 2));
+      ry += g.rowH;
+    }
+    ctx.restore(); ctx.restore();
+  }
+  _tableCellAt(el, wx, wy) {
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2, c = Math.cos(-el.angle), s = Math.sin(-el.angle), dx = wx - cx, dy = wy - cy; wx = cx + dx * c - dy * s; wy = cy + dx * s + dy * c; }
+    if (wx < el.x || wx > el.x + el.width || wy < el.y || wy > el.y + el.height) return null;
+    const g = this._tableGeom(el), idx = pxcTableCellIndex(el.x, el.y, el.width, g.nCol, g.rowH, wx, wy);
+    if (idx.ri === 0) return { header: true };
+    const data = this._tableFor(el); if (!data) return null;
+    const row = data.rows[idx.ri - 1]; if (!row) return null;
+    if (idx.col === 0) return { isTitle: true, row };
+    const prop = (el.cols || [])[idx.col - 1]; if (!prop) return null;
+    return { row, prop, value: row.cells[idx.col - 1] || '', cx: el.x + idx.col * g.colW, cy: el.y + idx.ri * g.rowH, cw: g.colW, ch: g.rowH };
+  }
+  async _configureTable(el) {
+    const q = await this._promptText('Table query (Thymer search, e.g. @task @overdue):', el.query || '@task');
+    if (q == null) return;
+    const cols = await this._promptText('Columns (comma-separated property names, e.g. Status, Due):', (el.cols || []).join(', '));
+    if (cols == null) return;
+    el.query = q; el.cols = String(cols).split(',').map((s) => s.trim()).filter(Boolean);
+    this._invalidateTables(); this.dirty = true; this.scheduleSave();
+  }
+  _editTableCell(el, cell) {
+    if (!cell || !cell.prop || !cell.row) return;
+    const z = this.camera.zoom, s = this.camera.worldToScreen(cell.cx, cell.cy);
+    if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} }
+    const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'pxc-cell-edit'; inp.value = cell.value || ''; this._cellInp = inp;
+    inp.style.cssText = 'position:absolute;left:' + s.x + 'px;top:' + s.y + 'px;width:' + (cell.cw * z) + 'px;height:' + (cell.ch * z) + 'px;box-sizing:border-box;border:2px solid #7c5cff;border-radius:3px;padding:0 4px;font:' + (12 * z) + 'px system-ui;outline:none;z-index:25;background:#fff;color:#1e1e1e';
+    this.wrap.appendChild(inp); setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    let done = false;
+    const commit = async () => { if (done) return; done = true; const val = inp.value; try { inp.remove(); } catch (_e) {} this._cellInp = null;
+      try { const rec = await this.plugin.data.getRecord(cell.row.guid); if (rec && this._writeProp(rec, cell.prop, val)) { this._invalidateTables(); this._invalidateRec(cell.row.guid); } } catch (_e) {}
+      this.dirty = true; this.scheduleSave();
+    };
+    inp.addEventListener('blur', commit);
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); else if (e.key === 'Escape') { done = true; try { inp.remove(); } catch (_e) {} this._cellInp = null; } }); // Escape = abort with NO write (set `done` so a blur→commit no-ops; avoids the lossy date round-trip)
+    inp.addEventListener('pointerdown', (e) => e.stopPropagation());
+  }
+  _insertTable(query, cols, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeTable(this._snap(wx - 200), this._snap(wy - 100), 400, 240, query, cols);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
@@ -4471,7 +4583,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'rollup' || single.type === 'board')) {
+    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'rollup' || single.type === 'table' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -4557,7 +4669,7 @@ class CanvasView {
     try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
     const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -4597,6 +4709,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert roll-up (KPI) card', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (!v) return; v._promptText('Roll-up query (Thymer search, e.g. @task @overdue):', '@task').then((q) => { if (q == null) return; v._promptText('Aggregation — count | %done | sum:Prop | avg:Prop | min:Prop | max:Prop:', 'count').then((a) => { if (a != null) v._insertRollup(q, a); }); }); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert live table (records × properties)', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (!v) return; v._promptText('Table query (Thymer search, e.g. @task):', '@task').then((q) => { if (q == null) return; v._promptText('Columns (comma-separated property names, e.g. Status, Due):', 'Status').then((cs) => { if (cs == null) return; v._insertTable(q, String(cs).split(',').map((s) => s.trim()).filter(Boolean)); }); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract selection to a new drawing (Pizza Slicer)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._deconstructSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Capture note (drop a linked card)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._captureNote(); } });
@@ -4667,7 +4780,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); v._invalidateRollups(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC + ROLL-UP: refresh nodes + GC a trashed drawing's backref sub-map
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); v._invalidateRollups(); v._invalidateTables(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC + ROLL-UP + TABLE: refresh nodes + GC a trashed drawing's backref sub-map
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
@@ -5491,6 +5604,19 @@ class Plugin extends AppPlugin {
         const lm = new Date(2026, 5, 15).getTime(); // LOCAL midnight Jun 15 → +Nd round-trips to the right local date (no off-by-one)
         const isoOk = pxcMsToIsoLocal(lm) === '2026-06-15' && pxcMsToIsoLocal(pxcTimelineMs(pxcTimelineX(lm + 2 * 86400000, lm, x0, ppd), lm, x0, ppd)) === '2026-06-17';
         return { x, back, isoOk, ok: x === x0 + 3 * ppd && back === d3 && snap === day0 + 2 * 86400000 && pxcTimelineX(day0, day0, x0, ppd) === x0 && isoOk };
+      },
+      // LIVE TABLE: cell-index math (header row, Name col, clamping) + element shape.
+      tableTest: () => {
+        const el = makeTable(100, 50, 400, 240, '@task', ['Status', 'Due']); // nCol = 3 (Name + 2), colW = 400/3 ≈ 133.3, rowH 26
+        const hdr = pxcTableCellIndex(el.x, el.y, el.width, 3, 26, 110, 56);   // header row (ri 0), Name col (0)
+        const cell = pxcTableCellIndex(el.x, el.y, el.width, 3, 26, 100 + 133.4 * 1.5, 50 + 26 * 2.5); // col 1, ri 2
+        const clampL = pxcTableCellIndex(el.x, el.y, el.width, 3, 26, -999, 50); // left of table → col 0 clamp
+        const clampR = pxcTableCellIndex(el.x, el.y, el.width, 3, 26, 99999, 50); // right → col nCol-1 clamp
+        const inside = hitElement(el, 200, 100, 4), outside = hitElement(el, 9999, 9999, 4);
+        return { type: el.type, hdr, cell, ok:
+          el.type === 'table' && el.cols.length === 2 &&
+          hdr.ri === 0 && hdr.col === 0 && cell.col === 1 && cell.ri === 2 &&
+          clampL.col === 0 && clampR.col === 2 && inside === true && outside === false };
       },
       // ROLL-UP CARDS: agg-spec parsing + numeric aggregation.
       rollupTest: () => {

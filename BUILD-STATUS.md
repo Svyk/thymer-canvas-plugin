@@ -1,7 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
-## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
-Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — ✅ COMPLETE (12/12)
+Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D. Canvas: Minimap, Bulk-Brush,
+Quick-capture, Roll-Up, Timeline, AI-relation-suggest, AI-auto-cluster, Subgraph-drop seam, Live Table (v1.17→1.25).
+Plexus Brain (`~/plexus-brain`, v0.28→0.31, separate repo): Path-Finder, Multi-hop, Graph-analytics, Subgraph→Canvas.
+- **v1.25.0 — Live Table element** (Tier 2). New `table` element: a query → records×properties grid; **double-click a data
+  cell → edit it** via a DOM `<input>` overlay that writes the typed property (reuses the schema-safe `_writeProp`:
+  choice→setChoice / confirmed-datetime→DateTime / else raw `set`); double-click header/empty → reconfigure (query +
+  comma-separated columns). Full new-element-type wiring (both render sites, hitElement, resize hit-test AND handle-draw,
+  dblclick, `_invalidateTables`). Pure `pxcTableCellIndex` (8/8 node asserts). `_cellInp` disposed in destroy(); single
+  input; idempotent `done`-flag commit. Review: 1 LOW fixed (Esc now aborts with NO write — was a lossy date round-trip).
+  Command on `ti-table`.
+- **v1.24.0 — Subgraph drop seam** (Tier 3, canvas half). `window.__plexusCanvas.dropSubgraph(payload)` → `_dropSubgraph`
+  places role-coloured live record cards + bound arrows from a Brain subgraph. Paired with the Brain `_subgraphToCanvas`
+  command (plexus-brain v0.31.0). Cross-plugin review = CLEAN.
 - **v1.23.0 — AI auto-cluster into named frames** (Tier 4). Embed each card/text **on-device** (`plugin._embed`, nothing
   leaves the device), single-linkage cluster by cosine (`pxcClusterByThreshold`, union-find), then physically move each
   cluster into a tidy **AI-named frame** (`_aiComplete` names, fallback "Cluster N"). Two degenerate guards (all-one-group,
