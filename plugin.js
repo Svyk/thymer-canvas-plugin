@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.34.0';
+const PLEXUS_VERSION = '1.35.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -877,6 +877,17 @@ function makeRecordCard(x, y, w, h, recordGuid) {
 const ROLE_HEX = { focus: '#7c5cff', parent: '#f59e0b', child: '#0ea5e9', sibling: '#14b8a6', leftFriend: '#a855f7', rightFriend: '#ec4899', friend: '#a855f7' };
 function lineTextOf(li) {
   try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
+}
+// TRANSCLUSION INDENTATION: flatten a line-item subtree into [{text, depth}] (depth 0 = the card body's top level) so a
+// record/line card renders its nesting the way Thymer's outline does. Capped to keep big bodies bounded. getChildren()
+// is async; an empty/unresolved level (Go-nil) → [].
+async function pxcFlattenTree(items, depth, out, cap) {
+  for (const li of (items || [])) {
+    if (out.length >= cap) return;
+    const txt = lineTextOf(li); if (txt) out.push({ text: txt, depth });
+    let ch = []; try { ch = (li.getChildren && await li.getChildren()) || []; } catch (_e) {}
+    if (ch.length) await pxcFlattenTree(ch, txt ? depth + 1 : depth, out, cap);
+  }
 }
 // IO-1: a native TASK node — backed by a REAL Thymer `task` line item (lineGuid on recordGuid). Its checkbox
 // toggles setTaskStatus, so the same task is live in the Task Board / Day View / @task search. A task dropped on
@@ -2745,7 +2756,7 @@ class CanvasView {
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
-        try { const items = await rec.getLineItems(); entry.lines = (items || []).map(lineTextOf).filter(Boolean).slice(0, 8); } catch (_e) {}
+        try { const items = await rec.getLineItems(); const out = []; await pxcFlattenTree(items, 0, out, 10); entry.lines = out; } catch (_e) {} // [{text, depth}] — nested outline
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -2820,7 +2831,7 @@ class CanvasView {
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; ctx.fillText(this._clipText(ctx, ln, maxW), tx, ty); ty += 16; }
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, ln.text || '', maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3360,7 +3371,7 @@ class CanvasView {
         if (!li) { entry.text = '(line gone)'; entry.ready = true; this.dirty = true; return; }
         entry.text = lineTextOf(li);
         let kids = []; try { if (li.getChildren) kids = (await li.getChildren()) || []; } catch (_e) {} // getChildren() returns a Promise — must await
-        entry.children = (kids || []).map(lineTextOf).filter(Boolean).slice(0, 12);
+        const kout = []; await pxcFlattenTree(kids, 0, kout, 12); entry.children = kout; // [{text, depth}] — nested outline
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.ready = true; this.dirty = true; }
     })();
@@ -3438,7 +3449,7 @@ class CanvasView {
     if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
     ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of data.children) { if (ty > y + h - 14) break; ctx.fillText(this._clipText(ctx, '• ' + ln, maxW), tx, ty); ty += 16; }
+    for (const ln of data.children) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, '• ' + (ln.text || ''), maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth
     ctx.restore(); ctx.restore();
   }
   async _toggleTaskNode(el) {

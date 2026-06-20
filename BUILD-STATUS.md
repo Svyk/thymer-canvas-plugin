@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.35.0 — transclusion INDENTATION: cards render their nesting like Thymer's outline (2026-06-19)
+User (item 1): "mimic the thymer flow plugin so I can see indentation level." Record/line cards rendered their body lines
+FLAT; now they show the source's nesting. New `pxcFlattenTree(items, depth, out, cap)` (async, DFS) flattens a line-item
+subtree to `[{text, depth}]`; `_recFor`/`_lineFor` build that (cap 10/12); `_drawRecordCard`/`_drawLineCard` indent each
+line by `depth*13px` (clip width reduced to match). Node-tested (DFS depth order, cap, blank-parent-keeps-child-depth).
+- Shape change: `entry.lines`/`entry.children` went `[string]` → `[{text,depth}]`; the only readers (the two card draws +
+  one test using `.length`) updated. The editable-card editor reads the live line ITEMS, unaffected.
+- **Deferred:** EDIT-side indent (Tab to re-nest from the canvas) — that's a structural nesting write that conflicts with
+  the safe edit-contract; for now you SEE the nesting (read), and restructure in the record. (Revisit with the editor.)
+
+## NOTE — pan "redrawing" speed (deferred per user, to revisit after items 1–3)
+User clarified the lag is **panning the canvas (dragging empty space), NOT dragging items**. Root path = the camera-blit
+(`render()` ~4583): on pan it blits the cached VIEWPORT bitmap shifted, so newly-revealed edges are blank until
+`_scheduleSettle` does a crisp re-render → the visible "redrawing." (v1.32/1.34 fixed ITEM-drag compositing, a different
+path — still a valid win.) Fix candidate when we revisit: cache a MARGIN beyond the viewport so normal panning stays
+within cached content; re-cache when panning past it. Needs a live chrome re-profile to confirm.
+
 ## ✅ v1.34.0 — drag perf, take 2: FREEZE the static canvas, draw movers on the overlay (2026-06-19, trace-driven)
 v1.32's static-layer cache wasn't enough — a chrome **performance trace** of a real drag showed the cost was **28ms
 presentation/composite delay** (+22ms input delay, only **0.2ms** actual JS): the GPU was re-uploading the big scene
