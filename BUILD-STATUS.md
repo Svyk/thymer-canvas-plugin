@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.28.0 — refs are now inline editable runs: no @/@@ marks, underlined, type around them (2026-06-19)
+User request: "don't need to show the at marks… these refs should have nice css like underlines… I should be able to
+continue to edit these lines and add other text." The inline-run renderer (`drawRuns`) already did all of this (no prefix,
+ref color, underline, editable); the picker just wasn't using it for an empty box.
+- **`_applyRefChip` always splices an INLINE ref run** now (removed the caret-only `_configureRef` whole-element-chip
+  branch). Empty box: `spliceRunRange` over the just-typed `@token` collapses it to a single ref run; the editor stays
+  open so you keep typing. Trigger range re-derived from the live caret via `pxcParseRefTrigger` (robust if the caret
+  moved while the picker was open).
+- **`pxcChipToInlineRun(el)`** migrates existing whole-element line/record chips → inline runs on load (drops the
+  `@`/`@@` prefix + `isRef/refKind/refGuid/refLineGuid/refLabel/refAlias` markers, sets `el.runs=[{t:'ref',…}]`,
+  re-measures). Image chips + mind-map roots (`isRef` w/o `refKind`) are skipped by the kind-gate. Idempotent; persists
+  via a one-shot debounced `saveNow` when anything converted.
+- Behavior post-convert: single-click the ref → navigates; double-click the element → EDITS (markers gone → falls to
+  `_editText`); flyback ↗ still works (`_reindexBackrefs` keys runs by the same lineGuid/recordGuid).
+- Verify: node test (6 groups — caret-only collapse, mid-text splice, line/record/alias migrate, image-skip, idempotent);
+  `node --check` clean; adversarial `code-reviewer`: NO blocking defects (kind-gate confirmed load-bearing for mind-map
+  roots; the one LOW caret-move edge hardened via the live `pxcParseRefTrigger` re-derive).
+
 ## ✅ v1.27.0 — two live-found bug fixes (2026-06-19, chrome-devtools session on svyat.thymer.com)
 Caught via live inspection of the day-page drawing (debug-Chrome MCP attach), root-caused, fixed, and the user's existing
 chips live-corrected.

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.27.0';
+const PLEXUS_VERSION = '1.28.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -578,6 +578,19 @@ function spliceRunRange(runs, start, end, newRun) {
     if (rcut) right.push({ t: 'text', s: rcut });
   }
   return normalizeRuns(left).concat([newRun], normalizeRuns(right));
+}
+// REF DISPLAY: retire a whole-element line/record ref CHIP into an INLINE ref RUN — drops the @/@@ prefix, renders
+// underlined (drawRuns), and becomes editable inline (type text around it). Image chips keep their lightbox chip.
+// Idempotent: no-op once the element already carries runs or isn't a line/record chip.
+function pxcChipToInlineRun(el) {
+  if (!el || !el.isRef || (el.runs && el.runs.length)) return false;
+  if (el.refKind !== 'line' && el.refKind !== 'record') return false;
+  const run = { t: 'ref', kind: el.refKind, guid: el.refGuid || null, lineGuid: el.refLineGuid || null, label: el.refLabel || 'ref' };
+  if (el.refAlias) run.alias = el.refAlias;
+  el.runs = [run]; el.text = flattenRuns(el.runs);
+  delete el.isRef; delete el.refKind; delete el.refGuid; delete el.refLineGuid; delete el.refLabel; delete el.refAlias;
+  try { measureRuns(el); } catch (_e) {}
+  return true;
 }
 function measureRuns(el) {
   if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
@@ -2447,28 +2460,25 @@ class CanvasView {
     if (row && row.imageRef) { this._applyImageRefRow(ta, el, row); return; } // IMG-REF
     if (row && row.transclude) { this._applyTranscludeRow(ta, el, row); return; } // TRANSCLUDE
     const rp = this._refPick; const alias = rp.alias || ''; rp.alias = '';
-    const before = ta.value.slice(0, rp.triggerStart), after = ta.value.slice(ta.selectionStart);
+    // re-derive the trigger range from the CURRENT caret (robust if the caret moved while the picker was open); fall
+    // back to the picker's recorded triggerStart. end = live caret. Captured before _closeRefPicker resets the picker.
+    const _trig = pxcParseRefTrigger(ta.value, ta.selectionStart); const start = (_trig ? _trig.triggerStart : rp.triggerStart), end = ta.selectionStart;
     const opts = { kind: row.kind, guid: row.guid, lineGuid: row.lineGuid, label: row.label, alias: alias };
     this._closeRefPicker();
-    if (!before.trim() && !after.trim()) { // caret-only → this element becomes the chip; close the editor
-      this._configureRef(el, opts); this._indexBackref(el);
-      ta.value = el.text; // commit()'s syncRuns writes ta.value→el.text; sync it to the configured label so the chip shows the FULL ref, not the stale typed query (@@jimm)
-      if (this._refCommit) this._refCommit();
-      try { this.plugin.ui.addToaster({ title: 'Reference added — double-click to open.', dismissible: true }); } catch (_e) {}
-    } else { // CANVAS-SEG mid-text → splice an inline ref RUN into the host's runs; keep editing the host (no sibling chip)
-      const start = rp.triggerStart, end = ta.selectionStart;
-      const baseRuns = (el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: ta.value }];
-      const refRun = { t: 'ref', kind: opts.kind === 'line' ? 'line' : 'record', guid: opts.guid || null, lineGuid: opts.lineGuid || null, label: opts.label || 'ref' };
-      if (alias && String(alias).trim()) refRun.alias = String(alias).trim();
-      el.runs = spliceRunRange(baseRuns, start, end, refRun);
-      el.text = flattenRuns(el.runs); measureRuns(el);
-      ta.value = el.text;
-      const caret = start + runDisplay(refRun).length; try { ta.selectionStart = ta.selectionEnd = caret; } catch (_e) {}
-      if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value); // keep the edit baseline in sync (no phantom dissolve next keystroke)
-      if (this._refRefresh) this._refRefresh(); // resize the textarea to the spliced value now (not on next keystroke)
-      this.dirty = true; this.scheduleSave();
-      try { this.plugin.ui.addToaster({ title: 'Inline reference added.', dismissible: true }); } catch (_e) {} // inline line refs are forward-nav only (no note-side badge) by design
-    }
+    // ALWAYS splice an INLINE ref RUN into this (editable) text element: no @/@@ prefix, underlined (drawRuns), and you
+    // can keep typing text before/after it. Caret-only too — spliceRunRange over the just-typed @token collapses an empty
+    // box into a single-run ref line. (Whole-element ref chips are retired; pxcChipToInlineRun migrates old ones on load.)
+    const baseRuns = (el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: ta.value }];
+    const refRun = { t: 'ref', kind: opts.kind === 'line' ? 'line' : 'record', guid: opts.guid || null, lineGuid: opts.lineGuid || null, label: opts.label || 'ref' };
+    if (alias && String(alias).trim()) refRun.alias = String(alias).trim();
+    el.runs = spliceRunRange(baseRuns, start, end, refRun);
+    el.text = flattenRuns(el.runs); measureRuns(el);
+    ta.value = el.text;
+    const caret = start + runDisplay(refRun).length; try { ta.selectionStart = ta.selectionEnd = caret; } catch (_e) {}
+    if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value); // keep the edit baseline in sync (no phantom dissolve next keystroke)
+    if (this._refRefresh) this._refRefresh(); // resize the textarea to the spliced value now
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Reference added — keep typing, or click it to open.', dismissible: true }); } catch (_e) {}
   }
   // TRANSCLUDE: the user chose "embed" (⧉ button / Shift+Enter). Strip the @token from the host text, then drop a LIVE
   // read-only card below the editing element — a record target reuses the existing record card (already live), a line
@@ -4393,6 +4403,8 @@ class CanvasView {
     // PERF (architecture review): deletes are soft tombstones (isDeleted), never spliced — so n grows unbounded
     // over years and EVERY scan pays for the graveyard. Undo history is empty on load, so compact it away here.
     try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
+    // REF DISPLAY (2026-06-19): retire whole-element @/@@ ref chips into inline ref RUNs (no prefix, underlined, editable).
+    try { let _mig = 0; for (const e of (this.scene.elements || [])) { if (pxcChipToInlineRun(e)) _mig++; } if (_mig && this.rec) setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 700); } catch (_e) {}
     // CRITICAL: the scene was just REPLACED by the loaded one. A render may have already built the spatial grid from
     // the empty pre-load scene (loadOrInit is async) — force a rebuild, or the grid-driven render cull draws NOTHING.
     this._gridDirty = true; this._grid = null; this._cacheValid = false;
