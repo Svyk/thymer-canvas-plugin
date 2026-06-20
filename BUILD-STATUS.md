@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.36.0 — TEXT WRAP: drag a text box's width to wrap (2026-06-19)
+User (item 2): "I should have an option to wrap text." A text element now carries `el.wrapW` (serialized px). DRAG a text
+element's left/right resize handle → `_applyResize` sets `el.wrapW=max(24,nw)` + re-measures; text word-wraps to that
+width, height follows the line count, and the editor textarea wraps to match (`white-space:pre-wrap; width=wrapW*z`).
+- `pxcWrapLines(ctx,text,wrapW)` — greedy word-wrap (honors `\n`; a word wider than wrapW overflows, no mid-word break).
+  `measureText` + `drawText` (plain) and `measureRuns` (inline-ref runs: text-runs word-wrap, a ref wraps as ONE unit)
+  all branch on wrapW. `el.wrapW` unset → byte-identical to before (proven in node tests — the inline refs don't regress).
+- Adversarial `code-reviewer`: **no HIGH/MED** (no-wrap path provably unchanged; measure/draw consistent; refs hit/underline
+  correctly when wrapped). 3 LOW fixed: bbox `el.width=max(wrapW,maxW)` covers a ref/word wider than wrapW (stays
+  clickable); `transform` self-test skips text; editor textarea `box-sizing:border-box`.
+- node-tested: pxcWrapLines (fit/wrap/newline/falsy), measureRuns no-wrap==old + wrap (width, multi-line, ref-as-unit).
+
 ## ✅ v1.35.0 — transclusion INDENTATION: cards render their nesting like Thymer's outline (2026-06-19)
 User (item 1): "mimic the thymer flow plugin so I can see indentation level." Record/line cards rendered their body lines
 FLAT; now they show the source's nesting. New `pxcFlattenTree(items, depth, out, cap)` (async, DFS) flattens a line-item

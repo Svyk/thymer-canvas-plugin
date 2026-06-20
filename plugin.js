@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.35.0';
+const PLEXUS_VERSION = '1.36.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -524,12 +524,28 @@ function drawFreedraw(ctx, el) {
 }
 let PLEXUS_DEFAULT_FONT = 'system-ui, sans-serif'; // S7/P0.6: user-chosen default font (set from settings on load + change)
 function textFont(el) { return (el.fontSize || 24) + 'px ' + ((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT); }
+// TEXT WRAP: word-wrap `text` into display lines that each fit within `wrapW` px (measured with `ctx`). Honours explicit
+// newlines; a single word wider than wrapW overflows its line (no mid-word break). wrapW falsy → one line per paragraph.
+function pxcWrapLines(ctx, text, wrapW) {
+  const out = [];
+  for (const para of String(text == null ? '' : text).split('\n')) {
+    if (!(wrapW > 0)) { out.push(para); continue; }
+    const words = para.split(' '); let cur = '';
+    for (const word of words) {
+      const test = cur === '' ? word : cur + ' ' + word;
+      if (cur !== '' && ctx.measureText(test).width > wrapW) { out.push(cur); cur = word; } else cur = test;
+    }
+    out.push(cur);
+  }
+  return out;
+}
 function measureText(el) { // updates el.width/height from el.text; uses a shared offscreen ctx
   if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
-  const ctx = measureText._c; ctx.font = textFont(el);
+  const ctx = measureText._c; ctx.font = textFont(el); const lh = (el.fontSize || 24) * 1.25;
+  if (el.wrapW > 0) { const lines = pxcWrapLines(ctx, el.text || '', el.wrapW); el.width = el.wrapW; el.height = Math.max(lines.length, 1) * lh; return; }
   const lines = String(el.text || '').split('\n'); let w = 0;
   for (const ln of lines) w = Math.max(w, ctx.measureText(ln || ' ').width);
-  el.width = Math.max(w, 8); el.height = Math.max(lines.length, 1) * (el.fontSize || 24) * 1.25;
+  el.width = Math.max(w, 8); el.height = Math.max(lines.length, 1) * lh;
 }
 // ── CANVAS-SEG: mid-sentence inline refs ──────────────────────────────────────
 // A text element MAY carry `el.runs` = an array of {t:'text', s} | {t:'ref', kind:'record'|'line', guid, lineGuid?,
@@ -596,13 +612,19 @@ function measureRuns(el) {
   if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d');
   const ctx = measureText._c; ctx.font = textFont(el);
   const fs = el.fontSize || 24, lh = fs * 1.25, runs = runsOf(el);
+  const wrapW = el.wrapW > 0 ? el.wrapW : Infinity; // TEXT WRAP: word-wrap text runs at wrapW; wrap a whole ref run as a unit
   const layout = []; let line = 0, x = 0, maxW = 0;
+  const nl = () => { if (x > maxW) maxW = x; line++; x = 0; };
   for (const run of runs) {
-    if (run.t === 'ref') { const txt = runDisplay(run), w = ctx.measureText(txt || ' ').width; layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; }
-    else { const parts = String(run.s == null ? '' : run.s).split('\n'); for (let i = 0; i < parts.length; i++) { if (i > 0) { if (x > maxW) maxW = x; line++; x = 0; } const txt = parts[i]; if (!txt) continue; const w = ctx.measureText(txt).width; layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; } }
+    if (run.t === 'ref') { const txt = runDisplay(run), w = ctx.measureText(txt || ' ').width; if (x > 0 && x + w > wrapW) nl(); layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; }
+    else { const parts = String(run.s == null ? '' : run.s).split('\n'); for (let i = 0; i < parts.length; i++) {
+      if (i > 0) nl();
+      if (wrapW === Infinity) { const txt = parts[i]; if (!txt) continue; const w = ctx.measureText(txt).width; layout.push({ run, line, x, w, text: txt }); x += w; if (x > maxW) maxW = x; }
+      else { for (const tok of parts[i].split(/( )/)) { if (tok === '') continue; const w = ctx.measureText(tok).width; if (x > 0 && x + w > wrapW && tok.trim()) nl(); layout.push({ run, line, x, w, text: tok }); x += w; if (x > maxW) maxW = x; } } // keep spaces as their own tokens so word boundaries survive
+    } }
   }
   if (x > maxW) maxW = x;
-  el.width = Math.max(maxW, 8); el.height = Math.max(line + 1, 1) * lh;
+  el.width = (wrapW === Infinity) ? Math.max(maxW, 8) : Math.max(el.wrapW, maxW); el.height = Math.max(line + 1, 1) * lh; // keep wrapW as the min, but cover a ref/word wider than wrapW so the bbox stays clickable
   _pxcRunLayout.set(el, layout);
   return layout;
 }
@@ -729,7 +751,7 @@ function drawText(ctx, el) {
   ctx.save();
   ctx.fillStyle = adaptInk(el.strokeColor || '#1e1e1e'); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
   ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
-  const fs = el.fontSize || 24, lh = fs * 1.25, lines = String(el.text).split('\n');
+  const fs = el.fontSize || 24, lh = fs * 1.25, lines = (el.wrapW > 0) ? pxcWrapLines(ctx, el.text, el.wrapW) : String(el.text).split('\n'); // TEXT WRAP
   for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
   ctx.restore();
 }
@@ -2395,6 +2417,13 @@ class CanvasView {
     const sgnX = movesX ? Math.sign(along) || 1 : 0, sgnY = movesY ? Math.sign(perp) || 1 : 0;
     const ncx = anchor.x + sgnX * (nw / 2) * ux + sgnY * (nh / 2) * vx;
     const ncy = anchor.y + sgnX * (nw / 2) * uy + sgnY * (nh / 2) * vy;
+    if (el.type === 'text' && movesX) { // TEXT WRAP: a horizontal resize sets the wrap width; height follows the wrapped line count
+      el.wrapW = Math.max(24, nw);
+      if (el.runs && el.runs.length) measureRuns(el); else measureText(el); // sets el.width = wrapW + el.height
+      el.x = (sgnX >= 0) ? anchor.x : anchor.x - el.width;       // keep the un-dragged horizontal edge fixed (angle≈0)
+      el.y = (sgnY >= 0) ? anchor.y : anchor.y - el.height; el.angle = a;
+      return;
+    }
     el.width = nw; el.height = nh; el.x = ncx - nw / 2; el.y = ncy - nh / 2; el.angle = a;
   }
   _editText(el) {
@@ -2410,7 +2439,8 @@ class CanvasView {
       ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
       const dk = !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark(); // S7/UX-6: typed text must read on a dark canvas
       ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = adaptInk(el.strokeColor || '#1e1e1e', dk); ta.style.fontFamily = (el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT;
-      ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px';
+      if (el.wrapW > 0) { ta.style.whiteSpace = 'pre-wrap'; ta.style.width = (el.wrapW * z) + 'px'; ta.style.minWidth = ''; } // TEXT WRAP: the editor wraps to match the rendered box
+      else { ta.style.whiteSpace = 'pre'; ta.style.width = ''; ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px'; }
     };
     place(); this.wrap.appendChild(ta);
     const grow = () => { ta.style.height = '0px'; ta.style.height = ta.scrollHeight + 'px'; };
@@ -6298,7 +6328,7 @@ class Plugin extends AppPlugin {
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
-        const el = v.scene.elements.find((e) => !e.isDeleted); if (!el) return { error: 'no element' };
+        const el = v.scene.elements.find((e) => !e.isDeleted && e.type !== 'text'); if (!el) return { error: 'no element' }; // skip text: it now resizes via wrapW (width=wrapW, height=line-count), not the w+Δ/h+Δ this asserts
         v.selected.clear(); v.selected.add(el.id);
         const before = { x: el.x, y: el.y, w: el.width, h: el.height, a: el.angle };
         const rs0 = { x: el.x, y: el.y, w: el.width, h: el.height, a: el.angle || 0 };
@@ -6433,7 +6463,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root.pxc-present .pxc-interactive { cursor: default; }
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
-.pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; box-sizing: border-box; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
 /* UX-6: dark-mode chrome — toolbar/props/search go dark to match the dark canvas (theme tokens would stay light). */
 .pxc-host .pxc-root.pxc-dark .pxc-toolbar, .pxc-host .pxc-root.pxc-dark .pxc-props, .pxc-host .pxc-root.pxc-dark .pxc-search { background: #1c1f26; border-color: #2e323b; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
