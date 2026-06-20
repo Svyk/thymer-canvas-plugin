@@ -1,5 +1,26 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.27.0 — two live-found bug fixes (2026-06-19, chrome-devtools session on svyat.thymer.com)
+Caught via live inspection of the day-page drawing (debug-Chrome MCP attach), root-caused, fixed, and the user's existing
+chips live-corrected.
+- **REF-LABEL: a caret-only `@`/`@@` chip showed the typed query, not the picked target.** `_applyRefChip`'s caret-only
+  branch does `_configureRef(el)` (sets `el.text = pfx + label`) then `_refCommit()` → `commit()` → `syncRuns()` which ran
+  `el.text = ta.value`, **overwriting** the label with the stale textarea query (`@@jimm`, `@jim`). The binding
+  (`refGuid`/`refLineGuid`/`refLabel`) was always correct — only the DISPLAY text was clobbered (so flyback + open both
+  worked, but the chip read truncated). Fix: `ta.value = el.text;` after `_configureRef`, before `_refCommit()`, so the
+  commit re-derives the same full text. (Live-corrected the two existing chips via `_configureRef` re-run + saveNow.)
+- **`_scheduleBannerText` was CALLED in 3 places but never DEFINED → `TypeError` thrown on EVERY `scheduleSave`.** Saves
+  still persisted (the save-timer is armed one line before the throw), but the throw aborted the rest of each action — most
+  visibly **transclude** (the card pushed, but the throw killed the confirm toaster + clean teardown → "transclude isn't
+  working"), and the banner-preview + `Canvas Text` search mirror never refreshed, plus uncaught-error spam every edit.
+  Proven live: stubbing the method made transclude produce a clean linecard with no error. Fix: define `_scheduleBannerText()`
+  as the intended debounced (1200ms) wrapper around `_writeBannerTextInline(this.plugin, this.rec, this.scene)`; `_btTimer`
+  was already cleared in `destroy()`.
+- **Not a bug:** record/line cards are LIVE READ-ONLY embeds — you edit the SOURCE record (double-click the card → `_openCard`
+  opens it), and the card mirrors it. Inline-editing a card on the canvas is intentionally not a thing.
+- Verify: `node --check` clean; flyback node test (5 groups) still green; live confirmation on svyat.thymer.com (both chips
+  now render the full label; transclude toaster fired; scene cleaned of probe artifacts).
+
 ## ✅ v1.26.0 — FLYBACK: note/record→canvas ↗ for inline @@/@ + record refs (2026-06-19, plan: staged-finding-ritchie FOLLOW-UP)
 The forward-nav refs (inline `@@` line, inline `@` record, whole-element record chips) now also get a **note-side ↗ flyback**
 — the symmetric half we'd scoped out of CANVAS-SEG/Phase D. Extends the proven Phase-D DOM-injection mechanism (synced

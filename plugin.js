@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.26.0';
+const PLEXUS_VERSION = '1.27.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2452,6 +2452,7 @@ class CanvasView {
     this._closeRefPicker();
     if (!before.trim() && !after.trim()) { // caret-only → this element becomes the chip; close the editor
       this._configureRef(el, opts); this._indexBackref(el);
+      ta.value = el.text; // commit()'s syncRuns writes ta.value→el.text; sync it to the configured label so the chip shows the FULL ref, not the stale typed query (@@jimm)
       if (this._refCommit) this._refCommit();
       try { this.plugin.ui.addToaster({ title: 'Reference added — double-click to open.', dismissible: true }); } catch (_e) {}
     } else { // CANVAS-SEG mid-text → splice an inline ref RUN into the host's runs; keep editing the host (no sibling chip)
@@ -4673,6 +4674,17 @@ class CanvasView {
     this._committed = this._snapshot();
     if (this._saveTimer) clearTimeout(this._saveTimer); this._saveTimer = setTimeout(() => this.saveNow(), 700);
     this._scheduleBannerText(); // O(n) banner+text refresh, debounced off the durable-save path
+  }
+  // Cosmetic + search-only mirror (Canvas Text prop + banner PNG), DEBOUNCED off the durable save so it doesn't amplify
+  // writes. Guarded; _btTimer cleared in destroy(). (Regression fix: scheduleSave/saveScene/settings all call this, but
+  // the definition had gone missing → "this._scheduleBannerText is not a function" thrown on every save.)
+  _scheduleBannerText() {
+    if (this._btTimer) clearTimeout(this._btTimer);
+    this._btTimer = setTimeout(() => {
+      this._btTimer = null;
+      if (this.destroyed || !this.rec) return;
+      try { _writeBannerTextInline(this.plugin, this.rec, this.scene); } catch (_e) {}
+    }, 1200);
   }
   // Bound undo RAM by BYTES, not a flat count — 80 full-scene snapshots of a 5 MB scene was ~400 MB. Keep the most
   // recent steps under a memory cap (always keep ≥1 so a single undo always works). Snapshots stay atomic + correct
