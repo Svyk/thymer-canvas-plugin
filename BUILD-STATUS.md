@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.49.0 — edge-drag-to-connect (Heptabase ergonomic) + label-editor polish (Phase 2 follow-up) (2026-06-20)
+- User feedback on Phase 2: labels look great, but (a) drawing an arrow from a circle to a card "didn't work" (connTest
+  PASSES → binding is fine; the real gap is the ERGONOMIC — they expected to drag from an element to connect, not pick the
+  arrow tool), and (b) the empty label editor was an ugly bare box on first entry.
+- **Edge-drag-to-connect:** hover any element (select tool) → 4 edge "nubs" appear (`_connNubsFor`, 14/zoom px outside the
+  bbox) → drag a nub → a BOUND connection from that element (`mode:'connect'` reuses the linear create/draw/finalize; source
+  startBinding preset, end binds on release). Nubs drawn on iCv (`_connHover`); `_nubAt` hit-tests. No tool switch needed.
+- **Label polish:** the midBinding-label textarea gets a `pxc-connlabel` pill + "Label" placeholder (CSS) so an empty label
+  reads as a label-in-progress, not a box.
+- Adversarial `code-reviewer` on the hot-input diff → fixed all 3 MED: (1) the top nub overlapped the rotate handle and the
+  nub-check ran first → a rotate/resize press could start a connection; moved the nub-check BELOW the handle block so handles
+  win. (2) `_connHover` stuck after a keyboard tool-switch → phantom nubs / stale-nub bogus connect; gated the overlay paint
+  on `tool==='select' && !editingId` + clear `_connHover` on tool-switch. (3) phantom nubs around the textarea on enter-edit
+  → same gate + clear `_connHover` in `_editText`. Vectors 3/4/5 (startBinding survival, device coords, drag-clear) confirmed OK.
+- node-tested the nub geometry (4 edge midpoints, zoom-scaled offset, negative-size normalized, all outside the bbox).
+- NEXT: Phase 3 — connection → backref (the note side: `↗` flag + flyback) with line- & image-region targeting.
+
 ## ✅ v1.48.0 — LABELED CONNECTIONS: arrow binds anything + a connectable midpoint label (Connections Phase 2) (2026-06-20)
 - Heptabase-style connections. (1) `_bindableAt` (:2077) now binds an arrow/line endpoint to ANY content element via
   `hitElement` (card/image/linecard/text/board/shape), excluding only arrow/line/frame (was: ROUGH_SHAPES only). (2)

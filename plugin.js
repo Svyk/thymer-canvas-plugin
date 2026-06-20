@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.48.0';
+const PLEXUS_VERSION = '1.49.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2077,6 +2077,15 @@ class CanvasView {
     for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue; if (hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
+  // CONNECT (Heptabase ergonomic): the 4 edge-midpoint "nubs" just OUTSIDE an element — hover an element → nubs appear →
+  // drag a nub to draw a BOUND connection from it (no tool switch). World coords; offset scales with zoom so they sit a
+  // constant ~14px outside on screen.
+  _connNubsFor(el) {
+    const x = Math.min(el.x, el.x + (el.width || 0)), y = Math.min(el.y, el.y + (el.height || 0)), w = Math.abs(el.width || 0), h = Math.abs(el.height || 0);
+    const cx = x + w / 2, cy = y + h / 2, o = 14 / this.camera.zoom;
+    return [{ x: cx, y: y - o }, { x: x + w + o, y: cy }, { x: cx, y: y + h + o }, { x: x - o, y: cy }];
+  }
+  _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
   _updateBindings() {
     // PERF: runs on EVERY pointermove during a drag. ONE O(n) scan collects bound arrows + connection-label text elements;
     // EARLY-RETURN when nothing is bound (the common case → no per-frame cost on connection-free scenes). The idMap (id→el)
@@ -2296,6 +2305,10 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
+        // CONNECT: pressing a hover-nub draws a BOUND connection FROM the hovered element (no tool switch). AFTER the handle
+        // block so rotate/resize handles win where the top nub overlaps the rotate handle.
+        const nub = this._nubAt(sp);
+        if (nub && this._connHover && !this._connHover.isDeleted) { mode = 'connect'; created = makeLinear(nub.x, nub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { elementId: this._connHover.id }; this.scene.elements.push(created); this.selected.clear(); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         const hit = this._hitTopAt(down.x, down.y); downRef = null;
         // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
         if (hit && hit.type === 'task') { const cb = this._taskCheckboxRect(hit); if (down.x >= cb.x && down.x <= cb.x + cb.w && down.y >= cb.y && down.y <= cb.y + cb.h) { this._toggleTaskNode(hit); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
@@ -2337,15 +2350,19 @@ class CanvasView {
     };
     const onMove = (e) => {
       if (this._miniDragging) { const rct = this.wrap.getBoundingClientRect(); this._miniTeleport(e.clientX - rct.left, e.clientY - rct.top); return; } // MINIMAP drag
-      if (!mode) { // CANVAS-SEG hover: pointer cursor over an inline ref run (no drag in progress)
+      if (!mode) { // hover (no drag): cursor over an inline ref / a connect-nub
         if (this.tool === 'select' && !this.editingId && !this._present && !this._eyedrop) {
           const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
           const over = hit && hit.type === 'text' && hit.runs && hit.runs.length && hitInlineRef(hit, w.x, w.y);
-          const cur = over ? 'pointer' : ''; if (this.wrap.style.cursor !== cur) this.wrap.style.cursor = cur;
-        }
+          // CONNECT: show edge nubs on the hovered connectable element (drag a nub → a bound connection, no tool switch)
+          const ch = (hit && hit.type !== 'arrow' && hit.type !== 'line' && hit.type !== 'frame') ? hit : null;
+          if ((ch && ch.id) !== (this._connHover && this._connHover.id)) { this._connHover = ch; this.dirty = true; }
+          const rct = this.wrap.getBoundingClientRect(); const onNub = !!this._nubAt({ x: e.clientX - rct.left, y: e.clientY - rct.top });
+          const cur = onNub ? 'crosshair' : (over ? 'pointer' : ''); if (this.wrap.style.cursor !== cur) this.wrap.style.cursor = cur;
+        } else if (this._connHover) { this._connHover = null; this.dirty = true; }
         return;
       }
-      moved = true; clearLP(); // S10: any drag cancels a pending long-press open
+      moved = true; clearLP(); this._connHover = null; // S10: any drag cancels a pending long-press open; also hide the connect-nubs during a drag
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._panMode = true; this._lastCamChange = this._now(); this.dirty = true; return; } // _panMode → render() translates the oversized layer via CSS transform (compositor pan), no raster
       const w = this._worldAt(e);
@@ -2359,7 +2376,7 @@ class CanvasView {
         freedrawBBox(created); this.dirty = true; return;
       }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
-      if (mode === 'linear' && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end
+      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end ('connect' = a nub-drag connection, same draw)
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
@@ -2375,15 +2392,14 @@ class CanvasView {
         if (created.width < 4 && created.height < 4) created.isDeleted = true;
         else { if (created.width < 2) created.width = 8; if (created.height < 2) created.height = 8; this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave(); }
         created = null;
-      } else if (mode === 'linear' && created) {
+      } else if ((mode === 'linear' || mode === 'connect') && created) { // 'connect' = a nub-drag (startBinding already set to the source element); same finalize as a tool-drawn arrow
         linearBBox(created);
         const dx = created.points[1][0] - created.points[0][0], dy = created.points[1][1] - created.points[0][1];
         if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
         else {
           const lp = created.points[created.points.length - 1];
-          const s0 = this._bindableAt(created.points[0][0], created.points[0][1], created.id);
           const s1 = this._bindableAt(lp[0], lp[1], created.id);
-          if (s0) created.startBinding = { elementId: s0.id };
+          if (mode !== 'connect') { const s0 = this._bindableAt(created.points[0][0], created.points[0][1], created.id); if (s0) created.startBinding = { elementId: s0.id }; } // connect mode: startBinding is the source element (the nub sits OUTSIDE it, so don't recompute s0)
           if (s1) created.endBinding = { elementId: s1.id };
           this._updateBindings();
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
@@ -2411,7 +2427,7 @@ class CanvasView {
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null;
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this._connHover = null; // clear the connect-nub hover so it re-resolves on the next hover
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
       this.dirty = true;
     };
@@ -2458,7 +2474,7 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } } // tool switch → drop a stale connect-hover so no phantom nub / bogus connect (review 2a)
       if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
     };
     const onDblClick = (e) => {
@@ -2568,9 +2584,10 @@ class CanvasView {
   _editText(el) {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
-    this.editingId = el.id;
+    this.editingId = el.id; this._connHover = null; // entering edit → drop any connect-hover (no phantom nubs around the textarea; review 2b)
     this.dirty = true; try { this.render(); } catch (_e) {} // clear the element off the canvas NOW (same paint the textarea appears in) → no one-frame "double" overlap on entering edit
-    const ta = document.createElement('textarea'); ta.className = 'pxc-textedit'; this._ta = ta;
+    const ta = document.createElement('textarea'); ta.className = 'pxc-textedit' + (el.midBinding ? ' pxc-connlabel' : ''); this._ta = ta;
+    if (el.midBinding) ta.placeholder = 'Label'; // CONNECTION LABEL: a placeholder + pill (CSS) so an empty label editor reads as a label-in-progress, not a bare box
     ta.value = (el.runs && el.runs.length) ? flattenRuns(el.runs) : (el.text || ''); ta.spellcheck = false;
     let prevFlat = ta.value; // CANVAS-SEG: baseline for mapping each flat edit back onto el.runs
     this._refPrevFlat = () => prevFlat; this._refSetPrevFlat = (v) => { prevFlat = v; }; // _applyRefChip updates the baseline after an inline splice
@@ -4892,6 +4909,10 @@ class CanvasView {
       ictx.strokeRect(Math.min(s.x, s.x + s.width) - 3, Math.min(s.y, s.y + s.height) - 3, Math.abs(s.width) + 6, Math.abs(s.height) + 6);
       ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    if (this._connHover && !this._connHover.isDeleted && this.tool === 'select' && !this.editingId) { // CONNECT: edge nubs on the hovered element — drag one to draw a bound connection. Gated on select-mode + not-editing so a stale hover never paints phantom nubs (review 2a/2b).
+      ictx.setTransform(1, 0, 0, 1, 0, 0); const r = 4.5 * d;
+      for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); ictx.beginPath(); ictx.arc(s.x * d, s.y * d, r, 0, 7); ictx.fillStyle = '#7c5cff'; ictx.fill(); ictx.lineWidth = 1.5 * d; ictx.strokeStyle = '#fff'; ictx.stroke(); }
+    }
     if (this._laser && this._laser.length) { // S6: fading laser trail (transient, not saved)
       const st = this.plugin._settings || {}, now = Date.now(), decay = st.laserDecay || 1400;
       this._laser = this._laser.filter((p) => now - p.t < decay);
@@ -6709,6 +6730,9 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
 .pxc-host .pxc-root .pxc-swatch.active { box-shadow: 0 0 0 2px var(--cards-bg), 0 0 0 3px var(--color-text-400); }
 .pxc-host .pxc-root .pxc-textedit { position: absolute; z-index: 4; margin: 0; padding: 0; border: 0; box-sizing: border-box; outline: none; background: transparent; resize: none; overflow: hidden; white-space: pre; line-height: 1.25; min-height: 1em; font-family: system-ui, sans-serif; box-shadow: 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-textedit.pxc-connlabel { padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,0.94); box-shadow: 0 0 0 1.5px #7c5cff, 0 2px 8px rgba(0,0,0,.18); }
+.pxc-host .pxc-root.pxc-dark .pxc-textedit.pxc-connlabel { background: rgba(28,31,40,0.95); color: #e6e7ea; }
+.pxc-host .pxc-root .pxc-textedit.pxc-connlabel::placeholder { color: rgba(124,92,255,0.7); }
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
 /* UX-6: dark-mode chrome — toolbar/props/search go dark to match the dark canvas (theme tokens would stay light). */
 .pxc-host .pxc-root.pxc-dark .pxc-toolbar, .pxc-host .pxc-root.pxc-dark .pxc-props, .pxc-host .pxc-root.pxc-dark .pxc-search { background: #1c1f26; border-color: #2e323b; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
