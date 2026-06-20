@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.33.0';
+const PLEXUS_VERSION = '1.34.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1429,7 +1429,7 @@ class CanvasView {
     ro.observe(this.host.closest('.panel-scroller-y') || wrap); this._localDisposers.push(() => ro.disconnect());
     // UX-6: re-render when the Thymer theme switches (light↔dark) so the canvas + ink adapt immediately. Invalidate
     // the dark-luminance cache + the blit cache so the static layer redraws with adapted colours, then mark dirty.
-    const themeObs = new MutationObserver(() => { const prev = this._darkCache; this._darkCacheT = 0; if (this._themeDark() !== prev) { this._cacheValid = false; this.dirty = true; } }); // only rebuild on an ACTUAL light↔dark flip, not every documentElement mutation
+    const themeObs = new MutationObserver(() => { const prev = this._darkCache; this._darkCacheT = 0; if (this._themeDark() !== prev) { this._cacheValid = false; this.dirty = true; this._dragLayerValid = false; } }); // only rebuild on an ACTUAL light↔dark flip, not every documentElement mutation (and un-freeze the drag static layer)
     try { themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] }); } catch (_e) {}
     this._localDisposers.push(() => themeObs.disconnect());
     this._wirePointer(); this.loadOrInit();
@@ -4568,71 +4568,56 @@ class CanvasView {
     if (this.wrap) this.wrap.classList.toggle('pxc-dark', dark);
     const z = this.camera.zoom, d = this.dpr;
     const sctx = this.staticCv.getContext('2d');
-    const glMode = this.renderer && this.renderer.kind === 'webgl'; // WebGL backend: the GL canvas BEHIND paints the
-    sctx.setTransform(1, 0, 0, 1, 0, 0);                            // background + images; staticCv is a TRANSPARENT overlay.
-    if (glMode) { sctx.clearRect(0, 0, this.staticCv.width, this.staticCv.height); }
-    else { sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height); }
-    // PERF: during camera MOTION (the zoom animation, or a fresh pan/zoom), BLIT the cached scene bitmap
-    // transformed instead of re-rendering every element — O(1). A debounced settle does one crisp render
-    // when motion stops (filling any blank edges). Cache is invalidated on any element edit. (Disabled in GL mode —
-    // the GL layer re-renders each frame; the 2D blit can't represent the separate GL canvas. Optimise later.)
-    const cc = this._cacheCam, moving = !glMode && (!!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110));
-    const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
-    // Blit only when scaling UP (zoom-in or pan): a viewport cache can't cover area revealed by zooming OUT,
-    // so zoom-out frames render crisp (which also re-caches at the wider zoom). Avoids blank edges on the establish.
-    if (moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
-      const s = z / cc.zoom, tx = (cc.x - this.camera.x) * z * d, ty = (cc.y - this.camera.y) * z * d;
-      sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
-      this._scheduleSettle();
-    } else {
-      // PERF (element drag): build a STATIC-LAYER cache ONCE (everything that ISN'T moving), then each drag frame blit it
-      // and draw only the movers live — heavy statics (images, cards) aren't re-rendered per frame. movers = selection ∪
-      // arrows bound to it; a FRAME drag (carries its contents) → _dragMovers()=null → normal full render. Ghosts +
-      // mover elements draw live each frame so alignment/relationship lines track. (_dragLayerValid resets on drag end.)
-      const movers = (this._elDrag && this.selected.size) ? this._dragMovers() : null;
-      const moverIds = movers ? new Set(movers.map((e) => e.id)) : null;
-      if (movers && this._dragLayerValid && this._dragCv) {
-        sctx.drawImage(this._dragCv, 0, 0); // blit the pre-rendered static layer
+    const glMode = this.renderer && this.renderer.kind === 'webgl'; // WebGL backend: the GL canvas BEHIND paints the bg+images
+    // PERF (element drag): movers draw on the lightweight iCv OVERLAY; the heavy STATIC canvas is FROZEN once built and
+    // left untouched — so the GPU re-uploads only the small overlay each frame, not the big scene canvas. (The trace
+    // pinned the lag to ~28ms presentation/composite from re-blitting staticCv every frame.) movers = selection ∪ bound
+    // arrows; a FRAME drag (carries its contents) → _dragMovers()=null → normal full render. _dragLayerValid resets on end.
+    const dragMovers = (this._elDrag && this.selected.size && !glMode) ? this._dragMovers() : null;
+    const dragIds = dragMovers ? new Set(dragMovers.map((e) => e.id)) : null;
+    const frozenDrag = !!(dragMovers && this._dragLayerValid); // staticCv already holds the static scene → don't touch it
+    if (!frozenDrag) {
+      sctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (glMode) { sctx.clearRect(0, 0, this.staticCv.width, this.staticCv.height); }
+      else { sctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); sctx.fillRect(0, 0, this.staticCv.width, this.staticCv.height); }
+      // CAMERA MOTION: blit the cached scene bitmap transformed instead of re-rendering — O(1); a settle does one crisp
+      // render when motion stops. Skipped while element-dragging (camera is fixed; we want the frozen-static path).
+      const cc = this._cacheCam, moving = !glMode && (!!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110));
+      const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
+      if (!dragMovers && moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
+        const s = z / cc.zoom, tx = (cc.x - this.camera.x) * z * d, ty = (cc.y - this.camera.y) * z * d;
+        sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
+        this._scheduleSettle();
       } else {
-        // Crisp full render — routed through the pluggable renderer (seam). Canvas2D backend = the painters below.
-        this._dragExclude = moverIds; // when building the static layer, skip the movers (they draw live below)
+        // Crisp full render. When dragging, this is the ONE build frame: render statics EXCLUDING movers, then FREEZE
+        // staticCv (movers + ghosts draw on iCv below); _dragLayerValid=true makes subsequent frames skip staticCv.
         this.renderer.begin(sctx, this.camera, d);
         this.renderer.grid();
-        // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
         const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
         const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
-        // GRID-DRIVEN CULL: candidate set = grid query over the viewport (∪ selected, which move mid-drag before the
-        // grid re-indexes) instead of the whole array → O(visible), not O(n) per frame. The grid never drops a true
-        // overlap (verified), and inView() still does the exact test; z-order restored by sorting on _zIndex (paint order).
         this._ensureGrid();
         const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
         if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
         const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
-        const ex = moverIds; let drawn = 0;
-        for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
+        const ex = dragIds; let drawn = 0;
+        for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // frames behind everything
         for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
         this._drawnCount = drawn;
-        if (!movers) this.renderer.ghosts(); // ghosts are drawn LIVE in the mover pass while dragging (so they track)
+        if (!dragMovers) this.renderer.ghosts(); // while dragging, ghosts draw on iCv so they track live
         this.renderer.end();
-        this._dragExclude = null;
-        if (movers) { // snapshot the static layer (without movers) for the next drag frames
-          if (!this._dragCv) this._dragCv = document.createElement('canvas');
-          if (this._dragCv.width !== this.staticCv.width || this._dragCv.height !== this.staticCv.height) { this._dragCv.width = this.staticCv.width; this._dragCv.height = this.staticCv.height; }
-          const dctx = this._dragCv.getContext('2d'); dctx.setTransform(1, 0, 0, 1, 0, 0); dctx.clearRect(0, 0, this._dragCv.width, this._dragCv.height); dctx.drawImage(this.staticCv, 0, 0);
-          this._dragLayerValid = true;
-        } else { this._refreshCache(); }
-      }
-      if (movers) { // draw the moving elements (+ bound arrows) and ghosts LIVE on top of the static layer
-        this.renderer.begin(sctx, this.camera, d);
-        for (const el of movers) { if (!el.isDeleted && el.type === 'frame') this.renderer.frame(el); }
-        for (const el of movers) { if (!el.isDeleted && el.type !== 'frame' && el.id !== this.editingId && !el.mmHidden) this.renderer.element(el); }
-        this.renderer.ghosts();
-        this.renderer.end();
+        if (dragMovers) this._dragLayerValid = true; else this._refreshCache();
       }
     }
-    // interactive layer — selection + transform handles
+    // interactive layer — the moving elements (during a drag) + selection / transform handles
     const ictx = this.iCv.getContext('2d');
     ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.clearRect(0, 0, this.iCv.width, this.iCv.height);
+    if (dragMovers) { // PERF: movers + ghosts ride the lightweight overlay (camera space), UNDER the handles drawn below
+      this.renderer.begin(ictx, this.camera, d);
+      for (const el of dragMovers) { if (!el.isDeleted && el.type === 'frame') this.renderer.frame(el); }
+      for (const el of dragMovers) { if (!el.isDeleted && el.type !== 'frame' && el.id !== this.editingId && !el.mmHidden) this.renderer.element(el); }
+      this.renderer.ghosts(); this.renderer.end();
+      ictx.setTransform(1, 0, 0, 1, 0, 0); // reset for the handle/overlay blocks below
+    }
     if (this._cropRect) {
       const r = this._cropRect;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -4954,7 +4939,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); v._invalidateRollups(); v._invalidateTables(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC + ROLL-UP + TABLE: refresh nodes + GC a trashed drawing's backref sub-map
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); v._invalidateRollups(); v._invalidateTables(); v._dragLayerValid = false; } }; // un-freeze the drag static layer so a card edited (by another client) mid-drag repaints // IO-1 + TRANSCLUDE + BACKREF-SYNC + ROLL-UP + TABLE: refresh nodes + GC a trashed drawing's backref sub-map
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
@@ -5014,7 +4999,7 @@ class Plugin extends AppPlugin {
     const file = files && files[fileId];
     if (!file || !file.dataURL) return null;
     const img = new Image(); e = { img, ready: false }; cache.set(fileId, e);
-    img.onload = () => { e.ready = true; for (const v of this._views) v.dirty = true; this._imgCacheEvict(); };
+    img.onload = () => { e.ready = true; for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } this._imgCacheEvict(); }; // _dragLayerValid=false → a static image finishing decode mid-drag forces ONE rebuild frame so it isn't stuck behind the frozen layer
     img.onerror = () => { e.broken = true; }; // keep a broken-marker so a bad dataURL isn't re-decoded every frame
     img.src = file.dataURL;
     if (st.allowImageCache === false) { const drop = () => cache.delete(fileId); img.addEventListener('load', drop, { once: true }); img.addEventListener('error', drop, { once: true }); }
@@ -5028,7 +5013,7 @@ class Plugin extends AppPlugin {
     let over = cache.size - max;
     for (const k of cache.keys()) { cache.delete(k); if (--over <= 0) break; } // front of the Map = least-recently-used
   }
-  _purgeImageCache() { if (this._imgCache) this._imgCache.clear(); else this._imgCache = new Map(); for (const v of this._views) v.dirty = true; }
+  _purgeImageCache() { if (this._imgCache) this._imgCache.clear(); else this._imgCache = new Map(); for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } }
   // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
   _getEmbedder() {
     if (this._embedderP) return this._embedderP;
@@ -5219,7 +5204,7 @@ class Plugin extends AppPlugin {
     let rec = null; try { rec = await this._brefIndexRecord(); } catch (_e) {} if (!rec) return;
     try {
       const items = (await rec.getLineItems()) || [];
-      for (const li of items) { let b = null; try { b = await li.getBlob(); } catch (_e) {} if (!b || b.fileName !== BREF_FILE) continue; const ab = await b.download(); if (ab) { try { const synced = JSON.parse(new TextDecoder().decode(ab)); pxcBrefMergeNested(this._brefStore(), pxcBrefMigrate(synced)); this._brefSaveLocal(); for (const v of this._views) v.dirty = true; } catch (_e) {} } break; }
+      for (const li of items) { let b = null; try { b = await li.getBlob(); } catch (_e) {} if (!b || b.fileName !== BREF_FILE) continue; const ab = await b.download(); if (ab) { try { const synced = JSON.parse(new TextDecoder().decode(ab)); pxcBrefMergeNested(this._brefStore(), pxcBrefMigrate(synced)); this._brefSaveLocal(); for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } } catch (_e) {} } break; }
     } catch (_e) {}
   }
   _injectImgRefCss() {

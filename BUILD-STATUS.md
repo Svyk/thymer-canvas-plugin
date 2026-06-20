@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.34.0 — drag perf, take 2: FREEZE the static canvas, draw movers on the overlay (2026-06-19, trace-driven)
+v1.32's static-layer cache wasn't enough — a chrome **performance trace** of a real drag showed the cost was **28ms
+presentation/composite delay** (+22ms input delay, only **0.2ms** actual JS): the GPU was re-uploading the big scene
+canvas EVERY frame because the cache re-blitted it onto `staticCv` each frame (two full-canvas uploads/frame w/ the
+overlay). Confirmed it lagged with EVERYTHING (images/text/shapes), not just the heavy hachure ellipse the GIF showed.
+- **Fix (Excalidraw approach):** during a drag, render the static scene to `staticCv` ONCE excluding the movers, then
+  FREEZE it (the whole staticCv block is skipped while `frozenDrag`); draw only the moving elements (+ ghosts) on the
+  lightweight `iCv` overlay each frame. One canvas upload/frame instead of two. `_dragCv` snapshot removed (staticCv IS
+  the frozen layer). Camera-blit gated `!dragMovers`; mover pass on iCv is camera-space, under the handles.
+- **Adversarial review HIGH fixed:** a frozen staticCv would miss a non-mover changing mid-drag (esp. a static IMAGE
+  finishing decode → stuck placeholder). The async/external paths now clear `_dragLayerValid` (img.onload, onRecChange
+  data events, theme flip, _purgeImageCache, _brefSyncLoad) → ONE rebuild frame repaints + re-freezes. 5 risk areas
+  (transition/double-draw, iCv transform hygiene, z-order, frame+glMode fallback, lifecycle) all reviewed clean.
+- node --check + node tests clean. **Re-profile after install to confirm presentation delay drops.**
+
 ## ✅ v1.33.0 — image PASTE fixed; drag-from-panel proven blocked (2026-06-19, live chrome probes)
 The two EAPI probes, resolved empirically by attaching document-level drag/paste loggers in the debug Chrome:
 - **Image paste — FIXED.** Root cause: the canvas `onKey` handler intercepts Cmd+V and `preventDefault`s it → the native
