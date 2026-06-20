@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.31.0';
+const PLEXUS_VERSION = '1.32.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1519,7 +1519,7 @@ class CanvasView {
     if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) { h = Math.max(160, h - (scroller.scrollHeight - scroller.clientHeight)); this.wrap.style.height = h + 'px'; }
     const w = this.wrap.clientWidth || this.host.clientWidth || 600;
     for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
-    this.cssW = w; this.cssH = h; this._cacheValid = false; // canvas resized → cache stale (rebuilt on next crisp render)
+    this.cssW = w; this.cssH = h; this._cacheValid = false; this._dragLayerValid = false; // canvas resized → both caches stale (rebuilt on next crisp render)
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
@@ -1744,6 +1744,15 @@ class CanvasView {
       const cctx = this._cacheCv.getContext('2d'); cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height); cctx.drawImage(this.staticCv, 0, 0);
       this._cacheCam = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom }; this._cacheValid = true;
     } catch (_e) { this._cacheValid = false; }
+  }
+  // PERF (drag): elements that move with the current drag = selection ∪ arrows bound to it. Returns null when a FRAME is
+  // selected (a frame drag carries its contents — too broad to partial-cache; the caller falls back to a full render).
+  _dragMovers() {
+    const ids = new Set(this.selected);
+    for (const id of ids) { const e = this._byId(id); if (e && e.type === 'frame') return null; }
+    for (const el of this.scene.elements) { if (el.isDeleted || ids.has(el.id)) continue; if ((el.type === 'arrow' || el.type === 'line') && ((el.startBinding && ids.has(el.startBinding.elementId)) || (el.endBinding && ids.has(el.endBinding.elementId)))) ids.add(el.id); }
+    const out = []; for (const id of ids) { const e = this._byId(id); if (e && !e.isDeleted) out.push(e); }
+    return out;
   }
   // One crisp re-render shortly after motion stops (debounced) — fills any blank edges + restores sharpness.
   _scheduleSettle() { if (this._settleT) clearTimeout(this._settleT); this._settleT = setTimeout(() => { this._settleT = null; if (!this.destroyed) this.dirty = true; }, 130); }
@@ -2073,6 +2082,7 @@ class CanvasView {
     let downRef = null; // CANVAS-SEG: {id, wasSelected} of a runs-text hit on press → click-again-on-ref navigates
     const onDown = (e) => {
       host.focus();
+      if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // self-heal: a prior drag that was cancelled (no pointerup) left the static-layer blit locked on
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
@@ -2120,6 +2130,7 @@ class CanvasView {
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
           const mk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
           mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map(mk);
+          this._elDrag = true; this._dragLayerValid = false; // PERF: drag a static-layer cache (build once, then blit + draw only the movers)
           // P1.0: moving a frame carries the elements inside it.
           const seen = new Set(this.selected);
           for (const m of [...moveEls]) { if (m.el.type === 'frame') for (const c of this._frameChildren(m.el)) if (!seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } }
@@ -2226,7 +2237,9 @@ class CanvasView {
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this.dirty = true;
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null;
+      if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
+      this.dirty = true;
     };
     const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
     const onKey = (e) => {
@@ -2267,6 +2280,9 @@ class CanvasView {
           if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase()); return; }
         }
       }
+      // ENTER / F2 → edit the selected text element inline — a reliable way into edit mode WITHOUT click-navigating a
+      // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
+      { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); }
       if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
@@ -2289,8 +2305,10 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
+    const onPtrCancel = () => { if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } }; // drag interrupted (no pointerup) → drop the static-layer blit, crisp re-render
+    host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
-    this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
+    this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
     const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._addSvgAsImage(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
@@ -4552,26 +4570,50 @@ class CanvasView {
       sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
       this._scheduleSettle();
     } else {
-      // Crisp full render — routed through the pluggable renderer (seam). Canvas2D backend = the painters below.
-      this.renderer.begin(sctx, this.camera, d);
-      this.renderer.grid();
-      // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
-      const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
-      const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
-      // GRID-DRIVEN CULL: candidate set = grid query over the viewport (∪ selected, which move mid-drag before the
-      // grid re-indexes) instead of the whole array → O(visible), not O(n) per frame. The grid never drops a true
-      // overlap (verified), and inView() still does the exact test; z-order restored by sorting on _zIndex (paint order).
-      this._ensureGrid();
-      const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
-      if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
-      const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
-      let drawn = 0;
-      for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
-      for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
-      this._drawnCount = drawn;
-      this.renderer.ghosts();
-      this.renderer.end();
-      this._refreshCache();
+      // PERF (element drag): build a STATIC-LAYER cache ONCE (everything that ISN'T moving), then each drag frame blit it
+      // and draw only the movers live — heavy statics (images, cards) aren't re-rendered per frame. movers = selection ∪
+      // arrows bound to it; a FRAME drag (carries its contents) → _dragMovers()=null → normal full render. Ghosts +
+      // mover elements draw live each frame so alignment/relationship lines track. (_dragLayerValid resets on drag end.)
+      const movers = (this._elDrag && this.selected.size) ? this._dragMovers() : null;
+      const moverIds = movers ? new Set(movers.map((e) => e.id)) : null;
+      if (movers && this._dragLayerValid && this._dragCv) {
+        sctx.drawImage(this._dragCv, 0, 0); // blit the pre-rendered static layer
+      } else {
+        // Crisp full render — routed through the pluggable renderer (seam). Canvas2D backend = the painters below.
+        this._dragExclude = moverIds; // when building the static layer, skip the movers (they draw live below)
+        this.renderer.begin(sctx, this.camera, d);
+        this.renderer.grid();
+        // SPEED (huge drawings): viewport culling — only draw elements whose bbox intersects the visible world rect.
+        const m = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80, vx0 = this.camera.x - m, vy0 = this.camera.y - m, vx1 = this.camera.x + this.cssW / z + m, vy1 = this.camera.y + this.cssH / z + m;
+        const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
+        // GRID-DRIVEN CULL: candidate set = grid query over the viewport (∪ selected, which move mid-drag before the
+        // grid re-indexes) instead of the whole array → O(visible), not O(n) per frame. The grid never drops a true
+        // overlap (verified), and inView() still does the exact test; z-order restored by sorting on _zIndex (paint order).
+        this._ensureGrid();
+        const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
+        if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
+        const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
+        const ex = moverIds; let drawn = 0;
+        for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // P1.0: frames render behind everything
+        for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
+        this._drawnCount = drawn;
+        if (!movers) this.renderer.ghosts(); // ghosts are drawn LIVE in the mover pass while dragging (so they track)
+        this.renderer.end();
+        this._dragExclude = null;
+        if (movers) { // snapshot the static layer (without movers) for the next drag frames
+          if (!this._dragCv) this._dragCv = document.createElement('canvas');
+          if (this._dragCv.width !== this.staticCv.width || this._dragCv.height !== this.staticCv.height) { this._dragCv.width = this.staticCv.width; this._dragCv.height = this.staticCv.height; }
+          const dctx = this._dragCv.getContext('2d'); dctx.setTransform(1, 0, 0, 1, 0, 0); dctx.clearRect(0, 0, this._dragCv.width, this._dragCv.height); dctx.drawImage(this.staticCv, 0, 0);
+          this._dragLayerValid = true;
+        } else { this._refreshCache(); }
+      }
+      if (movers) { // draw the moving elements (+ bound arrows) and ghosts LIVE on top of the static layer
+        this.renderer.begin(sctx, this.camera, d);
+        for (const el of movers) { if (!el.isDeleted && el.type === 'frame') this.renderer.frame(el); }
+        for (const el of movers) { if (!el.isDeleted && el.type !== 'frame' && el.id !== this.editingId && !el.mmHidden) this.renderer.element(el); }
+        this.renderer.ghosts();
+        this.renderer.end();
+      }
     }
     // interactive layer — selection + transform handles
     const ictx = this.iCv.getContext('2d');

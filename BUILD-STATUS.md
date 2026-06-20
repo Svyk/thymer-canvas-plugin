@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.32.0 — Enter-to-edit + drag-perf static-layer cache (2026-06-19)
+Two user-reported items.
+- **Enter / F2 → edit the selected text element** (`onKey`): select a text box with ONE click (no navigation — first click
+  only selects a ref box; nav needs a second click), then Enter edits it. Fixes "can't enter edit mode on a ref-only box
+  without accidentally hitting the link." Excludes image chips (`isRef`) + mind-map nodes (`mmRoot`).
+- **Drag-perf:** dragging elements used to fall through to a FULL crisp re-render every frame (re-drawing heavy static
+  images/cards = jank). Now a **static-layer cache**: `_dragMovers()` = selection ∪ bound arrows (null when a frame is
+  selected → full render). On drag, build the static layer ONCE excluding movers (`_dragExclude`/local `ex`), snapshot to
+  `_dragCv`; each frame blit it + draw only the movers (+ ghosts) live. Reset on drag end + `pointercancel`/
+  `lostpointercapture` + at the top of a fresh `onDown` (self-heal) + on resize.
+- Adversarial `code-reviewer` (render correctness): blit transform / z-order / async-staleness / frame-fallback all sound;
+  fixed 1 MEDIUM (no `pointercancel` path → interrupted drag left the blit frozen) + 1 LOW (resize mid-drag). `node --check`
+  + node tests clean.
+
 ## ✅ v1.31.0 — editable cards: edit a card's body lines inline, written back to the source (2026-06-19)
 User (request 1): "inline-editing a card on the canvas isn't a feature — make it one." Double-click a record card's BODY
 (or a line-transclude card) → an inline `<textarea>` over the card; commit writes back to the SOURCE via the SDK. The
