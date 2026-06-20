@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.29.0 — multi-ref flyback picker: same line/record referenced >once → choose which (2026-06-19)
+User: "if I ref the same line in a canvas more than once, need an option to pick which one — kinda like thymer remark."
+The backref store went from one-entry-per-target to an **element-map** per target.
+- **Store v2:** `{ [drawing]: { [target]: { [elId]: {label,kind,t} } } }` (was `{drawing:{target:{el,…}}}`). `pxcBrefMigrate`
+  normalizes BOTH legacy shapes (flat `{target:{drawing,el,…}}` + nested-single) → v2; discriminator `typeof val.el==='string'`
+  (a v2 entry's value is always an object, so it can't misfire). `pxcBrefFlatten` → `{target:[entries]}` newest-first.
+  `pxcBrefMergeNested` unions el-maps per-elId (cross-device read-merge-write keeps both devices' refs). `_reindexBackrefs`
+  collects ALL refs (dedup by elId — two runs in one element → one entry).
+- **UI:** `_mkBackrefBadge(entries)` shows a red **count** bubble when >1; click → `_openBackrefPicker` (a `position:fixed`
+  dropdown listing each ref with a kind-colored dot → fly to the chosen one). Single ref → flies directly, no menu. Picker
+  hardened: tracks/removes its outside-click listener on re-open, flips above the badge near the viewport bottom.
+- Verify: node `multistore_test` (6 groups) + updated `reindexFlybackTest` (E5 dup → `recMulti` len 2) + `backrefRoundTripTest`
+  (array); `node --check` clean; adversarial `code-reviewer`: NO blocking defects (migration discriminator proven safe,
+  xref/image path untouched, merge unions correctly); 2 LOW notes (listener + vertical-flip) applied.
+
 ## ✅ v1.28.0 — refs are now inline editable runs: no @/@@ marks, underlined, type around them (2026-06-19)
 User request: "don't need to show the at marks… these refs should have nice css like underlines… I should be able to
 continue to edit these lines and add other text." The inline-run renderer (`drawRuns`) already did all of this (no prefix,

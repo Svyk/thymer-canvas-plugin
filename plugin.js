@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.28.0';
+const PLEXUS_VERSION = '1.29.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -636,15 +636,29 @@ function pxcHasExactTitle(rows, query) { const q = String(query || '').trim().to
 // drawing's sub-map. localStorage holds the hot copy; a synced blob on a singleton record carries it cross-device.
 const BREF_REC_TITLE = '⚙ Plexus Backref Index';
 const BREF_FILE = 'plexus-backref-index.json';
-function pxcBrefMigrate(raw) { // accepts the OLD flat {lineGuid:{drawing,…}} OR the new nested shape → returns nested
-  const nested = {}; if (!raw || typeof raw !== 'object') return nested;
+// STORE v2 (multi-ref): `{ [drawing]: { [target]: { [elId]: {label, kind, t} } } }` — a target may be referenced by
+// MANY canvas elements (so the note-side ↗ can offer a picker). Dedup is by elId (two runs in one element → one entry).
+// pxcBrefMigrate normalizes BOTH legacy shapes (flat {target:{drawing,el,…}} and nested-single {drawing:{target:{el,…}}}).
+function pxcBrefMigrate(raw) {
+  const out = {}; if (!raw || typeof raw !== 'object') return out;
   let flat = false; for (const k in raw) { const v = raw[k]; flat = !!(v && typeof v === 'object' && typeof v.drawing === 'string'); break; }
-  if (flat) { for (const lg in raw) { const e = raw[lg]; if (!e || !e.drawing) continue; (nested[e.drawing] = nested[e.drawing] || {})[lg] = { el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } return nested; }
-  for (const d in raw) { const sub = raw[d]; if (sub && typeof sub === 'object') { nested[d] = {}; for (const lg in sub) { const e = sub[lg]; if (e) nested[d][lg] = { el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } } }
-  return nested;
+  if (flat) { for (const target in raw) { const e = raw[target]; if (!e || !e.drawing || !e.el) continue; const d = e.drawing; (out[d] = out[d] || {}); (out[d][target] = out[d][target] || {})[e.el] = { label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } return out; }
+  for (const d in raw) { const sub = raw[d]; if (!sub || typeof sub !== 'object') continue; out[d] = {};
+    for (const target in sub) { const val = sub[target]; if (!val || typeof val !== 'object') continue;
+      if (typeof val.el === 'string') { out[d][target] = { [val.el]: { label: val.label, kind: val.kind || 'line', t: val.t || 0 } }; } // legacy single-entry
+      else { const m = {}; for (const elId in val) { const e = val[elId]; if (e && typeof e === 'object') m[elId] = { label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } out[d][target] = m; } // el-map
+    }
+  }
+  return out;
 }
-function pxcBrefFlatten(nested) { const flat = {}; for (const d in nested) { const sub = nested[d]; for (const lg in sub) { const e = sub[lg]; const cur = flat[lg]; if (!cur || (e.t || 0) >= (cur.t || 0)) flat[lg] = { drawing: d, el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } } return flat; } // newest wins if a line is referenced by 2 drawings
-function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const lg in b[d]) { const eb = b[d][lg], ea = a[d][lg]; if (!ea || (eb.t || 0) >= (ea.t || 0)) a[d][lg] = eb; } } return a; }
+// Flatten → `{ [target]: [{drawing, el, label, kind, t}, …] }` (ALL refs to a target, newest first). One row per (drawing,el).
+function pxcBrefFlatten(nested) {
+  const flat = {};
+  for (const d in nested) { const sub = nested[d]; for (const target in sub) { const m = sub[target]; for (const elId in m) { const e = m[elId]; (flat[target] = flat[target] || []).push({ drawing: d, el: elId, label: e.label, kind: e.kind || 'line', t: e.t || 0 }); } } }
+  for (const target in flat) flat[target].sort((a, b) => (b.t || 0) - (a.t || 0));
+  return flat;
+}
+function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const target in b[d]) { a[d][target] = a[d][target] || {}; const mb = b[d][target], ma = a[d][target]; for (const elId in mb) { const eb = mb[elId], ea = ma[elId]; if (!ea || (eb.t || 0) >= (ea.t || 0)) ma[elId] = eb; } } } return a; }
 // MINIMAP: fit scene-bounds into a w×h panel with padding → {scale, ox, oy}; world (wx,wy) → mini-local (ox+wx*scale,
 // oy+wy*scale). Inverse: world = (miniLocal - o)/scale. Pure + node-tested.
 function pxcMiniFit(bounds, w, h, pad) {
@@ -3543,8 +3557,8 @@ class CanvasView {
   // `@@`/`@` runs; line targets keyed by lineGuid, record targets keyed by record guid. Self-healing: edited-away or
   // deleted refs vanish on the next save. Image refs are skipped (the xref / `_scanImageBadges` path owns those).
   _reindexBackrefs() {
-    const map = {}; // { targetGuid: {el, label, kind} } — first ref to a target wins (one ↗ per note line/record)
-    const put = (guid, elId, label, kind) => { if (guid && elId && !map[guid]) map[guid] = { el: elId, label: label || 'ref', kind }; };
+    const map = {}; // { targetGuid: { elId: {label, kind} } } — ALL refs to a target (multi-ref picker); dedup by elId
+    const put = (guid, elId, label, kind) => { if (!guid || !elId) return; const m = (map[guid] = map[guid] || {}); if (!m[elId]) m[elId] = { label: label || 'ref', kind }; };
     for (const el of (this.scene && this.scene.elements) || []) {
       if (!el || el.isDeleted) continue;
       if (el.isRef) {
@@ -5047,19 +5061,21 @@ class Plugin extends AppPlugin {
   // BACKREF-SYNC: nested per-drawing store, hot copy in localStorage, mirrored to a synced blob (cross-device).
   _brefStore() { if (!this._bref) { let raw = {}; try { raw = JSON.parse(localStorage.getItem('plexus_backref') || '{}'); } catch (_e) {} this._bref = pxcBrefMigrate(raw); } return this._bref; }
   _brefSaveLocal() { try { localStorage.setItem('plexus_backref', JSON.stringify(this._bref || {})); } catch (_e) { try { const s = this._bref || {}; const ds = Object.keys(s); if (ds.length) { delete s[ds[0]]; localStorage.setItem('plexus_backref', JSON.stringify(s)); } } catch (_e2) {} } }
-  _loadBackref() { return pxcBrefFlatten(this._brefStore()); }   // flat {lineGuid:entry} — back-compat for _scanRefBadges
-  _lookupBackref(guid) { return this._loadBackref()[guid] || null; }
+  _loadBackref() { return pxcBrefFlatten(this._brefStore()); }   // {target: [entry,…]} — array per target (multi-ref)
+  _lookupBackref(guid) { return this._loadBackref()[guid] || null; } // returns the ARRAY (or null)
   _registerBackref(guid, data) {
-    if (!guid || !data || !data.drawing) return;
-    const s = this._brefStore(); (s[data.drawing] = s[data.drawing] || {})[guid] = { el: data.el, label: data.label, kind: data.kind || 'line', t: Date.now() };
+    if (!guid || !data || !data.drawing || !data.el) return;
+    const s = this._brefStore(); const d = (s[data.drawing] = s[data.drawing] || {}); const m = (d[guid] = d[guid] || {});
+    m[data.el] = { label: data.label, kind: data.kind || 'line', t: Date.now() };
     this._brefSaveLocal(); this._brefSyncSchedule();
   }
-  // FLYBACK: replace ONE drawing's backref sub-map wholesale (rebuild-on-save). Self-heals deleted/edited-away refs;
-  // never touches other drawings' sub-maps (concurrency-safe — the nested store merges per-drawing). Empty → drop it.
+  // FLYBACK: replace ONE drawing's backref sub-map wholesale (rebuild-on-save). map = {target: {elId: {label, kind}}}.
+  // Self-heals deleted/edited-away refs; never touches other drawings' sub-maps (concurrency-safe). Empty → drop it.
   _setDrawingBackrefs(drawing, map) {
-    if (!drawing) return; const s = this._brefStore(); const keys = map ? Object.keys(map) : [];
-    if (!keys.length) { if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } return; }
-    const sub = {}; const t = Date.now(); for (const g of keys) { const e = map[g]; sub[g] = { el: e.el, label: e.label || 'ref', kind: e.kind || 'line', t }; }
+    if (!drawing) return; const s = this._brefStore(); const targets = map ? Object.keys(map) : [];
+    if (!targets.length) { if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } return; }
+    const t = Date.now(); const sub = {};
+    for (const target of targets) { const inner = map[target] || {}; const om = {}; for (const elId in inner) { const e = inner[elId]; om[elId] = { label: e.label || 'ref', kind: e.kind || 'line', t }; } sub[target] = om; }
     s[drawing] = sub; this._brefSaveLocal(); this._brefSyncSchedule();
   }
   _brefPruneDrawing(drawing) { const s = this._brefStore(); if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } } // GC: drawing trashed → drop its sub-map (no ghost ↗)
@@ -5097,7 +5113,7 @@ class Plugin extends AppPlugin {
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-imgref-css';
-    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
     document.head.appendChild(s);
   }
   // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
@@ -5119,31 +5135,55 @@ class Plugin extends AppPlugin {
   }
   // CANVAS-BACK-1: pin a ↗ on each note line/record that a canvas @@/@ chip points at → click flies to the canvas
   // chip (cinematic, via _navToCanvasAnchor). Inline badge (plain text lines have no image to attach to).
-  _mkBackrefBadge(entry) {
+  _mkBackrefBadge(entries) {
+    const arr = Array.isArray(entries) ? entries : [entries]; const n = arr.length;
     const badge = document.createElement('span'); badge.className = 'plexus-backref-badge'; badge.textContent = '↗';
-    badge.title = 'Zoom to “' + (entry.label || 'this') + '” on the canvas';
-    badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
+    if (n > 1) { const c = document.createElement('span'); c.className = 'plexus-backref-count'; c.textContent = String(n); badge.appendChild(c); }
+    badge.title = n > 1 ? (n + ' canvas references — click to choose which to fly to') : ('Zoom to “' + ((arr[0] && arr[0].label) || 'this') + '” on the canvas');
+    badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (n <= 1) { if (arr[0]) this._navToCanvasAnchor(arr[0]); } else this._openBackrefPicker(arr, badge); });
     return badge;
+  }
+  // MULTI-REF (request 5): when a line/record is referenced by >1 canvas element, the ↗ opens a small picker — choose
+  // which reference to fly to (mirrors org-remark's multi-target nav). Single ref → fly directly (no menu).
+  _openBackrefPicker(entries, anchorEl) {
+    try { if (this._brefMenuClose) { document.removeEventListener('mousedown', this._brefMenuClose, true); this._brefMenuClose = null; } const prev = document.getElementById('plexus-bref-menu'); if (prev) prev.remove(); } catch (_e) {}
+    const menu = document.createElement('div'); menu.id = 'plexus-bref-menu'; menu.className = 'plexus-bref-menu';
+    const head = document.createElement('div'); head.className = 'plexus-bref-head'; head.textContent = entries.length + ' canvas references'; menu.appendChild(head);
+    for (const en of entries) {
+      const row = document.createElement('div'); row.className = 'plexus-bref-row';
+      const dot = document.createElement('span'); dot.className = 'plexus-bref-dot'; dot.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(dot);
+      const lbl = document.createElement('span'); lbl.className = 'plexus-bref-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
+      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); try { menu.remove(); } catch (_e2) {} this._brefMenuClose = null; this._navToCanvasAnchor(en); });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    try { const r = anchorEl.getBoundingClientRect(); const mw = menu.offsetWidth || 220, mh = menu.offsetHeight || 0, vw = window.innerWidth, vh = window.innerHeight;
+      let left = Math.round(r.left); if (left + mw > vw - 8) left = Math.max(8, vw - mw - 8);
+      let top = Math.round(r.bottom + 4); if (top + mh > vh - 8) top = Math.max(8, Math.round(r.top) - mh - 4); // flip above the badge near the bottom edge
+      menu.style.left = left + 'px'; menu.style.top = top + 'px'; } catch (_e) {}
+    const close = (e) => { if (!menu.contains(e.target)) { try { menu.remove(); } catch (_e2) {} document.removeEventListener('mousedown', close, true); this._brefMenuClose = null; } };
+    this._brefMenuClose = close;
+    setTimeout(() => { try { document.addEventListener('mousedown', close, true); } catch (_e) {} }, 0);
   }
   _scanRefBadges() {
     let idx; try { idx = this._loadBackref(); } catch (_e) { return; }
     let any = false; for (const k in idx) { any = true; break; } if (!any) return;
-    // LINE targets → ↗ on the cited note line (`.listitem[data-guid]`). Skip record-kind entries (they badge the page).
+    // LINE targets → ↗ on the cited note line (`.listitem[data-guid]`). idx[g] is an ARRAY (all refs); badge shows the
+    // count + opens a picker when >1. Filter to line-kind (a guid is single-kind, but stay defensive).
     for (const li of document.querySelectorAll('.listitem[data-guid]')) {
-      const g = li.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing || entry.kind === 'record') continue;
-      if (li.querySelector(':scope .plexus-backref-badge:not(.plexus-backref-rec)')) continue; // ignore a record-page badge that may sit inside a title listitem, so a legit line badge is never shadowed
+      const g = li.getAttribute('data-guid'); const all = idx[g]; if (!all || !all.length) continue;
+      const entries = all.filter((e) => e.kind !== 'record'); if (!entries.length) continue;
+      if (li.querySelector(':scope .plexus-backref-badge:not(.plexus-backref-rec)')) continue; // don't let a record-page badge inside a title listitem shadow a line badge
       const host = li.querySelector('.lineitem-text') || li.querySelector('.line-div') || li;
-      host.appendChild(this._mkBackrefBadge(entry));
+      host.appendChild(this._mkBackrefBadge(entries));
     }
-    // RECORD targets → ↗ on the OPEN record page (`.listview-items[data-guid]` = org-remark-verified record root). Title
-    // host via a defensive chain → else the root itself (prepended so it isn't buried under the body). The `.plexus-
-    // backref-rec` marker class scopes dedupe so the 1.5s interval can't re-append, and so line badges (inside listitems,
-    // descendants of the same root) are never mistaken for the page badge.
+    // RECORD targets → ↗ on the OPEN record page (`.listview-items[data-guid]` = org-remark-verified record root).
     for (const root of document.querySelectorAll('.listview-items[data-guid]')) {
-      const g = root.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing || entry.kind !== 'record') continue;
+      const g = root.getAttribute('data-guid'); const all = idx[g]; if (!all || !all.length) continue;
+      const entries = all.filter((e) => e.kind === 'record'); if (!entries.length) continue;
       if (root.querySelector('.plexus-backref-rec')) continue;
       const host = root.querySelector('.page-props-editor') || root.querySelector('.page-title') || root.querySelector('.record-title') || root;
-      const badge = this._mkBackrefBadge(entry); badge.classList.add('plexus-backref-rec');
+      const badge = this._mkBackrefBadge(entries); badge.classList.add('plexus-backref-rec');
       if (host === root) root.insertBefore(badge, root.firstChild); else host.appendChild(badge);
     }
   }
@@ -5637,13 +5677,13 @@ class Plugin extends AppPlugin {
       },
       // CANVAS-BACK-1: backref store round-trips the entry shape _navToCanvasAnchor consumes.
       backrefRoundTripTest: () => {
-        const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: '__pxc_test_D__', el: 'E', label: 'L' });
-        const got = this._lookupBackref(k);
+        const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: '__pxc_test_D__', el: 'E', label: 'L', kind: 'line' });
+        const got = this._lookupBackref(k); // ARRAY now
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
-        return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' && got.kind === 'line' };
+        return { got, ok: Array.isArray(got) && got.length === 1 && got[0].drawing === '__pxc_test_D__' && got[0].el === 'E' && got[0].label === 'L' && got[0].kind === 'line' };
       },
-      // FLYBACK: rebuild-on-save indexes whole-element chips AND inline @@/@ runs (line→lineGuid, record→guid, image
-      // skipped, dup target → first wins), and self-heals when refs are removed from the scene.
+      // FLYBACK + MULTI-REF: rebuild-on-save indexes whole-element chips AND inline @@/@ runs (line→lineGuid,
+      // record→guid, image skipped); the SAME target referenced by two elements keeps BOTH (picker); self-heals on remove.
       reindexFlybackTest: () => {
         const view = v(); if (!view) return { error: 'no view' };
         const D = '__pxc_reindex_D__';
@@ -5652,23 +5692,25 @@ class Plugin extends AppPlugin {
           { id: 'E2', isRef: true, refKind: 'record', refGuid: 'RG1', refLabel: 'Appt', refAlias: 'see' },
           { id: 'E3', isRef: true, refKind: 'image', refGuid: 'RG9', refLineGuid: 'IMG9' }, // image owns the xref path → skipped
           { id: 'E4', type: 'text', runs: [{ t: 'text', s: 'a ' }, { t: 'ref', kind: 'line', guid: 'RP', lineGuid: 'LG2', label: 'snippet' }, { t: 'ref', kind: 'record', guid: 'RG2', label: 'Topic' }] },
-          { id: 'E5', isRef: true, refKind: 'record', refGuid: 'RG1', refLabel: 'dup' }, // dup target RG1 → first (E2) wins
+          { id: 'E5', isRef: true, refKind: 'record', refGuid: 'RG1', refLabel: 'dup' }, // 2nd ref to RG1 → BOTH kept (multi)
         ] } };
         view._reindexBackrefs.call(fake);
         const f = this._loadBackref();
+        const byEl = (arr) => (arr || []).reduce((m, e) => { m[e.el] = e; return m; }, {});
+        const rg1 = byEl(f.RG1);
         const r = {
-          line1: !!f.LG1 && f.LG1.kind === 'line' && f.LG1.el === 'E1' && f.LG1.drawing === D,
-          rec1: !!f.RG1 && f.RG1.kind === 'record' && f.RG1.el === 'E2',
+          line1: !!f.LG1 && f.LG1.length === 1 && f.LG1[0].kind === 'line' && f.LG1[0].el === 'E1' && f.LG1[0].drawing === D,
+          recMulti: !!f.RG1 && f.RG1.length === 2 && !!rg1.E2 && !!rg1.E5 && rg1.E2.kind === 'record',
           imgSkip: !f.IMG9 && !f.RG9,
-          runLine: !!f.LG2 && f.LG2.kind === 'line' && f.LG2.el === 'E4',
-          runRec: !!f.RG2 && f.RG2.kind === 'record' && f.RG2.el === 'E4',
+          runLine: !!f.LG2 && f.LG2[0].kind === 'line' && f.LG2[0].el === 'E4',
+          runRec: !!f.RG2 && f.RG2[0].kind === 'record' && f.RG2[0].el === 'E4',
         };
         fake.scene.elements = [{ id: 'E1', isRef: true, refKind: 'line', refLineGuid: 'LG1', refLabel: 'vet' }];
         view._reindexBackrefs.call(fake);
         const f2 = this._loadBackref();
         r.heal = !!f2.LG1 && !f2.RG1 && !f2.LG2 && !f2.RG2;
         try { this._brefPruneDrawing(D); } catch (_e) {}
-        return { r, ok: r.line1 && r.rec1 && r.imgSkip && r.runLine && r.runRec && r.heal };
+        return { r, ok: r.line1 && r.recMulti && r.imgSkip && r.runLine && r.runRec && r.heal };
       },
       // AI AUTO-CLUSTER: connected-components clustering by cosine + string-array parsing.
       clusterTest: () => {
