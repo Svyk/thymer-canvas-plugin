@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.47.0 — transclusion cards: dark-mode + live-transclusion GLOW (Connections plan Phase 1) (2026-06-20)
+- User: cards were hardcoded light (`#fff`/`#1e1e1e`/`#5f6368`) → unreadable on a dark theme; wanted a glow so a card reads
+  as a live transclusion. Plan: `~/.claude/plans/staged-finding-ritchie.md` (dark-mode+glow → connections, phased).
+- `_drawRecordCard` (:2962) + `_drawLineCard` (:3622) now branch on `PXC_DARK` (set per-frame from `_themeDark()`):
+  bg → `#1b1d24` (dark) / `#ffffff` (light); title → `#e6e7ea`/`#1e1e1e`; body → `#9aa3ad`/`#5f6368`; loading/title-dim
+  → `#8b9096`/`#9aa0a6`. Rainbow markers/guides already saturated; accent stripe already adapts. `el.backgroundColor`
+  still wins if explicitly set.
+- GLOW: the card fill draws with `shadowColor = accent` (record `#7c5cff`, linecard `#0ea5e9`) + `shadowBlur = 12*z*dpr`
+  (~12 world px halo at any zoom), then resets shadow before the stroke/body. STATIC (no per-frame anim → no hot-path cost,
+  full-render/settle only). Toggle via `_settings.cardGlow === false`.
+- Verified standalone in chrome (light page = subtle glow + readable; dark page = readable dark card + prominent glow).
+  Cosmetic-only (no logic/data) → skipped the heavy review; the adversarial gates are reserved for the connection phases.
+- NEXT: Phase 2 — labeled connections (arrow/line binds to ANY element + a connectable midpoint label).
+
 ## ✅ v1.46.0 — card text WRAPS (no more "…" truncation) + data-safety audit honesty fix (2026-06-20)
 - **Text wrap** (user: long lines truncated with "…"): `_drawOutlineRow` now `pxcWrapLines`-wraps to the available width and
   RETURNS its (multi-line) height; the record-card + line-card loops advance `ty` by that. Indent guides span the full

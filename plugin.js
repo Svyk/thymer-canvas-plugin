@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.46.0';
+const PLEXUS_VERSION = '1.47.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2965,18 +2965,21 @@ class CanvasView {
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
     const sk = (this._recCache && this._recCache.get(el.recordGuid) || {}).skin || {}; // CS-8: property-conditional style
     if (sk.urgent) { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x - 3, y - 3, w + 6, h + 6, rad + 3); else ctx.rect(x - 3, y - 3, w + 6, h + 6); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ef4444'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.8; ctx.stroke(); ctx.restore(); } // Due-past urgency ring
+    const dark = PXC_DARK, accent = sk.color || el.strokeColor || '#7c5cff'; // dark-mode-aware surface/ink + a live-transclusion glow
+    const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
-    ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = sk.color || el.strokeColor || '#7c5cff'; ctx.stroke();
+    ctx.fillStyle = el.backgroundColor || (dark ? '#1b1d24' : '#ffffff');
+    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
+    ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
     const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
     const _la = (this.plugin._settings && this.plugin._settings.linkOpacity != null ? this.plugin._settings.linkOpacity : 100) / 100, _ga = ctx.globalAlpha; ctx.globalAlpha = _ga * _la; // S10: dim the link/accent stripe only
-    ctx.fillStyle = (rec && rec.tag) ? tagColor(rec.tag) : (el.strokeColor || '#7c5cff'); ctx.fillRect(x, y, 4, h); ctx.globalAlpha = _ga; // E11: accent encodes a choice property
+    ctx.fillStyle = (rec && rec.tag) ? tagColor(rec.tag) : accent; ctx.fillRect(x, y, 4, h); ctx.globalAlpha = _ga; // E11: accent encodes a choice property
     ctx.textBaseline = 'top';
-    if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
-    ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
-    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
+    if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = dark ? '#8b9096' : '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
+    ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = titleCol; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
+    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3620,18 +3623,21 @@ class CanvasView {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    const dark = PXC_DARK, accent = el.strokeColor || '#0ea5e9'; // dark-mode-aware surface/ink + a live-transclusion glow
+    const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill();
-    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#0ea5e9'; ctx.stroke();
+    ctx.fillStyle = el.backgroundColor || (dark ? '#1b1d24' : '#ffffff');
+    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
+    ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
     const data = this._lineFor(el); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
-    ctx.fillStyle = el.strokeColor || '#0ea5e9'; ctx.fillRect(x, y, 4, h); // cyan accent stripe (a transcluded LINE)
+    ctx.fillStyle = accent; ctx.fillRect(x, y, 4, h); // cyan accent stripe (a transcluded LINE)
     ctx.textBaseline = 'top';
-    if (!data) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
-    if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
-    ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
-    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of data.children) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
+    if (!data) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = dimCol; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
+    if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = dimCol; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
+    ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = titleCol; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
+    ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
+    for (const ln of data.children) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   async _toggleTaskNode(el) {
