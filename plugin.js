@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.41.0';
+const PLEXUS_VERSION = '1.42.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -913,25 +913,24 @@ function lineTextOf(li) {
   try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
 }
 // TRANSCLUSION INDENTATION: flatten a line-item subtree into [{text, depth}] (depth 0 = the card body's top level) so a
-// record/line card renders its nesting the way Thymer's outline does. Capped to keep big bodies bounded. getChildren()
-// is async; an empty/unresolved level (Go-nil) → [].
-async function pxcFlattenTree(items, depth, out, cap) {
-  for (const li of (items || [])) {
-    if (out.length >= cap) return;
-    const txt = lineTextOf(li); if (txt) out.push({ text: txt, depth });
-    let ch = []; try { ch = (li.getChildren && await li.getChildren()) || []; } catch (_e) {}
-    if (ch.length) await pxcFlattenTree(ch, txt ? depth + 1 : depth, out, cap);
-  }
-}
-// EDIT-INDENT: flatten a subtree to [{li, depth}] KEEPING the line-item objects (and blank lines) so the card editor can
-// show + restructure the nesting. DFS, capped.
-async function pxcFlattenTreeLi(items, depth, out, cap) {
-  for (const li of (items || [])) {
-    if (out.length >= cap) return;
-    out.push({ li, depth });
-    let ch = []; try { ch = (li.getChildren && await li.getChildren()) || []; } catch (_e) {}
-    if (ch.length) await pxcFlattenTreeLi(ch, depth + 1, out, cap);
-  }
+// record/line card + card editor render an outline's nesting the way Thymer's outline does. ROOT CAUSE (2026-06-20):
+// `rec.getLineItems()` returns the body FLAT in document (pre-order) — ALL descendants, each carrying `parent_guid` — and
+// `li.getChildren()` returns [] on that flat load (the parent→child wiring isn't populated). So recursing getChildren left
+// every row at depth 0 (the flat transclusion card the user saw). Depth MUST be derived from the `parent_guid` chain.
+// Returns [{li, text, depth}] in pre-order, capped. opts: root=null → whole record (absolute depth); root=<lineGuid> → that
+// line's subtree (includeRoot ? the line itself at depth 0 + descendants : descendants only at depth 0). includeBlank keeps
+// empty lines (the editor needs them; cards skip them). Synchronous — no async getChildren walk.
+function pxcOutlineRows(all, root, cap, includeBlank, includeRoot) {
+  all = all || [];
+  const byGuid = new Map(); for (const li of all) if (li && li.guid) byGuid.set(li.guid, li);
+  const dcache = new Map();
+  const absDepth = (li) => { const g = li.guid; if (dcache.has(g)) return dcache.get(g); let d = 0, p = li.parent_guid, seen = new Set([g]); while (p && byGuid.has(p) && !seen.has(p)) { seen.add(p); d++; p = byGuid.get(p).parent_guid; } dcache.set(g, d); return d; };
+  const inSubtree = (li) => { if (!root) return true; if (li.guid === root) return !!includeRoot; let p = li.parent_guid, seen = new Set([li.guid]); while (p && !seen.has(p)) { if (p === root) return true; if (!byGuid.has(p)) return false; seen.add(p); p = byGuid.get(p).parent_guid; } return false; };
+  let base = 0;
+  if (root && byGuid.has(root)) base = absDepth(byGuid.get(root)) + (includeRoot ? 0 : 1); // shallowest shown row → depth 0
+  const out = [];
+  for (const li of all) { if (out.length >= cap) break; if (!inSubtree(li)) continue; const txt = lineTextOf(li); if (!txt && !includeBlank) continue; out.push({ li, text: txt, depth: Math.max(0, absDepth(li) - base) }); }
+  return out;
 }
 // EDIT-INDENT: reconstruct a card body's tree from edited rows. `items` = loaded [{li, depth}] (DFS order); `parsed` =
 // [{depth, text(trimmed)}] from the textarea; `body` = same rows with the leading indent stripped (intra-line spacing
@@ -2867,7 +2866,7 @@ class CanvasView {
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
-        try { const items = await rec.getLineItems(); const out = []; await pxcFlattenTree(items, 0, out, 10); entry.lines = out; } catch (_e) {} // [{text, depth}] — nested outline
+        try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth })); } catch (_e) {} // [{text, depth}] — depth from parent_guid chain (getChildren() returns [] on the flat load)
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -3494,8 +3493,7 @@ class CanvasView {
         const li = items.find((x) => x.guid === key);
         if (!li) { entry.text = '(line gone)'; entry.ready = true; this.dirty = true; return; }
         entry.text = lineTextOf(li);
-        let kids = []; try { if (li.getChildren) kids = (await li.getChildren()) || []; } catch (_e) {} // getChildren() returns a Promise — must await
-        const kout = []; await pxcFlattenTree(kids, 0, kout, 12); entry.children = kout; // [{text, depth}] — nested outline
+        entry.children = pxcOutlineRows(items, key, 12, false, false).map((r) => ({ text: r.text, depth: r.depth })); // descendants of this line, depth from parent_guid chain (direct child → 0)
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.ready = true; this.dirty = true; }
     })();
@@ -3516,9 +3514,10 @@ class CanvasView {
     let items = []; // [{li, depth}] — the body subtree in DFS order (so the editor shows + restructures the nesting)
     try {
       const all = (await rec.getLineItems()) || [];
-      let roots = all;
-      if (isLine && card.lineGuid) { const main = all.find((li) => li.guid === card.lineGuid); roots = main ? [main] : []; }
-      await pxcFlattenTreeLi(roots, 0, items, 60);
+      // depth from parent_guid chain (getChildren() returns [] on the flat getLineItems load). Record card → whole body;
+      // line card → the main line at depth 0 + its descendants. includeBlank so the editor can show/restructure blank rows.
+      const rows = isLine && card.lineGuid ? pxcOutlineRows(all, card.lineGuid, 60, true, true) : pxcOutlineRows(all, null, 60, true, false);
+      items = rows.map((r) => ({ li: r.li, depth: r.depth }));
     } catch (_e) {}
     if (this.destroyed) return;
     const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);

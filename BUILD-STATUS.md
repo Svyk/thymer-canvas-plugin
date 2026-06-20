@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.42.0 — transclusion NESTING root cause: depth from parent_guid, not getChildren() (2026-06-20)
+- User: transcluded outline rows render FLAT (no visible indentation) even though the record shows clear nesting.
+- ROOT CAUSE (proven via live `get_line_items` on record 1ARSM7792BTCP422K0193X7M3H): `rec.getLineItems()` returns the
+  body **FLAT in pre-order**, every line carrying a correct **`parent_guid`** (SDK PluginLineItem field), but
+  `li.getChildren()` returns **[]** on that flat load — so the old `pxcFlattenTree` getChildren-recursion never added
+  depth → every row depth 0 → flat card. (The line-card editor was silently broken the same way: it only ever showed the
+  main line, no children.)
+- FIX: new synchronous **`pxcOutlineRows(all, root, cap, includeBlank, includeRoot)`** derives depth from the
+  **parent_guid chain** (cycle-guarded). root=null → whole record (absolute depth); root=<lineGuid> → that line's subtree.
+  Repointed all 3 sites: record card (`entry.lines`), line card (`entry.children`), card editor (`items`). Removed the old
+  `pxcFlattenTree`/`pxcFlattenTreeLi`. node-tested 7 cases on the EXACT live data shape (depths 0/1/2, subtree filter,
+  blank-skip-but-depth-preserved, cap, cycle no-hang, sibling-branch exclusion). Pairs with v1.41 rainbow markers+guides →
+  transclusions now show true indentation with depth-colored dots + guides.
+
 ## ✅ v1.41.0 — transclusion outline rows = Indent-Rainbow look (record parity) (2026-06-20)
 - User clarified the "flow thymer plugin / bullets" ask: the issue is **on the canvas** — transcluded outline rows
   should look like they do on a record (where the Indent Rainbow plugin paints them). The Indent Rainbow plugin
