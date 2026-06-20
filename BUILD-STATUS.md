@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.54.0 — CONNECTIONS Phase 5: multi-ref nav polish + see-your-connections (2026-06-20)
+- **Flyback frames the WHOLE connection.** Clicking a note-side ↗ for a connection used to spotlight only the arrow's bbox.
+  `_connFlashExtras(arrow)` now adds both bound endpoints as flash items, each at the EXACT sub-target it cites (a body-line
+  band via `_lineRectWorld`, an image region via `_imgRegionWorld`, else the whole element); `_flashAnchor` unions them and
+  (for a connection) skips the image-style establish-then-zoom (`isConn` → fly straight to the union). So you land framed on
+  the arrow + both ends + the cited line — unmistakable which connection you returned to.
+- **Picker rows already show the connection label** ("connection: Test", post-v1.52) + a kind dot (line cyan / record purple),
+  and clicking lands on the exact connector (`entry.el` = the arrow). No change needed — verified.
+- **Select-a-card → see its connections.** Selecting ONE element softly glows every connection attached to it (over each
+  arrow's routed path) + a purple `⇄ N` count chip at its top-right — the canvas-side "what does this connect to". O(1) via
+  a prebuilt `_connByEl` index (elId → Set(arrowId)) rebuilt in `_updateBindings`; no per-frame scene scan. Gated to the
+  select tool, single selection, not-editing, not mid-flyback.
+- node-tested (11: `_connByEl` index, `_connFlashExtras` line-band/region/whole-element/deleted-endpoint selection). Canvas
+  overlay + synced index ONLY — zero source-note mutation. Connections system (Phases 1–5) COMPLETE.
+- NEXT: connections feature-complete per the plan; await user feedback (richer chaining, connection styling, etc. if wanted).
+
 ## ✅ v1.53.0 — CONNECTIONS Phase 4: line-level + image-region targeting (the blue flag) (2026-06-20)
 - A connection endpoint can now bind to a SPECIFIC body line of a record card or a REGION of an image, not just the whole
   element. Binding shape gained optional sub-target fields: `{elementId, lineGuid?, frac?, fracPoly?}`.

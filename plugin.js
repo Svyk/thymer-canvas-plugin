@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.53.0';
+const PLEXUS_VERSION = '1.54.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1510,7 +1510,7 @@ class CanvasView {
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
     this._lineRects = new Map(); // CONNECTIONS Phase 4: cardId → [{lineGuid, dy, h}] body-line bands (relative to card top, captured each raster) — line-level connection targeting
-    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] — which lines/regions are CURRENT connection targets (the blue flag + region highlight); rebuilt in _updateBindings
+    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / elId → Set(arrowId) — CURRENT connection targets (blue flag + region highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
     this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
   }
   mount() {
@@ -1808,12 +1808,28 @@ class CanvasView {
     const bbox = (reg && elB) ? ((reg.w * reg.h) < (elB.w * elB.h) * 0.7 ? reg : elB) : (reg || elB);
     return (bbox && isFinite(bbox.x)) ? { bbox } : null;
   }
+  // CONNECTIONS Phase 5: extra flash items for a connector (arrow/line) → its two bound endpoints, each spotlit at the
+  // EXACT sub-target it cites (a body-line band, an image region, else the whole element). So flying back to a connection
+  // frames the WHOLE thing — the arrow AND both ends AND the cited line — not just the arrow's bbox.
+  _connFlashExtras(arrow) {
+    const out = [];
+    for (const b of [arrow.startBinding, arrow.endBinding]) {
+      if (!b || !b.elementId) continue; const t = this._byId(b.elementId); if (!t || t.isDeleted) continue;
+      if (b.lineGuid && t.type === 'record') { const lr = this._lineRectWorld(t, b.lineGuid); if (lr) { out.push({ bbox: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } }); continue; } }
+      if (b.frac && t.type === 'image') { const rw = this._imgRegionWorld(t, b.frac); if (rw && isFinite(rw.x)) { out.push({ inImage: true, elId: t.id, frac: b.frac, fracPoly: b.fracPoly, bbox: rw }); continue; } }
+      const bb = this._elBBox(t); if (bb && isFinite(bb.x)) out.push({ bbox: bb });
+    }
+    return out;
+  }
   // Reveal + a fast double-pulse spotlight on the cited target(s). A COMPOSITE cite (anchor.extra) flashes them
   // ALL together — union framing, every region/shape spotlit in one pass.
   _flashAnchor(anchor, opts) {
     const now = () => this._now();
     const items = [];
     const main = this._flashItem(anchor); if (main) items.push(main);
+    const el0 = anchor && anchor.el ? this._byId(anchor.el) : null; // resolved ONCE, reused for the connection-extras append + the isConn/estB test below
+    const isConn = !!(el0 && (el0.type === 'arrow' || el0.type === 'line')); // a connection backref → also frame + spotlight both bound endpoints (Phase 5)
+    if (isConn) for (const it of this._connFlashExtras(el0)) items.push(it);
     if (anchor && anchor.extra && anchor.extra.length) for (const ex of anchor.extra) { const it = this._flashItem(ex); if (it) items.push(it); }
     if (!items.length) {
       if (anchor && anchor.inImage) { try { this.plugin.ui.addToaster({ title: 'Plexus: the source image for this reference was removed.', dismissible: true }); } catch (_e) {} return; }
@@ -1823,8 +1839,8 @@ class CanvasView {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const it of items) { const b = it.bbox; x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); }
     const union = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-    const el0 = anchor && anchor.el ? this._byId(anchor.el) : null;
-    const estB = (opts && opts.establishImage && el0) ? this._elBBox(el0) : (items.length === 1 && !items[0].inImage && el0 ? this._elBBox(el0) : null);
+    // connection → fly straight to the union (arrow+ends), no image-style establish-then-zoom-into-region
+    const estB = isConn ? null : ((opts && opts.establishImage && el0) ? this._elBBox(el0) : (items.length === 1 && !items[0].inImage && el0 ? this._elBBox(el0) : null));
     const dur = items.some((i) => i.inImage) ? 1200 : 1000;
     this._revealThenFlash(union, () => { this._flash = { items, start: now(), dur }; this.dirty = true; }, estB);
   }
@@ -2149,13 +2165,14 @@ class CanvasView {
     }
     // CONNECTIONS Phase 4: which lines/regions are CURRENT connection sub-targets (drives the blue flag + region highlight).
     // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
-    const lineT = new Map(), regionT = new Map();
+    const lineT = new Map(), regionT = new Map(), byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5)
     for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
       if (!b || !b.elementId) continue;
+      { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
       else if (b.frac) { let r = regionT.get(b.elementId); if (!r) regionT.set(b.elementId, r = []); r.push({ frac: b.frac, fracPoly: b.fracPoly }); }
     }
-    this._connLineTargets = lineT; this._connRegionTargets = regionT;
+    this._connLineTargets = lineT; this._connRegionTargets = regionT; this._connByEl = byEl;
     if (!arrows.length && !labels.length) return; // nothing bound → zero work
     const updArrow = (el) => {
       let changed = false;
@@ -5009,6 +5026,19 @@ class CanvasView {
         }
       }
       ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
+    // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
+      const selId = this.selected.values().next().value, arrowIds = this._connByEl.get(selId);
+      if (arrowIds && arrowIds.size) {
+        ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+        ictx.lineCap = 'round'; ictx.lineJoin = 'round'; ictx.strokeStyle = 'rgba(124,92,255,0.32)';
+        for (const aid of arrowIds) { const a = this._byId(aid); if (!a || a.isDeleted) continue; const pts = routedPoints(a); if (!pts || pts.length < 2) continue; ictx.lineWidth = ((a.strokeWidth || 2) + 6) / z; ictx.beginPath(); ictx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ictx.lineTo(pts[i][0], pts[i][1]); ictx.stroke(); }
+        ictx.lineCap = 'butt'; ictx.lineJoin = 'miter'; ictx.setTransform(1, 0, 0, 1, 0, 0);
+        const sel = this._byId(selId), bb = sel ? this._elBBox(sel) : null; // count chip at the element's top-right (screen space)
+        if (bb) { const sp = this.camera.worldToScreen(bb.x + bb.w, bb.y), txt = '⇄ ' + arrowIds.size; ictx.font = '600 ' + (11 * d) + 'px system-ui, sans-serif'; const pad = 5 * d, ch = 17 * d, cw = ictx.measureText(txt).width + pad * 2, rx = sp.x * d - cw + 3 * d, ry = sp.y * d - ch - 3 * d; ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(rx, ry, cw, ch, 8 * d); else ictx.rect(rx, ry, cw, ch); ictx.fillStyle = '#7c5cff'; ictx.fill(); ictx.fillStyle = '#fff'; ictx.textAlign = 'left'; ictx.textBaseline = 'middle'; ictx.fillText(txt, rx + pad, ry + ch / 2 + 0.5 * d); ictx.textBaseline = 'alphabetic'; }
+      }
     }
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
