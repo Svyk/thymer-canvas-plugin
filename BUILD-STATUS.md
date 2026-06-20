@@ -2,6 +2,14 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.21.0 — Timeline / Gantt lane** (Tier 2). "Arrange cards on a timeline" positions selected record cards on a real
+  datetime axis (by Scheduled/Due/Start/…), optional swim-lanes by a 2nd property, draws weekly tick guides; **DRAG a
+  card → re-dates the record in place** (`_setSchedule`, the loader-correct `DateTime` write) — two-way typed-data editing
+  no whiteboard can do. Pure axis math `pxcTimelineX`/`pxcTimelineMs` (6/6). Re-date gated on `tlBound` + transient
+  `_timeline` (no accidental re-dates on normal drags / after reload); prior axis ticks cleared on re-run.
+  Review: 2 defects fixed — **HIGH timezone off-by-one** (UTC bucket vs local ISO → now a **local-midnight** bucket so
+  dates round-trip exactly, cards sit on ticks) + a **no-op re-date skip** (`tlMs`, only writes when the day changed).
+  Command on `ti-calendar`.
 - **v1.20.0 — Roll-Up / aggregation (KPI) cards** (Tier 2). New `rollup` element: a query bound to a live aggregate —
   `count` | `%done` | `sum:Prop` | `avg:Prop` | `min/max:Prop` — rendered as a big-number KPI tile, recomputed on
   `record.updated`. Pure `pxcParseAgg`/`pxcComputeAgg` (12/12 node asserts). `_rollupFor` cache (keyed query+agg, one-shot

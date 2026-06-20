@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.20.0';
+const PLEXUS_VERSION = '1.21.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -669,6 +669,11 @@ function pxcComputeAgg(fn, nums, count) {
   if (fn === 'max') return nums.length ? Math.max.apply(null, nums) : 0;
   return count; // 'count' (and any unknown fn)
 }
+// TIMELINE / GANTT: pure axis math (ms↔x at day granularity). day0Ms = the left edge's day; pxPerDay = horizontal scale.
+const PXC_DAY_MS = 86400000;
+function pxcTimelineX(ms, day0Ms, x0, pxPerDay) { return x0 + ((ms - day0Ms) / PXC_DAY_MS) * pxPerDay; }
+function pxcTimelineMs(x, day0Ms, x0, pxPerDay) { return day0Ms + Math.round((x - x0) / pxPerDay) * PXC_DAY_MS; } // snaps to the nearest day
+function pxcMsToIsoLocal(ms) { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -2145,7 +2150,7 @@ class CanvasView {
         this.tool = 'select'; this._syncToolbar();
       }
       else if (mode === 'move' && moveEls) {
-        if (moved) this.scheduleSave();
+        if (moved) { this.scheduleSave(); this._timelineRedateMoved(moveEls); } // TIMELINE: dragging a timeline card re-dates it
         else if (downRef && downRef.wasSelected) { // CANVAS-SEG: second click on an already-selected runs-text → navigate the ref under the cursor; deferred so a dblclick edits instead
           const el = this._byId(downRef.id), run = el && hitInlineRef(el, down.x, down.y);
           if (run) { if (this._pendingNav) clearTimeout(this._pendingNav); this._pendingNav = setTimeout(() => { this._pendingNav = null; this._openCard({ refKind: run.kind, refGuid: run.guid, refLineGuid: run.lineGuid }); }, 230); }
@@ -2880,6 +2885,62 @@ class CanvasView {
     });
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + cards.length + ' cards into ' + cols.length + ' columns by ' + prop + '.', dismissible: true }); } catch (_e) {}
+  }
+  // TIMELINE / GANTT: position selected record cards on a real datetime axis (by Scheduled/Due/…), optional swim-lanes
+  // by a 2nd property; DRAG a card horizontally → re-dates the record in place (the live Gantt no whiteboard can do).
+  async _arrangeTimeline() {
+    const cards = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type === 'record');
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select 2+ record cards first.', dismissible: true }); } catch (_e) {} return; }
+    const laneProp = await this._promptText('Swim-lane by property (blank = single lane):', '');
+    if (laneProp === null) return;
+    const items = [];
+    for (const card of cards) {
+      let ms = null, lane = '';
+      try { const rec = await this.plugin.data.getRecord(card.recordGuid); if (rec && rec.prop) {
+        for (const k of ['Scheduled', 'Date', 'Due', 'Due Date', 'Start', 'Deadline']) { const p = rec.prop(k); if (p && p.date) { const d = p.date(); if (d) { ms = d.getTime(); break; } } }
+        if (laneProp) { const p = rec.prop(laneProp); if (p) lane = (p.choiceLabel && p.choiceLabel()) || (p.text && p.text()) || ''; }
+      } } catch (_e) {}
+      items.push({ card, ms, lane: String(lane || '') });
+    }
+    const dated = items.filter((it) => it.ms != null);
+    if (dated.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: need 2+ cards with a date (Scheduled/Due/Start/…).', dismissible: true }); } catch (_e) {} return; }
+    for (const e of this.scene.elements) if (e.tlAxis) e.isDeleted = true; // clear a prior timeline's ticks/labels (no accumulation on re-run)
+    const minMs = Math.min.apply(null, dated.map((it) => it.ms)), maxMs = Math.max.apply(null, dated.map((it) => it.ms));
+    const _d0 = new Date(minMs); _d0.setHours(0, 0, 0, 0); const day0Ms = _d0.getTime(); // LOCAL midnight bucket (matches pxcMsToIsoLocal's local Y-M-D → no day-boundary off-by-one)
+    const spanDays = Math.max(1, Math.ceil((maxMs - day0Ms) / PXC_DAY_MS));
+    const CW = 200, CH = 110, LANE_H = 150, pxPerDay = Math.max(28, Math.min(120, 900 / spanDays)), AXIS_W = spanDays * pxPerDay;
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const x0 = this._snap(c.x - AXIS_W / 2), yTop = this._snap(c.y - 90);
+    const lanes = []; for (const it of dated) if (lanes.indexOf(it.lane) < 0) lanes.push(it.lane);
+    if (!lanes.length) lanes.push('');
+    this._timeline = { x0, day0Ms, pxPerDay, cw: CW };
+    // date tick guides + labels (~weekly), drawn as light line + text elements behind the cards
+    const tickEvery = spanDays > 60 ? 7 : (spanDays > 14 ? 7 : 1), botY = yTop + lanes.length * LANE_H;
+    for (let dz = 0; dz <= spanDays; dz += tickEvery) {
+      const tx = this._snap(pxcTimelineX(day0Ms + dz * PXC_DAY_MS, day0Ms, x0, pxPerDay));
+      const ln = makeLinear(tx, yTop - 24, 'line', { stroke: '#d9dde5', strokeWidth: 1 }); ln.points = [[tx, yTop - 24], [tx, botY]]; ln.endArrowhead = null; ln.roughness = 0; ln.tlAxis = true; linearBBox(ln); this.scene.elements.unshift(ln);
+      const lab = makeText(tx + 3, yTop - 22, { fontSize: 11, stroke: '#9aa0a6' }); lab.text = pxcMsToIsoLocal(day0Ms + dz * PXC_DAY_MS).slice(5); lab.tlAxis = true; measureText(lab); this.scene.elements.push(lab);
+    }
+    lanes.forEach((lane, li) => { if (!lane) return; const h = makeText(x0 - 8, yTop + li * LANE_H + 4, { fontSize: 13, stroke: '#7c5cff' }); h.text = (laneProp || 'lane') + ': ' + lane; h.tlAxis = true; measureText(h); this.scene.elements.push(h); });
+    for (const it of dated) {
+      const li = Math.max(0, lanes.indexOf(it.lane));
+      it.card.x = this._snap(pxcTimelineX(it.ms, day0Ms, x0, pxPerDay) - CW / 2);
+      it.card.y = yTop + li * LANE_H + 24; it.card.width = CW; it.card.height = CH; it.card.tlBound = true; it.card.tlMs = it.ms; // tlMs = the day this card was placed at → skip a no-op re-date
+    }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Timeline: ' + dated.length + ' card(s) across ' + spanDays + ' day(s), ' + lanes.length + ' lane(s). Drag a card to re-date it.', dismissible: true }); } catch (_e) {}
+  }
+  // Drag-to-redate: a moved timeline card → compute its new date from x and write it on the record (in place).
+  _timelineRedateMoved(moveEls) {
+    const tl = this._timeline; if (!tl) return;
+    for (const m of moveEls) {
+      const el = m.el; if (!el || el.type !== 'record' || !el.tlBound || !el.recordGuid) continue;
+      const ms = pxcTimelineMs(el.x + (tl.cw || 200) / 2, tl.day0Ms, tl.x0, tl.pxPerDay);
+      if (el.tlMs != null && ms === el.tlMs) continue; // didn't cross a day boundary → no redundant write
+      el.tlMs = ms; const iso = pxcMsToIsoLocal(ms);
+      const guid = el.recordGuid;
+      this.plugin._setSchedule(guid, iso).then((r) => { this._invalidateRec(guid); try { this.plugin.ui.addToaster({ title: (r && r.ok ? 'Re-dated to ' + iso : 'Plexus: no Scheduled/Due datetime property to re-date'), dismissible: true }); } catch (_e) {} }).catch(() => {});
+    }
   }
   // CS-7: frames → Slide records — each frame becomes a typed record in a "Slides" collection with Order + a banner
   // snapshot of the frame. The deck is then queryable + reorderable. Obsidian frames are just rectangles.
@@ -4423,6 +4484,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards on a timeline (drag to re-date)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._arrangeTimeline(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Label connector with date delta', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._datetimeConnectors(); } }); // CS-10
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Save milestone snapshot', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._saveMilestone(); } }); // CS-6
@@ -5264,6 +5326,16 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // TIMELINE: ms↔x axis math round-trips at day granularity (snap to nearest day).
+      timelineTest: () => {
+        const day0 = 1700000000000 - (1700000000000 % 86400000), x0 = 100, ppd = 40;
+        const d3 = day0 + 3 * 86400000, x = pxcTimelineX(d3, day0, x0, ppd);
+        const back = pxcTimelineMs(x, day0, x0, ppd);
+        const snap = pxcTimelineMs(x0 + 2.4 * ppd, day0, x0, ppd); // 2.4 days → snaps to day 2
+        const lm = new Date(2026, 5, 15).getTime(); // LOCAL midnight Jun 15 → +Nd round-trips to the right local date (no off-by-one)
+        const isoOk = pxcMsToIsoLocal(lm) === '2026-06-15' && pxcMsToIsoLocal(pxcTimelineMs(pxcTimelineX(lm + 2 * 86400000, lm, x0, ppd), lm, x0, ppd)) === '2026-06-17';
+        return { x, back, isoOk, ok: x === x0 + 3 * ppd && back === d3 && snap === day0 + 2 * 86400000 && pxcTimelineX(day0, day0, x0, ppd) === x0 && isoOk };
       },
       // ROLL-UP CARDS: agg-spec parsing + numeric aggregation.
       rollupTest: () => {
