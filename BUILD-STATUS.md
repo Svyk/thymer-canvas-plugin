@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.31.0 — editable cards: edit a card's body lines inline, written back to the source (2026-06-19)
+User (request 1): "inline-editing a card on the canvas isn't a feature — make it one." Double-click a record card's BODY
+(or a line-transclude card) → an inline `<textarea>` over the card; commit writes back to the SOURCE via the SDK. The
+record TITLE is read-only (SDK has no rename) — its top ~28px band opens the record instead.
+- **SAFE write-back contract (data-loss review enforced):** only two positionally-unambiguous ops — (a) line count
+  UNCHANGED → rewrite the lines whose TRIMMED text changed (untouched lines, incl. their refs/bold/datetime segments, are
+  NEVER rewritten); (b) count GREW with the existing prefix unchanged → APPEND the new rows as line items. Delete / reorder
+  / mid-list insert are REFUSED (would require positional diffing that flattens rich segments or hard-deletes real task/
+  child lines) → a toast nudges the user to open the record. No blind `.delete()`.
+- `_editCardBody`: resolves items (record card → `getLineItems()`; linecard → `[main, ...getChildren()]`), edits via
+  `setSegments` / appends via `createLineItem`. Esc aborts (no write); a new editor or `destroy()` calls `abort()` so a
+  prior edit can't commit on teardown. Known limit: editing a line replaces it with plain text (that line's own
+  formatting/refs are lost — it's the line you edited); structural changes go through the record.
+- Adversarial `code-reviewer` (data-safety focus): the FIRST design had 2 HIGH data-loss paths (positional `\n`-diff
+  flattened untouched rich lines on any insert/delete; trailing-delete destroyed tasks/children) — REDESIGNED to the safe
+  contract above before shipping. `node --check` clean.
+
 ## ✅ v1.30.0 — record page: "Canvas References" SECTION instead of the inline ↗ chip (2026-06-19)
 User (request 3): "for the record view, instead of the chip, put it in the back ref section." Thymer's record page has a
 native **Backreferences** footer (`.tlr-body` inside the panel's `.tlr-footer`, holding `.tlr-section-slot-*` slots:

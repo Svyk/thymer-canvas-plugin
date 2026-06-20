@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.30.0';
+const PLEXUS_VERSION = '1.31.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2278,8 +2278,8 @@ class CanvasView {
       if (hit && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line
       if (hit && hit.link && hit.type !== 'text') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { this._openCard(hit); }
-      else if (hit && hit.type === 'linecard') { this._openCard({ refKind: 'line', refLineGuid: hit.lineGuid, refGuid: hit.recordGuid }); } // TRANSCLUDE: dblclick jumps to the source line
+      else if (hit && hit.type === 'record') { if ((w.y - hit.y) < 28) this._openCard(hit); else this._editCardBody(hit); } // title band → open the record (rename there); body → edit body lines inline (writes back)
+      else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
       else if (hit && hit.type === 'rollup') { this._promptText('Roll-up query:', hit.query).then((q) => { if (q == null) return; this._promptText('Aggregation (count | %done | sum:Prop | avg:Prop):', hit.agg || 'count').then((a) => { if (a == null) return; hit.query = q; hit.agg = a; this._invalidateRollups(); this.dirty = true; this.scheduleSave(); }); }); } // ROLL-UP: dblclick edits query + agg
       else if (hit && hit.type === 'table') { const cell = this._tableCellAt(hit, w.x, w.y); if (cell && cell.prop) this._editTableCell(hit, cell); else this._configureTable(hit); } // LIVE TABLE: dblclick a data cell edits it; header/title/empty reconfigures
@@ -3335,6 +3335,61 @@ class CanvasView {
   }
   _invalidateLine(lineGuid) { if (this._lineCache && this._lineCache.has(lineGuid)) { this._lineCache.delete(lineGuid); this.dirty = true; } }
   _invalidateLinesForRecord(g) { if (!this._lineCache) return; let ch = false; for (const [k, v] of this._lineCache) { if (v && v.recordGuid === g) { this._lineCache.delete(k); ch = true; } } if (ch) this.dirty = true; }
+  // EDITABLE CARDS (request 1): double-click a record/line card BODY → inline-edit the body line items right on the
+  // canvas; commit writes back to the SOURCE via PluginLineItem.setSegments / .delete / rec.createLineItem (the SDK has
+  // no record-rename, so the TITLE stays read-only — its band opens the record instead). One line per textarea row.
+  async _editCardBody(card) {
+    if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; }
+    if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
+    const guid = card && card.recordGuid; if (!guid) return;
+    let rec = null; try { rec = await getRecordPoll(this.plugin, guid); } catch (_e) {}
+    if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: source record not found.', dismissible: true }); } catch (_e) {} return; }
+    const isLine = card.type === 'linecard';
+    let items = [];
+    try {
+      const all = (await rec.getLineItems()) || [];
+      if (isLine && card.lineGuid) { const main = all.find((li) => li.guid === card.lineGuid); if (main) { items = [main]; try { const kids = (main.getChildren && await main.getChildren()) || []; items = items.concat(kids); } catch (_e) {} } }
+      else { items = all; }
+    } catch (_e) {}
+    const origTexts = items.map((li) => lineTextOf(li) || '');
+    if (this.destroyed) return;
+    const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);
+    const titleH = isLine ? 4 : 26; // record card: skip the read-only title band; linecard: edit from the top
+    const ta = document.createElement('textarea'); ta.spellcheck = false; ta.value = origTexts.join('\n');
+    ta.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:4px 6px;font-family:system-ui,sans-serif;line-height:1.33;resize:none;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28)';
+    ta.style.left = (s.x + 8 * z) + 'px'; ta.style.top = (s.y + titleH * z) + 'px';
+    ta.style.width = Math.max(80, (Math.abs(card.width) - 16) * z) + 'px';
+    ta.style.height = Math.max(38, (Math.abs(card.height) - titleH - 10) * z) + 'px';
+    ta.style.fontSize = (12 * z) + 'px';
+    this.wrap.appendChild(ta); setTimeout(() => { try { ta.focus(); ta.select(); } catch (_e) {} }, 0);
+    let done = false; this._cardEdit = { ta, card, abort: () => { done = true; } }; // abort lets destroy() cancel without writing
+    const commit = async () => {
+      if (done) return; done = true;
+      const newTexts = ta.value.split('\n'); try { ta.remove(); } catch (_e) {} this._cardEdit = null;
+      // SAFE write-back (data-loss guardrails): only two operations, both positionally unambiguous:
+      //  (a) line count UNCHANGED → rewrite the lines whose TRIMMED text changed (untouched lines keep their refs/format);
+      //  (b) count GREW and the existing prefix is unchanged → APPEND the extra rows as new line items.
+      // Anything else (delete, reorder, mid-list insert) can't be diffed by position without flattening rich segments or
+      // hard-deleting real task/child lines, so it's refused here — the user restructures by opening the record.
+      const prefixMatches = () => { const n = Math.min(items.length, newTexts.length); for (let i = 0; i < n; i++) if (newTexts[i].trim() !== origTexts[i]) return false; return true; };
+      let writes = 0, structural = false;
+      if (newTexts.length === items.length) {
+        for (let i = 0; i < items.length; i++) { if (newTexts[i].trim() !== origTexts[i]) { try { if (await items[i].setSegments([{ type: 'text', text: newTexts[i] }])) writes++; } catch (_e) {} } }
+      } else if (newTexts.length > items.length && prefixMatches()) {
+        const parentItem = isLine && items[0] ? items[0] : null; let after = items.length ? items[items.length - 1] : null;
+        for (let i = items.length; i < newTexts.length; i++) { if (!newTexts[i].trim()) continue; try { const li = await rec.createLineItem(parentItem, after, 'ulist', [{ type: 'text', text: newTexts[i] }], null); if (li) { after = li; writes++; } } catch (_e) {} }
+      } else { structural = true; }
+      if (this.destroyed) return;
+      if (structural) { try { this.plugin.ui.addToaster({ title: 'Inline edit changes existing lines + adds new ones at the end. To delete, reorder, or insert mid-list, open the record (double-click the title).', dismissible: true }); } catch (_e) {} return; }
+      if (writes) { if (isLine) { this._invalidateLine(card.lineGuid); this._invalidateLinesForRecord(guid); } this._invalidateRec(guid); this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Saved ' + writes + ' change' + (writes > 1 ? 's' : '') + ' to the source record.', dismissible: true }); } catch (_e) {} }
+    };
+    ta.addEventListener('blur', commit);
+    ta.addEventListener('keydown', (ev) => {
+      ev.stopPropagation(); // the canvas host swallows keys otherwise
+      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { ta.remove(); } catch (_e) {} this._cardEdit = null; }
+      else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); }
+    });
+  }
   _drawLineCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
@@ -4731,7 +4786,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
