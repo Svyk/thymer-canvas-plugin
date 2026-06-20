@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.50.0';
+const PLEXUS_VERSION = '1.51.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3918,7 +3918,11 @@ class CanvasView {
   _reindexBackrefs() {
     const map = {}; // { targetGuid: { elId: {label, kind} } } — ALL refs to a target (multi-ref picker); dedup by elId
     const put = (guid, elId, label, kind) => { if (!guid || !elId) return; const m = (map[guid] = map[guid] || {}); if (!m[elId]) m[elId] = { label: label || 'ref', kind }; };
-    for (const el of (this.scene && this.scene.elements) || []) {
+    const els = (this.scene && this.scene.elements) || [];
+    // PASS 1: id→element + connector→label-text maps (one scan), for the connection-backref pass below.
+    const byId = new Map(), labelByConn = new Map();
+    for (const el of els) { if (!el || el.isDeleted) continue; byId.set(el.id, el); if (el.type === 'text' && el.midBinding && el.midBinding.arrowId) { const t = (el.text || '').trim(); if (t) labelByConn.set(el.midBinding.arrowId, t); } }
+    for (const el of els) {
       if (!el || el.isDeleted) continue;
       if (el.isRef) {
         if (el.refKind === 'line' && el.refLineGuid) put(el.refLineGuid, el.id, el.refAlias || el.refLabel, 'line');
@@ -3928,6 +3932,17 @@ class CanvasView {
         if (!r || r.t !== 'ref') continue;
         if (r.kind === 'line' && r.lineGuid) put(r.lineGuid, el.id, r.alias || r.label, 'line');
         else if (r.kind === 'record' && r.guid) put(r.guid, el.id, r.alias || r.label, 'record');
+      }
+      // CONNECTIONS (Phase 3): an arrow/line BOUND to a record/line card → a backref keyed by the transcluded record/line
+      // guid (label = the connector's midpoint label). Opening that record/line then shows the ↗ flag + flyback to the
+      // connection (via the existing _scanRefBadges/_openBackrefPicker/_flashAnchor). Both endpoints register (bidirectional).
+      if (el.type === 'arrow' || el.type === 'line') {
+        const lbl = labelByConn.get(el.id) || 'connection';
+        for (const b of [el.startBinding, el.endBinding]) {
+          if (!b || !b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
+          if (t.type === 'record' && t.recordGuid) put(t.recordGuid, el.id, lbl, 'record');
+          else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line');
+        }
       }
     }
     try { this.plugin._setDrawingBackrefs(this.recordGuid, map); } catch (_e) {}

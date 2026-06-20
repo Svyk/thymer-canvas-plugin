@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.51.0 — CONNECTION → BACKREF: a connection lights up the note side (Connections Phase 3) (2026-06-20)
+- A connection (arrow/line) bound to a record/line card now registers a back-reference, so the note/record gets the `↗`
+  flag + cinematic flyback — using the EXISTING machinery, NO new note-side code.
+- `_reindexBackrefs` (runs on every durable save, `:5106`) extended: PASS-1 builds an id→element + connector→label-text map
+  (one scan; the label = the connector's midpoint label, else "connection"); then for each arrow/line, BOTH endpoints that
+  bind a `record` card → backref keyed by `recordGuid` (kind 'record'), or a `linecard` → keyed by `lineGuid` (kind 'line'),
+  `el` = the connector id. The synced index (`_setDrawingBackrefs` → `_brefSyncFlush`) carries it cross-device; the note side
+  renders via `_scanRefBadges` (↗ on the record page / line), the multi-ref `_openBackrefPicker`, and `_navToCanvasAnchor`/
+  `_flashAnchor` flies back + flashes the connector. Bidirectional (both ends register) + multi-ref (many connections to one
+  target → the picker). node-tested (record/line keys, label, both ends, multi-ref, ignores unbound/deleted).
+- So: draw a connection to a card → open the record it transcludes → `↗` → click → fly back to the connection. (A connection
+  to a transcluded single-LINE card already targets that line.)
+- NEXT: Phase 4 — target a SPECIFIC body line WITHIN a record card + a REGION of an image (the blue flag), per Image #25.
+
 ## ✅ v1.50.0 — forgiving connection end-bind (snap to a nearby target) (2026-06-20)
 - User (Image #30): a connection's end floated ~40px below the card — it only bound when released EXACTLY on the target.
 - `_nearestBindable(wx, wy, radiusPx, excludeId)`: the CLOSEST connectable element whose bbox is within `radiusPx` (screen
