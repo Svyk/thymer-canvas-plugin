@@ -2,6 +2,12 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.23.0 — AI auto-cluster into named frames** (Tier 4). Embed each card/text **on-device** (`plugin._embed`, nothing
+  leaves the device), single-linkage cluster by cosine (`pxcClusterByThreshold`, union-find), then physically move each
+  cluster into a tidy **AI-named frame** (`_aiComplete` names, fallback "Cluster N"). Two degenerate guards (all-one-group,
+  all-singletons). Pure clustering + `pxcParseStringArray` (8/8 node asserts: transitive chains, null-vec singletons,
+  partition, fence/garbage parsing). Layout simulated zero-overlap; text keeps intrinsic size. Adversarial review = **CLEAN**.
+  Command on `ti-sparkles`.
 - **v1.22.0 — AI relation-suggest** (Tier 4). "AI suggest relations" → the model reads the board's record-card titles and
   proposes DIRECTED links; a **checkbox modal** (user-gated, nothing written without accept) writes accepted links as a
   real ref on the FROM record → TO (`ceEdgeSegments`, the CE-BRAIN ref-line → a Brain edge). The canvas as a graph-builder

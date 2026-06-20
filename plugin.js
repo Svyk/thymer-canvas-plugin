@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.22.0';
+const PLEXUS_VERSION = '1.23.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -683,6 +683,18 @@ function pxcParseLinkSuggestions(text) {
   const out = [];
   for (const s of arr) { if (!s || typeof s !== 'object') continue; const from = Number(s.from), to = Number(s.to); if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) continue; out.push({ from, to, reason: String(s.reason || '').slice(0, 120) }); }
   return out;
+}
+function pxcParseStringArray(text) { let arr = null; try { arr = JSON.parse(text); } catch (_e) { const m = String(text == null ? '' : text).match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } } return Array.isArray(arr) ? arr.map((x) => String(x == null ? '' : x)) : []; }
+// AI AUTO-CLUSTER: connected-components clustering — elements with cosine similarity > threshold join the same group
+// (single-linkage via union-find). Pure + node-tested; the on-device embedding lives in _aiAutoCluster.
+function pxcClusterByThreshold(vecs, threshold) {
+  const n = vecs.length, parent = []; for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const cos = (a, b) => { if (!a || !b) return 0; let s = 0; const L = Math.min(a.length, b.length); for (let i = 0; i < L; i++) s += a[i] * b[i]; return s; };
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (cos(vecs[i], vecs[j]) > threshold) parent[find(i)] = find(j);
+  const groups = new Map();
+  for (let i = 0; i < n; i++) { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
+  return Array.from(groups.values());
 }
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
@@ -3653,6 +3665,37 @@ class CanvasView {
     return edges.length;
   }
   _toggleGhosts() { if (this._ghostEdges && this._ghostEdges.length) { this._showGhosts = !this._showGhosts; this.dirty = true; } else this._computeSemantic(); }
+  // AI AUTO-CLUSTER: embed each card/text on-device (nothing leaves the device), single-linkage cluster by meaning, then
+  // physically move each cluster into a tidy AI-named frame. Turns a brain-dump into themed groups in one command.
+  async _aiAutoCluster() {
+    const els = this.scene.elements.filter((e) => !e.isDeleted && (e.type === 'text' || e.type === 'record' || e.type === 'board' || e.type === 'query'));
+    if (els.length < 3) { try { this.plugin.ui.addToaster({ title: 'Plexus: add 3+ cards / text elements first.', dismissible: true }); } catch (_e) {} return; }
+    try { this.plugin.ui.addToaster({ title: 'Plexus: embedding locally… (first run downloads a small model)', dismissible: true }); } catch (_e) {}
+    const texts = [], vecs = [];
+    for (const el of els) { const t = await this._semanticTextOf(el); texts.push(t || ''); let v = null; try { v = await this.plugin._embed(t || ''); } catch (_e) {} vecs.push(v); }
+    const clusters = pxcClusterByThreshold(vecs, 0.5);
+    if (clusters.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: content too similar to cluster (one group).', dismissible: true }); } catch (_e) {} return; }
+    if (clusters.every((cl) => cl.length === 1)) { try { this.plugin.ui.addToaster({ title: 'Plexus: no meaningful clusters — items too distinct (or embedding unavailable).', dismissible: true }); } catch (_e) {} return; }
+    let names = clusters.map((_, i) => 'Cluster ' + (i + 1));
+    try {
+      const SYS = 'Name each cluster of notes in 1–3 words. Input: a JSON array where each item is an array of note titles. Output ONLY a JSON array of short names, SAME length and order as the input.';
+      const txt = await this._aiComplete(SYS, JSON.stringify(clusters.map((c) => c.map((idx) => texts[idx]).filter(Boolean).slice(0, 8))));
+      if (txt) { const parsed = pxcParseStringArray(txt); if (parsed.length === clusters.length) names = parsed.map((n, i) => (n && n.trim()) || names[i]); }
+    } catch (_e) {}
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const CW = 200, CH = 110, GAP = 16, PAD = 18, HEAD = 26, RIGHT = c.x + 700;
+    let fx = this._snap(c.x - 460), fy = this._snap(c.y - 240), rowH = 0;
+    clusters.forEach((cl, ci) => {
+      const cols = Math.max(1, Math.ceil(Math.sqrt(cl.length))), rows = Math.ceil(cl.length / cols);
+      const fw = cols * (CW + GAP) + PAD * 2 - GAP, fh = rows * (CH + GAP) + PAD * 2 + HEAD - GAP;
+      if (fx + fw > RIGHT) { fx = this._snap(c.x - 460); fy = this._snap(fy + rowH + 40); rowH = 0; }
+      const frame = makeFrame(fx, fy, fw, fh); frame.name = names[ci]; this.scene.elements.unshift(frame);
+      cl.forEach((idx, k) => { const el = els[idx], col = k % cols, row = Math.floor(k / cols); el.x = this._snap(fx + PAD + col * (CW + GAP)); el.y = this._snap(fy + PAD + HEAD + row * (CH + GAP)); if (el.type !== 'text') { el.width = CW; el.height = CH; } });
+      fx = this._snap(fx + fw + 40); rowH = Math.max(rowH, fh);
+    });
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Auto-clustered ' + els.length + ' element(s) into ' + clusters.length + ' named group(s).', dismissible: true }); } catch (_e) {}
+  }
   _drawGhosts(ctx) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
     const z = this.camera.zoom; ctx.save(); ctx.strokeStyle = '#f59e0b'; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.4 / z; ctx.setLineDash([5 / z, 5 / z]);
@@ -4570,6 +4613,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI suggest relations (writes refs)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiRelationSuggest(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI auto-cluster into named frames', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAutoCluster(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
@@ -5388,6 +5432,19 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // AI AUTO-CLUSTER: connected-components clustering by cosine + string-array parsing.
+      clusterTest: () => {
+        // 4 vectors: 0&1 alike (pointing +x), 2&3 alike (pointing +y) → 2 clusters
+        const v = [[1, 0], [0.99, 0.14], [0, 1], [0.14, 0.99]];
+        const cl = pxcClusterByThreshold(v, 0.5);
+        cl.sort((a, b) => a[0] - b[0]);
+        const single = pxcClusterByThreshold([[1, 0], [0, 1], [-1, 0]], 0.5); // all dissimilar → 3 singletons
+        const names = pxcParseStringArray('```json\n["Health","Work","Ideas"]\n```');
+        return { groups: cl.length, ok:
+          cl.length === 2 && cl[0].length === 2 && cl[1].length === 2 && cl[0][0] === 0 && cl[0][1] === 1 && cl[1][0] === 2 &&
+          single.length === 3 && names.length === 3 && names[0] === 'Health' &&
+          pxcParseStringArray('garbage').length === 0 };
       },
       // AI RELATION-SUGGEST: tolerant suggestion parsing + HTML escaping.
       aiSuggestTest: () => {
