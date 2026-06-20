@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.37.0 — editable cards: SEE + EDIT the nested tree (indent in the card) (2026-06-19)
+User: "I should see the tree in the card I edit, and create indentation there." The card editor loaded only top-level
+lines, flat; now it loads the full nested subtree and supports re-nesting.
+- `pxcFlattenTreeLi(items,depth,out,cap)` (async DFS, keeps the line-item objects + blanks). `_editCardBody` loads the
+  subtree (cap 60), the textarea shows `'  '*depth + text` (nesting as indent), **Tab/Shift+Tab** re-indent the row.
+- Commit → `pxcWriteCardTree(rec, items, parsed, body, isLine)`: re-parent via SDK **`li.move(parent, after)`** (depth
+  changed), `setSegments` (text changed), `createLineItem` (appends) — keyed by a `lastAt[]` parent/after stack. SDK
+  `move()` preserves the line + its refs (no data loss).
+- Adversarial `code-reviewer` (data-safety, can't live-test — chrome MCP down): verified SAFE by construction (no
+  move-under-own-descendant cycle; subtree co-move handled). Fixed **HIGH-1** (a text edit on a no-title-ref/bold/date/
+  hashtag line would `setSegments`-flatten it → now rich lines are NEVER rewritten, edit them in the record), **HIGH-2**
+  (count-same reorder/swap guard — refuse, the positional map would re-parent the wrong line), **MED-1** (over-indent
+  clamps to prev+1, not root), **MED-2** (linecard append stays UNDER the main line). Safe gate still refuses delete/
+  reorder. node-tested: reconstruction (6) + rich-no-flatten + clamp + linecard-append.
+- NOTE: rendered-card indentation (v1.35) only shows for NESTED source content; a flat record shows none (correct).
+
 ## ✅ v1.36.0 — TEXT WRAP: drag a text box's width to wrap (2026-06-19)
 User (item 2): "I should have an option to wrap text." A text element now carries `el.wrapW` (serialized px). DRAG a text
 element's left/right resize handle → `_applyResize` sets `el.wrapW=max(24,nw)` + re-measures; text word-wraps to that

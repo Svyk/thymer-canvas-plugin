@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.36.0';
+const PLEXUS_VERSION = '1.37.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -910,6 +910,45 @@ async function pxcFlattenTree(items, depth, out, cap) {
     let ch = []; try { ch = (li.getChildren && await li.getChildren()) || []; } catch (_e) {}
     if (ch.length) await pxcFlattenTree(ch, txt ? depth + 1 : depth, out, cap);
   }
+}
+// EDIT-INDENT: flatten a subtree to [{li, depth}] KEEPING the line-item objects (and blank lines) so the card editor can
+// show + restructure the nesting. DFS, capped.
+async function pxcFlattenTreeLi(items, depth, out, cap) {
+  for (const li of (items || [])) {
+    if (out.length >= cap) return;
+    out.push({ li, depth });
+    let ch = []; try { ch = (li.getChildren && await li.getChildren()) || []; } catch (_e) {}
+    if (ch.length) await pxcFlattenTreeLi(ch, depth + 1, out, cap);
+  }
+}
+// EDIT-INDENT: reconstruct a card body's tree from edited rows. `items` = loaded [{li, depth}] (DFS order); `parsed` =
+// [{depth, text(trimmed)}] from the textarea; `body` = same rows with the leading indent stripped (intra-line spacing
+// kept). Existing lines re-parent via li.move() when their depth changed + setSegments when text changed; extra rows are
+// createLineItem'd. Keyed by a parent/after STACK (lastAt[d] = the last line placed at depth d). Caller refuses a count
+// DECREASE (deletion) + a prefix-reorder. `isLine` → row 0 is the linecard's main line: never moved (it's the anchor).
+async function pxcWriteCardTree(rec, items, parsed, body, isLine) {
+  const lastAt = []; let writes = 0, prevDepth = -1;
+  for (let i = 0; i < parsed.length; i++) {
+    let d = Math.min(parsed[i].depth, prevDepth + 1); if (d < 0) d = 0; // clamp over-indent to one deeper than the previous row (outline-editor behavior, never collapse to root unexpectedly)
+    if (isLine && i === 0) d = 0; // the linecard's main line is the depth-0 anchor
+    const text = parsed[i].text;
+    const moveParent = (d === 0) ? rec : (lastAt[d - 1] || rec);
+    const createParent = (d === 0) ? (isLine && items[0] ? items[0].li : null) : (lastAt[d - 1] || null); // linecard append: keep new top-level rows UNDER the main line (inside the card's subtree), not as record siblings
+    const after = lastAt[d] || null;
+    let li = null;
+    if (i < items.length) {
+      li = items[i].li;
+      if (!(isLine && i === 0) && d !== items[i].depth) { try { const m = await li.move(moveParent, after); if (m) { li = m; writes++; } } catch (_e) {} }
+      if (text !== (lineTextOf(items[i].li) || '')) {
+        const segs = (items[i].li && items[i].li.segments) || []; const rich = segs.some((s) => s && s.type && s.type !== 'text');
+        if (!rich) { try { if (await li.setSegments([{ type: 'text', text: body[i] }])) writes++; } catch (_e) {} } // DATA SAFETY: never flatten a line carrying a ref/datetime/hashtag/bold/etc. to plain text (a no-title ref reads as '' so it'd look "edited") — leave rich lines untouched; edit them in the record
+      }
+    } else if (text) {
+      try { li = await rec.createLineItem(createParent, after, 'ulist', [{ type: 'text', text: body[i] }], null); if (li) writes++; } catch (_e) {}
+    }
+    if (li) { lastAt[d] = li; lastAt.length = d + 1; prevDepth = d; }
+  }
+  return writes;
 }
 // IO-1: a native TASK node — backed by a REAL Thymer `task` line item (lineGuid on recordGuid). Its checkbox
 // toggles setTaskStatus, so the same task is live in the Task Board / Day View / @task search. A task dropped on
@@ -3419,17 +3458,18 @@ class CanvasView {
     let rec = null; try { rec = await getRecordPoll(this.plugin, guid); } catch (_e) {}
     if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: source record not found.', dismissible: true }); } catch (_e) {} return; }
     const isLine = card.type === 'linecard';
-    let items = [];
+    let items = []; // [{li, depth}] — the body subtree in DFS order (so the editor shows + restructures the nesting)
     try {
       const all = (await rec.getLineItems()) || [];
-      if (isLine && card.lineGuid) { const main = all.find((li) => li.guid === card.lineGuid); if (main) { items = [main]; try { const kids = (main.getChildren && await main.getChildren()) || []; items = items.concat(kids); } catch (_e) {} } }
-      else { items = all; }
+      let roots = all;
+      if (isLine && card.lineGuid) { const main = all.find((li) => li.guid === card.lineGuid); roots = main ? [main] : []; }
+      await pxcFlattenTreeLi(roots, 0, items, 60);
     } catch (_e) {}
-    const origTexts = items.map((li) => lineTextOf(li) || '');
     if (this.destroyed) return;
     const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);
     const titleH = isLine ? 4 : 26; // record card: skip the read-only title band; linecard: edit from the top
-    const ta = document.createElement('textarea'); ta.spellcheck = false; ta.value = origTexts.join('\n');
+    const ta = document.createElement('textarea'); ta.spellcheck = false;
+    ta.value = items.map((n) => '  '.repeat(n.depth) + (lineTextOf(n.li) || '')).join('\n'); // show the nesting as leading indentation (Tab / Shift+Tab to re-nest)
     ta.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:4px 6px;font-family:system-ui,sans-serif;line-height:1.33;resize:none;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28)';
     ta.style.left = (s.x + 8 * z) + 'px'; ta.style.top = (s.y + titleH * z) + 'px';
     ta.style.width = Math.max(80, (Math.abs(card.width) - 16) * z) + 'px';
@@ -3439,29 +3479,36 @@ class CanvasView {
     let done = false; this._cardEdit = { ta, card, abort: () => { done = true; } }; // abort lets destroy() cancel without writing
     const commit = async () => {
       if (done) return; done = true;
-      const newTexts = ta.value.split('\n'); try { ta.remove(); } catch (_e) {} this._cardEdit = null;
-      // SAFE write-back (data-loss guardrails): only two operations, both positionally unambiguous:
-      //  (a) line count UNCHANGED → rewrite the lines whose TRIMMED text changed (untouched lines keep their refs/format);
-      //  (b) count GREW and the existing prefix is unchanged → APPEND the extra rows as new line items.
-      // Anything else (delete, reorder, mid-list insert) can't be diffed by position without flattening rich segments or
-      // hard-deleting real task/child lines, so it's refused here — the user restructures by opening the record.
-      const prefixMatches = () => { const n = Math.min(items.length, newTexts.length); for (let i = 0; i < n; i++) if (newTexts[i].trim() !== origTexts[i]) return false; return true; };
-      let writes = 0, structural = false;
-      if (newTexts.length === items.length) {
-        for (let i = 0; i < items.length; i++) { if (newTexts[i].trim() !== origTexts[i]) { try { if (await items[i].setSegments([{ type: 'text', text: newTexts[i] }])) writes++; } catch (_e) {} } }
-      } else if (newTexts.length > items.length && prefixMatches()) {
-        const parentItem = isLine && items[0] ? items[0] : null; let after = items.length ? items[items.length - 1] : null;
-        for (let i = items.length; i < newTexts.length; i++) { if (!newTexts[i].trim()) continue; try { const li = await rec.createLineItem(parentItem, after, 'ulist', [{ type: 'text', text: newTexts[i] }], null); if (li) { after = li; writes++; } } catch (_e) {} }
-      } else { structural = true; }
+      const raw = ta.value.split('\n'); try { ta.remove(); } catch (_e) {} this._cardEdit = null;
+      // Parse leading indentation (2 spaces / level) → depth; `body` keeps each row's text minus its leading indent.
+      const parsed = raw.map((t) => { const sp = ((t.match(/^ */) || [''])[0]).length; return { depth: sp >> 1, text: t.trim() }; });
+      const body = raw.map((t) => t.replace(/^ +/, ''));
+      if (isLine && parsed.length) parsed[0].depth = 0; // the linecard's main line is the depth-0 anchor
+      // SAFE write-back: allow TEXT edits, RE-NESTING (Tab/Shift+Tab depth changes), and APPENDS — all keyed by the
+      // row→line positional map, which holds for those ops. Refuse a count DECREASE (deletion) or a prefix whose existing
+      // TEXT changed alongside a count grow (an ambiguous mid-insert/reorder) → open the record. No blind .delete().
+      const origTexts = items.map((n) => lineTextOf(n.li) || '');
+      const prefixTextMatches = () => { for (let i = 0; i < items.length; i++) if (parsed[i].text !== origTexts[i]) return false; return true; };
+      // count-same REORDER/SWAP guard: the row→line map is positional, so a changed row whose new text equals a DIFFERENT
+      // existing line's text is a move (not an edit) and would re-parent/rewrite the WRONG line. Refuse → open the record.
+      const isReorder = () => { if (parsed.length !== items.length) return false; const orig = Object.create(null); for (const t of origTexts) if (t) orig[t] = true; for (let i = 0; i < items.length; i++) { const t = parsed[i].text; if (t && t !== origTexts[i] && orig[t]) return true; } return false; };
+      if (parsed.length < items.length || (parsed.length > items.length && !prefixTextMatches()) || isReorder()) {
+        try { this.plugin.ui.addToaster({ title: 'To delete or reorder lines, open the record (double-click the title). Editing text, indenting (Tab), and adding lines work here.', dismissible: true }); } catch (_e) {} return;
+      }
+      let writes = 0; try { writes = await pxcWriteCardTree(rec, items, parsed, body, isLine); } catch (_e) {}
       if (this.destroyed) return;
-      if (structural) { try { this.plugin.ui.addToaster({ title: 'Inline edit changes existing lines + adds new ones at the end. To delete, reorder, or insert mid-list, open the record (double-click the title).', dismissible: true }); } catch (_e) {} return; }
       if (writes) { if (isLine) { this._invalidateLine(card.lineGuid); this._invalidateLinesForRecord(guid); } this._invalidateRec(guid); this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Saved ' + writes + ' change' + (writes > 1 ? 's' : '') + ' to the source record.', dismissible: true }); } catch (_e) {} }
     };
     ta.addEventListener('blur', commit);
     ta.addEventListener('keydown', (ev) => {
       ev.stopPropagation(); // the canvas host swallows keys otherwise
-      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { ta.remove(); } catch (_e) {} this._cardEdit = null; }
-      else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { ta.remove(); } catch (_e) {} this._cardEdit = null; return; }
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); return; }
+      if (ev.key === 'Tab') { // TEXT-INDENT: re-nest the current row by ±2 leading spaces (Tab in / Shift+Tab out)
+        ev.preventDefault(); const v = ta.value, ss = ta.selectionStart, ls = v.lastIndexOf('\n', ss - 1) + 1;
+        if (ev.shiftKey) { let rm = 0; while (rm < 2 && v[ls + rm] === ' ') rm++; if (rm) { ta.value = v.slice(0, ls) + v.slice(ls + rm); const c = Math.max(ls, ss - rm); ta.selectionStart = ta.selectionEnd = c; } }
+        else { ta.value = v.slice(0, ls) + '  ' + v.slice(ls); ta.selectionStart = ta.selectionEnd = ss + 2; }
+      }
     });
   }
   _drawLineCard(ctx, el) {
