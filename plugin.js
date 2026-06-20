@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.23.0';
+const PLEXUS_VERSION = '1.24.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -846,6 +846,8 @@ function makeRecordCard(x, y, w, h, recordGuid) {
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+// SUBGRAPH→CANVAS: Brain role → card/arrow colour (matches the Brain's relColor families).
+const ROLE_HEX = { focus: '#7c5cff', parent: '#f59e0b', child: '#0ea5e9', sibling: '#14b8a6', leftFriend: '#a855f7', rightFriend: '#ec4899', friend: '#a855f7' };
 function lineTextOf(li) {
   try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
 }
@@ -2754,6 +2756,29 @@ class CanvasView {
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
+  // SUBGRAPH→CANVAS: drop a Brain focus + neighbourhood (graph-space coords, focus at 0,0) as live bound record cards +
+  // role-coloured arrows, centred on the viewport. Completes the Canvas↔Brain round-trip. Returns true on success.
+  _dropSubgraph(payload) {
+    if (!payload || !Array.isArray(payload.nodes) || !payload.nodes.length) return false;
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2), CW = 180, CH = 84, byGuid = new Map();
+    this.selected.clear();
+    for (const n of payload.nodes) {
+      if (!n.guid || byGuid.has(n.guid)) continue;
+      const card = makeRecordCard(this._snap(c.x + (n.x || 0) - CW / 2), this._snap(c.y + (n.y || 0) - CH / 2), CW, CH, n.guid);
+      if (n.role && ROLE_HEX[n.role]) card.strokeColor = ROLE_HEX[n.role];
+      this.scene.elements.push(card); byGuid.set(n.guid, card); this.selected.add(card.id); this._invalidateRec(n.guid);
+    }
+    for (const e of (payload.edges || [])) {
+      const a = byGuid.get(e.from), b = byGuid.get(e.to); if (!a || !b || a === b) continue;
+      const ar = makeLinear(0, 0, 'arrow', { stroke: ROLE_HEX[e.role] || '#94a3b8', strokeWidth: 2 });
+      ar.points = [[a.x + a.width / 2, a.y + a.height / 2], [b.x + b.width / 2, b.y + b.height / 2]]; ar.endArrowhead = 'arrow';
+      ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; linearBBox(ar); this.scene.elements.push(ar);
+    }
+    try { this._updateBindings(); } catch (_e) {}
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Dropped ' + byGuid.size + ' live card(s) from Plexus Brain.', dismissible: true }); } catch (_e) {}
+    return true;
+  }
   async _openRecord(guid) {
     const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
     let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
@@ -4551,7 +4576,7 @@ class Plugin extends AppPlugin {
     try { window.addEventListener('pagehide', this._onPageHide); } catch (_e) {}
     // IO-5/TS-1: cross-plugin seam — Templater (or any plugin) calls window.__plexusCanvas.attachScene(guid)
     // to flip a freshly-created record into a drawing ("every note born hybrid"). Returns the panel promise.
-    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown(), attachScene: (guid, blank) => this._openPanelFor(guid, { blank: blank !== false }), mindMapFromNote: (guid) => this._mindMapFromNoteSeam(guid) }; // TS-8: Templater can emit a mind-map drawing
+    window.__plexusCanvas = { version: PLEXUS_VERSION, dispose: () => this._teardown(), attachScene: (guid, blank) => this._openPanelFor(guid, { blank: blank !== false }), mindMapFromNote: (guid) => this._mindMapFromNoteSeam(guid), dropSubgraph: (payload) => { const v = this._activeView() || [...(this._views || [])].find((x) => !x.destroyed); return v ? v._dropSubgraph(payload) : false; } }; // TS-8 Templater mind-map · Subgraph→Canvas drop seam
     console.log('%c[Plexus Canvas] v' + PLEXUS_VERSION + ' loaded', 'color:#7c5cff;font-weight:bold');
     this.ui.injectCSS(BASE_CSS);
     this.ui.registerCustomPanelType(PANEL_ID, (panel) => this._mountPanel(panel));
