@@ -2,6 +2,13 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.20.0 — Roll-Up / aggregation (KPI) cards** (Tier 2). New `rollup` element: a query bound to a live aggregate —
+  `count` | `%done` | `sum:Prop` | `avg:Prop` | `min/max:Prop` — rendered as a big-number KPI tile, recomputed on
+  `record.updated`. Pure `pxcParseAgg`/`pxcComputeAgg` (12/12 node asserts). `_rollupFor` cache (keyed query+agg, one-shot
+  async, `%done` walks task line-items bounded by the 200-record search cap); `_invalidateRollups` wired next to
+  `_invalidateQueries`. Full new-element-type wiring (both render sites, hitElement, resize hit-test AND handle-draw,
+  dblclick-edit) — review audited the COMPLETE per-type checklist incl. export/clone/minimap graceful-degradation.
+  Command on `ti-chart-bar`. Adversarial review = **CLEAN**.
 - **v1.19.0 — Quick-capture command bar** (Tier 3). "Plexus: Quick-capture" → type a title → creates a typed record in
   the remembered last-used collection (else the picker) → drops a live record card at the viewport centre. Pure reuse of
   reviewed paths (`_promptText`/`_pickCollection`/`createRecord`/`getRecordPoll`/`_insertRecordCard`); structured-from-birth

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.19.0';
+const PLEXUS_VERSION = '1.20.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -652,6 +652,23 @@ function pxcClassifyValue(v) {
   if (/^-?\d+(\.\d+)?$/.test(s)) return { kind: 'number', num: Number(s) };
   return { kind: 'text', text: s };
 }
+// ROLL-UP CARDS: parse an aggregation spec ("count" | "%done" | "sum:Prop" | "avg:Prop" | "min/max:Prop") + compute it
+// over a list of numbers (or a match count). Pure + node-tested; the SDK fetch/sum lives in _rollupFor.
+function pxcParseAgg(agg) {
+  const raw = String(agg == null ? 'count' : agg).trim(), s = raw.toLowerCase();
+  if (!s || s === 'count') return { fn: 'count' };
+  if (s === '%done' || s === 'pctdone' || s === '%') return { fn: 'pctdone' };
+  const m = /^(sum|avg|mean|average|min|max)\s*[:=]\s*(.+)$/i.exec(raw);
+  if (m) { let fn = m[1].toLowerCase(); if (fn === 'mean' || fn === 'average') fn = 'avg'; return { fn, prop: m[2].trim() }; }
+  return { fn: 'count' };
+}
+function pxcComputeAgg(fn, nums, count) {
+  if (fn === 'sum') return nums.reduce((a, b) => a + b, 0);
+  if (fn === 'avg') return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length * 100) / 100 : 0;
+  if (fn === 'min') return nums.length ? Math.min.apply(null, nums) : 0;
+  if (fn === 'max') return nums.length ? Math.max.apply(null, nums) : 0;
+  return count; // 'count' (and any unknown fn)
+}
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -832,6 +849,14 @@ function makeQueryNode(x, y, w, h, query) {
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
+// ROLL-UP CARDS: a query bound to a live AGGREGATE (count / %done / sum|avg|min|max of a typed property) — a KPI tile.
+function makeRollup(x, y, w, h, query, agg) {
+  return {
+    id: newId(), type: 'rollup', x, y, width: w, height: h, angle: 0, query: query || '', agg: agg || 'count',
+    strokeColor: '#16a34a', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
+    roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
 // Phase 9 E10: a board card — embeds ANOTHER drawing's live preview (its scene banner PNG).
 function makeBoardCard(x, y, w, h, recordGuid) {
   return {
@@ -890,7 +915,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'rollup' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -1211,6 +1236,7 @@ class Canvas2DRenderer {
     else if (t === 'record') v._drawRecordCard(ctx, el);
     else if (t === 'linecard') v._drawLineCard(ctx, el);
     else if (t === 'query') v._drawQueryNode(ctx, el);
+    else if (t === 'rollup') v._drawRollupNode(ctx, el);
     else if (t === 'board') v._drawBoardCard(ctx, el);
     else if (t === 'task') v._drawTaskNode(ctx, el);
     else drawElement(ctx, el);
@@ -1273,7 +1299,7 @@ class WebGLRenderer {
   element(el) {
     const v = this.view, ctx = this.ctx, t = el.type;
     if (this.gl && t === 'image' && !el.angle && !el.isDeleted) { const img = v._imgFor && v._imgFor(el.fileId); if (img && img.complete && img.naturalWidth) { this._images.push({ el, img }); return; } }
-    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
+    if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
   end() {
@@ -2010,7 +2036,7 @@ class CanvasView {
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
         const sel = this._singleSel();
-        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'board' || sel.type === 'frame')) {
+        if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'board' || sel.type === 'frame')) {
           const H = this._handles(sel);
           const near = (k) => { const s2 = this.camera.worldToScreen(H[k].x, H[k].y); return Math.hypot(s2.x - sp.x, s2.y - sp.y) < 10; };
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
@@ -2185,6 +2211,7 @@ class CanvasView {
       else if (hit && hit.type === 'record') { this._openCard(hit); }
       else if (hit && hit.type === 'linecard') { this._openCard({ refKind: 'line', refLineGuid: hit.lineGuid, refGuid: hit.recordGuid }); } // TRANSCLUDE: dblclick jumps to the source line
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
+      else if (hit && hit.type === 'rollup') { this._promptText('Roll-up query:', hit.query).then((q) => { if (q == null) return; this._promptText('Aggregation (count | %done | sum:Prop | avg:Prop):', hit.agg || 'count').then((a) => { if (a == null) return; hit.query = q; hit.agg = a; this._invalidateRollups(); this.dirty = true; this.scheduleSave(); }); }); } // ROLL-UP: dblclick edits query + agg
       else if (hit && hit.type === 'board') { this._openCard(hit); }
       else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
@@ -2760,6 +2787,56 @@ class CanvasView {
   _insertQueryNode(query, wx, wy) {
     if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
     const el = makeQueryNode(this._snap(wx - 140), this._snap(wy - 100), 280, 200, query);
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
+    this.dirty = true; this.scheduleSave(); return el;
+  }
+  // ROLL-UP CARDS: live aggregate over a search. Caches by query+agg; the plugin clears the cache on record.updated.
+  _rollupFor(el) {
+    if (!this._rollupCache) this._rollupCache = new Map();
+    const key = (el.query || '') + '\x1f' + (el.agg || 'count');
+    const c = this._rollupCache.get(key); if (c) return c.ready ? c : null;
+    const entry = { ready: false, value: null, n: 0, suffix: '' }; this._rollupCache.set(key, entry);
+    (async () => {
+      try {
+        const spec = pxcParseAgg(el.agg);
+        const res = await this.plugin.data.searchByQuery(el.query || '', 200);
+        const recs = (res && res.records) || [];
+        if (spec.fn === 'pctdone') {
+          let done = 0, tot = 0;
+          for (const r of recs) { try { const items = await r.getLineItems(); for (const li of (items || [])) { if (li && li.type === 'task') { tot++; let d = false; try { d = (li.isTaskCompleted && li.isTaskCompleted() === true) || (li.getTaskStatus && li.getTaskStatus() === 'done'); } catch (_e) {} if (d) done++; } } } catch (_e) {} }
+          entry.value = tot ? Math.round(done / tot * 100) : 0; entry.suffix = '%'; entry.n = tot;
+        } else if (spec.fn === 'count') { entry.value = recs.length; entry.n = recs.length; }
+        else {
+          const nums = []; for (const r of recs) { try { const p = r.prop && r.prop(spec.prop); const num = p && p.number ? p.number() : null; if (num != null && isFinite(num)) nums.push(num); } catch (_e) {} }
+          entry.value = pxcComputeAgg(spec.fn, nums, recs.length); entry.n = nums.length;
+        }
+        entry.ready = true; this.dirty = true;
+      } catch (_e) { entry.value = '(err)'; entry.ready = true; this.dirty = true; }
+    })();
+    return null;
+  }
+  _invalidateRollups() { if (this._rollupCache && this._rollupCache.size) { this._rollupCache.clear(); this.dirty = true; } }
+  _drawRollupNode(ctx, el) {
+    ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = el.backgroundColor || '#ffffff'; ctx.fill(); ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = el.strokeColor || '#16a34a'; ctx.stroke();
+    ctx.save(); ctx.clip();
+    const data = this._rollupFor(el), pad = 10, spec = pxcParseAgg(el.agg);
+    const lbl = (spec.fn === 'count' ? 'count' : spec.fn === 'pctdone' ? '% done' : (spec.fn + ' ' + (spec.prop || ''))) + ' · ' + (el.query || '');
+    ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.font = '600 11px system-ui, sans-serif'; ctx.fillStyle = el.strokeColor || '#16a34a';
+    ctx.fillText(this._clipText(ctx, '∑ ' + lbl, w - pad * 2), x + pad, y + pad);
+    const txt = !data ? '…' : ((data.value == null ? '–' : String(data.value)) + (data.suffix || ''));
+    const fs = Math.max(18, Math.min(Math.abs(h) * 0.4, 60));
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '700 ' + fs + 'px system-ui, sans-serif'; ctx.fillStyle = PXC_DARK ? '#e6e8ee' : '#1e1e1e';
+    ctx.fillText(this._clipText(ctx, txt, w - pad * 2), x + w / 2, y + h / 2 + 6);
+    if (data) { ctx.textBaseline = 'bottom'; ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('n=' + data.n, x + w / 2, y + h - pad); }
+    ctx.textAlign = 'left'; ctx.restore(); ctx.restore();
+  }
+  _insertRollup(query, agg, wx, wy) {
+    if (wx == null) { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); wx = c.x; wy = c.y; }
+    const el = makeRollup(this._snap(wx - 90), this._snap(wy - 60), 180, 120, query, agg);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
   }
@@ -4204,7 +4281,7 @@ class CanvasView {
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
-    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'board')) {
+    if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'rollup' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
       ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
@@ -4329,6 +4406,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Search in drawing', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._openSearch(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert record card', icon: 'ti-id', onSelected: () => this._cmdInsertCard() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert query node', icon: 'ti-search', onSelected: () => { const v = this._activeView(); if (v) v._promptText('Query (Thymer search syntax, e.g. @task):', '@task').then((q) => { if (q != null) v._insertQueryNode(q); }); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert roll-up (KPI) card', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (!v) return; v._promptText('Roll-up query (Thymer search, e.g. @task @overdue):', '@task').then((q) => { if (q == null) return; v._promptText('Aggregation — count | %done | sum:Prop | avg:Prop | min:Prop | max:Prop:', 'count').then((a) => { if (a != null) v._insertRollup(q, a); }); }); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert board card (embed a drawing)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v && this._lastRecordGuid) v._insertBoardCard(this._lastRecordGuid); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a drawing/note first, then embed it as a board card.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract selection to a new drawing (Pizza Slicer)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._deconstructSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Capture note (drop a linked card)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._captureNote(); } });
@@ -4396,7 +4474,7 @@ class Plugin extends AppPlugin {
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
     try { this.events.on('panel.focused', trackFocus); this.events.on('panel.navigated', trackFocus); } catch (_e) {}
-    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC: refresh nodes + GC a trashed drawing's backref sub-map
+    const onRecChange = (e) => { const g = e && e.recordGuid; const lg = e && e.lineItemGuid; if (g && e && e.trashed) this._brefPruneDrawing(g); for (const v of this._views) { if (g) { v._invalidateRec(g); v._invalidateBoard(g); v._invalidateLinesForRecord(g); } if (lg) v._invalidateTask(lg); v._invalidateQueries(); v._invalidateRollups(); } }; // IO-1 + TRANSCLUDE + BACKREF-SYNC + ROLL-UP: refresh nodes + GC a trashed drawing's backref sub-map
     try { for (const ev of ['record.updated', 'lineitem.updated', 'lineitem.created', 'lineitem.deleted', 'lineitem.moved']) this.events.on(ev, onRecChange); } catch (_e) {}
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
@@ -5186,6 +5264,18 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // ROLL-UP CARDS: agg-spec parsing + numeric aggregation.
+      rollupTest: () => {
+        const P = pxcParseAgg, C = pxcComputeAgg;
+        const nums = [2, 4, 6];
+        return { ok:
+          P('count').fn === 'count' && P('').fn === 'count' && P('%done').fn === 'pctdone' && P('%').fn === 'pctdone' &&
+          P('sum:Hours').fn === 'sum' && P('sum:Hours').prop === 'Hours' &&
+          P('avg:Recovery').fn === 'avg' && P('mean=Score').fn === 'avg' && P('Average: X').fn === 'avg' &&
+          P('min:A').fn === 'min' && P('max:B').fn === 'max' && P('garbage').fn === 'count' &&
+          C('sum', nums, 99) === 12 && C('avg', nums, 99) === 4 && C('min', nums, 99) === 2 && C('max', nums, 99) === 6 &&
+          C('count', nums, 7) === 7 && C('avg', [], 0) === 0 && C('avg', [1, 2], 9) === 1.5 };
       },
       // BULK PROPERTY BRUSH: value classification routes the right setter for non-choice props.
       bulkBrushTest: () => {
