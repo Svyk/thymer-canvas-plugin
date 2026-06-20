@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.30.0 — record page: "Canvas References" SECTION instead of the inline ↗ chip (2026-06-19)
+User (request 3): "for the record view, instead of the chip, put it in the back ref section." Thymer's record page has a
+native **Backreferences** footer (`.tlr-body` inside the panel's `.tlr-footer`, holding `.tlr-section-slot-*` slots:
+Property/Linked/Unlinked References). New `_injectCanvasRefSection(root, entries)` injects a **"Canvas References"** slot
+there (mirrors the native `.tlr-section-title` look), one clickable row per canvas ref (kind-colored ↗ → `_navToCanvasAnchor`).
+- Scoped to THIS record's `.editor-panel` (`root.closest('.editor-panel') → .tlr-body`); idempotent via a content
+  signature (`count:el|label,…`) on `data-pxc-sig` so the 1.5s scan rebuilds only when refs change.
+- `_scanRefBadges` record loop now calls the section injector first; the inline ↗ badge is a FALLBACK only when the
+  Backreferences footer isn't rendered (collapsed/absent). A stale inline `.plexus-backref-rec` badge is removed once the
+  section is in place.
+- **Live-validated** on svyat.thymer.com (Jimmy's Appointment record): the section rendered inside Backreferences, above
+  Property/Linked References, with the two refs as rows (screenshot-confirmed) before baking the exact DOM into the plugin.
+- Line refs keep their inline ↗ on the cited note line (unchanged — the user only moved the record-page chip).
+
 ## ✅ v1.29.0 — multi-ref flyback picker: same line/record referenced >once → choose which (2026-06-19)
 User: "if I ref the same line in a canvas more than once, need an option to pick which one — kinda like thymer remark."
 The backref store went from one-entry-per-target to an **element-map** per target.

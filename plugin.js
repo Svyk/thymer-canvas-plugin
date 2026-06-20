@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.29.0';
+const PLEXUS_VERSION = '1.30.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -5113,7 +5113,7 @@ class Plugin extends AppPlugin {
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-imgref-css';
-    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-canvas-refs{margin:2px 0 6px}.plexus-cref-list{display:flex;flex-direction:column;gap:1px;margin-top:3px}.plexus-cref-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--color-text-400,#444)}.plexus-cref-row:hover{background:var(--sidebar-bg-hover,rgba(124,92,255,.12))}.plexus-cref-ic{flex:0 0 auto;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;color:#fff;font:600 10px/1 system-ui,sans-serif}.plexus-cref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px/1.3 system-ui,sans-serif}';
     document.head.appendChild(s);
   }
   // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
@@ -5177,15 +5177,46 @@ class Plugin extends AppPlugin {
       const host = li.querySelector('.lineitem-text') || li.querySelector('.line-div') || li;
       host.appendChild(this._mkBackrefBadge(entries));
     }
-    // RECORD targets → ↗ on the OPEN record page (`.listview-items[data-guid]` = org-remark-verified record root).
+    // RECORD targets → a "Canvas References" SECTION in the native Backreferences footer (request 3); inline ↗ badge only
+    // as a fallback when that footer isn't rendered.
     for (const root of document.querySelectorAll('.listview-items[data-guid]')) {
       const g = root.getAttribute('data-guid'); const all = idx[g]; if (!all || !all.length) continue;
       const entries = all.filter((e) => e.kind === 'record'); if (!entries.length) continue;
+      let sectioned = false; try { sectioned = this._injectCanvasRefSection(root, entries); } catch (_e) {}
+      if (sectioned) { try { const stale = root.querySelector(':scope > .plexus-backref-rec'); if (stale) stale.remove(); } catch (_e) {} continue; }
+      // FALLBACK: no Backreferences footer (collapsed/absent) → inline ↗ badge on the record root.
       if (root.querySelector('.plexus-backref-rec')) continue;
       const host = root.querySelector('.page-props-editor') || root.querySelector('.page-title') || root.querySelector('.record-title') || root;
       const badge = this._mkBackrefBadge(entries); badge.classList.add('plexus-backref-rec');
       if (host === root) root.insertBefore(badge, root.firstChild); else host.appendChild(badge);
     }
+  }
+  // RECORD-PAGE "Canvas References" SECTION (request 3): instead of an inline ↗ chip on the record body, render a slot
+  // inside Thymer's native Backreferences footer (`.tlr-body`, scoped to THIS record's `.editor-panel`) listing every
+  // canvas ref to this record → click a row to fly to it. Returns true when injected. Idempotent via a content signature.
+  _injectCanvasRefSection(root, entries) {
+    let panel = (root.closest && root.closest('.editor-panel')) || null;
+    if (!panel) { let n = root; for (let i = 0; i < 8 && n; i++) { if (/editor-panel/.test(n.className || '')) { panel = n; break; } n = n.parentElement; } }
+    const body = panel ? panel.querySelector('.tlr-body') : null;
+    if (!body) return false; // backreferences footer not rendered → caller falls back to the inline badge
+    const sig = entries.length + ':' + entries.map((e) => e.el + '|' + (e.label || '')).join(',');
+    const existing = body.querySelector(':scope > .plexus-canvas-refs');
+    if (existing) { if (existing.getAttribute('data-pxc-sig') === sig) return true; existing.remove(); }
+    const slot = document.createElement('div'); slot.className = 'tlr-section-slot plexus-canvas-refs'; slot.setAttribute('data-pxc-sig', sig);
+    const title = document.createElement('div'); title.className = 'tlr-title tlr-section-title text-details'; title.textContent = 'Canvas References'; slot.appendChild(title);
+    const list = document.createElement('div'); list.className = 'plexus-cref-list';
+    for (const en of entries) {
+      const row = document.createElement('div'); row.className = 'plexus-cref-row';
+      const ic = document.createElement('span'); ic.className = 'plexus-cref-ic'; ic.textContent = '↗'; ic.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(ic);
+      const lbl = document.createElement('span'); lbl.className = 'plexus-cref-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
+      row.title = 'Fly to this reference on the canvas';
+      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(en); });
+      list.appendChild(row);
+    }
+    slot.appendChild(list);
+    const status = body.querySelector(':scope > .tlr-status-slot');
+    if (status && status.nextSibling) body.insertBefore(slot, status.nextSibling); else body.insertBefore(slot, body.firstChild);
+    return true;
   }
   // Cross-ref encoded in the image blob filename (synced metadata → works on web AND desktop, not just the
   // client where it was made). Shape: plexusref~<drawing>~<el>~<x_y_w_h>~<labelURI>.png
