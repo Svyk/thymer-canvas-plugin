@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.25.0';
+const PLEXUS_VERSION = '1.26.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -626,11 +626,11 @@ const BREF_FILE = 'plexus-backref-index.json';
 function pxcBrefMigrate(raw) { // accepts the OLD flat {lineGuid:{drawing,…}} OR the new nested shape → returns nested
   const nested = {}; if (!raw || typeof raw !== 'object') return nested;
   let flat = false; for (const k in raw) { const v = raw[k]; flat = !!(v && typeof v === 'object' && typeof v.drawing === 'string'); break; }
-  if (flat) { for (const lg in raw) { const e = raw[lg]; if (!e || !e.drawing) continue; (nested[e.drawing] = nested[e.drawing] || {})[lg] = { el: e.el, label: e.label, t: e.t || 0 }; } return nested; }
-  for (const d in raw) { const sub = raw[d]; if (sub && typeof sub === 'object') { nested[d] = {}; for (const lg in sub) { const e = sub[lg]; if (e) nested[d][lg] = { el: e.el, label: e.label, t: e.t || 0 }; } } }
+  if (flat) { for (const lg in raw) { const e = raw[lg]; if (!e || !e.drawing) continue; (nested[e.drawing] = nested[e.drawing] || {})[lg] = { el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } return nested; }
+  for (const d in raw) { const sub = raw[d]; if (sub && typeof sub === 'object') { nested[d] = {}; for (const lg in sub) { const e = sub[lg]; if (e) nested[d][lg] = { el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } } }
   return nested;
 }
-function pxcBrefFlatten(nested) { const flat = {}; for (const d in nested) { const sub = nested[d]; for (const lg in sub) { const e = sub[lg]; const cur = flat[lg]; if (!cur || (e.t || 0) >= (cur.t || 0)) flat[lg] = { drawing: d, el: e.el, label: e.label, t: e.t || 0 }; } } return flat; } // newest wins if a line is referenced by 2 drawings
+function pxcBrefFlatten(nested) { const flat = {}; for (const d in nested) { const sub = nested[d]; for (const lg in sub) { const e = sub[lg]; const cur = flat[lg]; if (!cur || (e.t || 0) >= (cur.t || 0)) flat[lg] = { drawing: d, el: e.el, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; } } return flat; } // newest wins if a line is referenced by 2 drawings
 function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const lg in b[d]) { const eb = b[d][lg], ea = a[d][lg]; if (!ea || (eb.t || 0) >= (ea.t || 0)) a[d][lg] = eb; } } return a; }
 // MINIMAP: fit scene-bounds into a w×h panel with padding → {scale, ox, oy}; world (wx,wy) → mini-local (ox+wx*scale,
 // oy+wy*scale). Inverse: world = (miniLocal - o)/scale. Pure + node-tested.
@@ -3518,13 +3518,35 @@ class CanvasView {
     return el;
   }
   _makeRefElement(opts, x, y) { const el = makeText(this._snap(x), this._snap(y), { fontSize: 16, stroke: '#7c5cff' }); return this._configureRef(el, opts); }
-  // CANVAS-BACK-1: index this chip under the guid it POINTS AT, so the note side can fly back to it (cinematic).
+  // FLYBACK: index a whole-element ref chip under the guid it POINTS AT for an IMMEDIATE note-side ↗ badge — LINE
+  // refs key by refLineGuid (badged on `.listitem`), RECORD refs key by refGuid (badged on the `.listview-items`
+  // record page). Inline-run refs + deletions are reconciled by the authoritative rebuild-on-save pass below.
   _indexBackref(el) {
-    // Only LINE refs surface a note-side ↗ badge — `_scanRefBadges` matches `.listitem[data-guid]` (line guids);
-    // a record guid never matches a listitem, so indexing record refs would be dead storage. Record→canvas flyback
-    // (record-page header badge) is deferred to EAPI-3 along with cross-device sync.
-    if (!el || !el.isRef || el.refKind !== 'line' || !el.refLineGuid) return;
-    try { this.plugin._registerBackref(el.refLineGuid, { drawing: this.recordGuid, el: el.id, label: el.refAlias || el.refLabel || 'ref' }); } catch (_e) {}
+    if (!el || !el.isRef) return;
+    try {
+      if (el.refKind === 'line' && el.refLineGuid) this.plugin._registerBackref(el.refLineGuid, { drawing: this.recordGuid, el: el.id, label: el.refAlias || el.refLabel || 'ref', kind: 'line' });
+      else if (el.refKind === 'record' && el.refGuid) this.plugin._registerBackref(el.refGuid, { drawing: this.recordGuid, el: el.id, label: el.refAlias || el.refLabel || 'ref', kind: 'record' });
+    } catch (_e) {}
+  }
+  // FLYBACK: rebuild THIS drawing's backref sub-map from the scene's CURRENT refs — whole-element chips AND inline
+  // `@@`/`@` runs; line targets keyed by lineGuid, record targets keyed by record guid. Self-healing: edited-away or
+  // deleted refs vanish on the next save. Image refs are skipped (the xref / `_scanImageBadges` path owns those).
+  _reindexBackrefs() {
+    const map = {}; // { targetGuid: {el, label, kind} } — first ref to a target wins (one ↗ per note line/record)
+    const put = (guid, elId, label, kind) => { if (guid && elId && !map[guid]) map[guid] = { el: elId, label: label || 'ref', kind }; };
+    for (const el of (this.scene && this.scene.elements) || []) {
+      if (!el || el.isDeleted) continue;
+      if (el.isRef) {
+        if (el.refKind === 'line' && el.refLineGuid) put(el.refLineGuid, el.id, el.refAlias || el.refLabel, 'line');
+        else if (el.refKind === 'record' && el.refGuid) put(el.refGuid, el.id, el.refAlias || el.refLabel, 'record');
+      }
+      if (el.runs && el.runs.length) for (const r of el.runs) {
+        if (!r || r.t !== 'ref') continue;
+        if (r.kind === 'line' && r.lineGuid) put(r.lineGuid, el.id, r.alias || r.label, 'line');
+        else if (r.kind === 'record' && r.guid) put(r.guid, el.id, r.alias || r.label, 'record');
+      }
+    }
+    try { this.plugin._setDrawingBackrefs(this.recordGuid, map); } catch (_e) {}
   }
   // A4: open a line ref → jump to the exact LINE (Nav-plugin pulse); fall back to a fresh panel, then the parent record.
   async _openRefLine(el) {
@@ -4667,7 +4689,9 @@ class CanvasView {
     // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
     // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
     try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
-    const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res; return res;
+    const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res;
+    try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
+    return res;
   }
   destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
@@ -5003,8 +5027,16 @@ class Plugin extends AppPlugin {
   _lookupBackref(guid) { return this._loadBackref()[guid] || null; }
   _registerBackref(guid, data) {
     if (!guid || !data || !data.drawing) return;
-    const s = this._brefStore(); (s[data.drawing] = s[data.drawing] || {})[guid] = { el: data.el, label: data.label, t: Date.now() };
+    const s = this._brefStore(); (s[data.drawing] = s[data.drawing] || {})[guid] = { el: data.el, label: data.label, kind: data.kind || 'line', t: Date.now() };
     this._brefSaveLocal(); this._brefSyncSchedule();
+  }
+  // FLYBACK: replace ONE drawing's backref sub-map wholesale (rebuild-on-save). Self-heals deleted/edited-away refs;
+  // never touches other drawings' sub-maps (concurrency-safe — the nested store merges per-drawing). Empty → drop it.
+  _setDrawingBackrefs(drawing, map) {
+    if (!drawing) return; const s = this._brefStore(); const keys = map ? Object.keys(map) : [];
+    if (!keys.length) { if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } return; }
+    const sub = {}; const t = Date.now(); for (const g of keys) { const e = map[g]; sub[g] = { el: e.el, label: e.label || 'ref', kind: e.kind || 'line', t }; }
+    s[drawing] = sub; this._brefSaveLocal(); this._brefSyncSchedule();
   }
   _brefPruneDrawing(drawing) { const s = this._brefStore(); if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } } // GC: drawing trashed → drop its sub-map (no ghost ↗)
   _brefSyncSchedule() { if (this._brefSyncT) clearTimeout(this._brefSyncT); this._brefSyncT = setTimeout(() => { this._brefSyncT = null; this._brefSyncFlush(); }, 800); } // debounced + coalesced
@@ -5063,17 +5095,32 @@ class Plugin extends AppPlugin {
   }
   // CANVAS-BACK-1: pin a ↗ on each note line/record that a canvas @@/@ chip points at → click flies to the canvas
   // chip (cinematic, via _navToCanvasAnchor). Inline badge (plain text lines have no image to attach to).
+  _mkBackrefBadge(entry) {
+    const badge = document.createElement('span'); badge.className = 'plexus-backref-badge'; badge.textContent = '↗';
+    badge.title = 'Zoom to “' + (entry.label || 'this') + '” on the canvas';
+    badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
+    return badge;
+  }
   _scanRefBadges() {
     let idx; try { idx = this._loadBackref(); } catch (_e) { return; }
     let any = false; for (const k in idx) { any = true; break; } if (!any) return;
+    // LINE targets → ↗ on the cited note line (`.listitem[data-guid]`). Skip record-kind entries (they badge the page).
     for (const li of document.querySelectorAll('.listitem[data-guid]')) {
-      const g = li.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing) continue;
-      if (li.querySelector(':scope .plexus-backref-badge')) continue;
+      const g = li.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing || entry.kind === 'record') continue;
+      if (li.querySelector(':scope .plexus-backref-badge:not(.plexus-backref-rec)')) continue; // ignore a record-page badge that may sit inside a title listitem, so a legit line badge is never shadowed
       const host = li.querySelector('.lineitem-text') || li.querySelector('.line-div') || li;
-      const badge = document.createElement('span'); badge.className = 'plexus-backref-badge'; badge.textContent = '↗';
-      badge.title = 'Zoom to “' + (entry.label || 'this') + '” on the canvas';
-      badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(entry); });
-      host.appendChild(badge);
+      host.appendChild(this._mkBackrefBadge(entry));
+    }
+    // RECORD targets → ↗ on the OPEN record page (`.listview-items[data-guid]` = org-remark-verified record root). Title
+    // host via a defensive chain → else the root itself (prepended so it isn't buried under the body). The `.plexus-
+    // backref-rec` marker class scopes dedupe so the 1.5s interval can't re-append, and so line badges (inside listitems,
+    // descendants of the same root) are never mistaken for the page badge.
+    for (const root of document.querySelectorAll('.listview-items[data-guid]')) {
+      const g = root.getAttribute('data-guid'); const entry = idx[g]; if (!entry || !entry.drawing || entry.kind !== 'record') continue;
+      if (root.querySelector('.plexus-backref-rec')) continue;
+      const host = root.querySelector('.page-props-editor') || root.querySelector('.page-title') || root.querySelector('.record-title') || root;
+      const badge = this._mkBackrefBadge(entry); badge.classList.add('plexus-backref-rec');
+      if (host === root) root.insertBefore(badge, root.firstChild); else host.appendChild(badge);
     }
   }
   // Cross-ref encoded in the image blob filename (synced metadata → works on web AND desktop, not just the
@@ -5569,7 +5616,35 @@ class Plugin extends AppPlugin {
         const k = '__pxc_backref_test__'; this._registerBackref(k, { drawing: '__pxc_test_D__', el: 'E', label: 'L' });
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
-        return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+        return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' && got.kind === 'line' };
+      },
+      // FLYBACK: rebuild-on-save indexes whole-element chips AND inline @@/@ runs (line→lineGuid, record→guid, image
+      // skipped, dup target → first wins), and self-heals when refs are removed from the scene.
+      reindexFlybackTest: () => {
+        const view = v(); if (!view) return { error: 'no view' };
+        const D = '__pxc_reindex_D__';
+        const fake = { plugin: this, recordGuid: D, scene: { elements: [
+          { id: 'E1', isRef: true, refKind: 'line', refLineGuid: 'LG1', refLabel: 'vet' },
+          { id: 'E2', isRef: true, refKind: 'record', refGuid: 'RG1', refLabel: 'Appt', refAlias: 'see' },
+          { id: 'E3', isRef: true, refKind: 'image', refGuid: 'RG9', refLineGuid: 'IMG9' }, // image owns the xref path → skipped
+          { id: 'E4', type: 'text', runs: [{ t: 'text', s: 'a ' }, { t: 'ref', kind: 'line', guid: 'RP', lineGuid: 'LG2', label: 'snippet' }, { t: 'ref', kind: 'record', guid: 'RG2', label: 'Topic' }] },
+          { id: 'E5', isRef: true, refKind: 'record', refGuid: 'RG1', refLabel: 'dup' }, // dup target RG1 → first (E2) wins
+        ] } };
+        view._reindexBackrefs.call(fake);
+        const f = this._loadBackref();
+        const r = {
+          line1: !!f.LG1 && f.LG1.kind === 'line' && f.LG1.el === 'E1' && f.LG1.drawing === D,
+          rec1: !!f.RG1 && f.RG1.kind === 'record' && f.RG1.el === 'E2',
+          imgSkip: !f.IMG9 && !f.RG9,
+          runLine: !!f.LG2 && f.LG2.kind === 'line' && f.LG2.el === 'E4',
+          runRec: !!f.RG2 && f.RG2.kind === 'record' && f.RG2.el === 'E4',
+        };
+        fake.scene.elements = [{ id: 'E1', isRef: true, refKind: 'line', refLineGuid: 'LG1', refLabel: 'vet' }];
+        view._reindexBackrefs.call(fake);
+        const f2 = this._loadBackref();
+        r.heal = !!f2.LG1 && !f2.RG1 && !f2.LG2 && !f2.RG2;
+        try { this._brefPruneDrawing(D); } catch (_e) {}
+        return { r, ok: r.line1 && r.rec1 && r.imgSkip && r.runLine && r.runRec && r.heal };
       },
       // AI AUTO-CLUSTER: connected-components clustering by cosine + string-array parsing.
       clusterTest: () => {

@@ -1,5 +1,28 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.26.0 — FLYBACK: note/record→canvas ↗ for inline @@/@ + record refs (2026-06-19, plan: staged-finding-ritchie FOLLOW-UP)
+The forward-nav refs (inline `@@` line, inline `@` record, whole-element record chips) now also get a **note-side ↗ flyback**
+— the symmetric half we'd scoped out of CANVAS-SEG/Phase D. Extends the proven Phase-D DOM-injection mechanism (synced
+backref store + `_scanRefBadges`), no editor API.
+- **Index everything (rebuild-on-save):** new view `_reindexBackrefs()` walks the scene's CURRENT refs — whole-element
+  chips (`el.isRef`) AND inline runs (`el.runs` `{t:'ref'}`) — line targets keyed by `refLineGuid`/`run.lineGuid`, record
+  targets keyed by `refGuid`/`run.guid`; image chips skipped (the xref/`_scanImageBadges` path owns those). First ref to a
+  target wins (one ↗ per note line/record). Called from `saveNow()` → self-heals edited-away/deleted refs each save.
+  Plugin `_setDrawingBackrefs(drawing, map)` replaces ONE drawing's sub-map wholesale (concurrency-safe per-drawing; empty
+  → delete). `_indexBackref` generalized line-only → also record chips (immediate badge on insert).
+- **Record-page badge:** `_scanRefBadges` gains a 2nd loop over **`.listview-items[data-guid]`** (org-remark-verified open
+  record root) for `kind==='record'` entries → injects the same `↗`, distinct `.plexus-backref-rec` marker class so it
+  can't shadow/double with line badges. Line loop dedupe excludes that class (`:not(.plexus-backref-rec)`). Title host =
+  defensive chain (`.page-props-editor`/`.page-title`/`.record-title`) → else the root (prepended).
+- **Store:** `kind` now carried through `pxcBrefMigrate`/`pxcBrefFlatten`/`_registerBackref` (legacy entries default
+  `'line'`); cross-device via the existing synced blob (`_brefSyncFlush`/`_brefSyncLoad`).
+- **Verify:** node — bref-store kind round-trip + newest-wins (5 groups). Console — `reindexFlybackTest` (chips+inline runs,
+  line/record keying, image-skip, dup→first, self-heal). `node --check` clean. Adversarial `code-reviewer`: 1 MEDIUM fixed
+  (line-loop dedupe `:not(.plexus-backref-rec)` so a record badge can't shadow a line badge), 6 risk areas confirmed sound.
+- **⚠ Needs live-chrome verification (deferred, per plan):** the record-page **title host** selectors are guesses — the
+  badge still appears (falls back to the verified root), but precise placement + the drag-from-panel (EAPI-4) and
+  image-paste (EAPI-1) probes wait on a debug-port Chrome session.
+
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — ✅ COMPLETE (12/12)
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D. Canvas: Minimap, Bulk-Brush,
 Quick-capture, Roll-Up, Timeline, AI-relation-suggest, AI-auto-cluster, Subgraph-drop seam, Live Table (v1.17→1.25).
