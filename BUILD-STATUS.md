@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.40.0 — PAN LAG ROOT CAUSE: trackpad/wheel pan bypassed the camera-blit fast-path (2026-06-20)
+- **The real bug** (found by reading the input handlers, not the blit): the camera-blit fast-path (render loop
+  line ~4713) is gated on `moving = (now - _lastCamChange < 110)`. **Pointer-drag pan sets `_lastCamChange`
+  (line 2301); the `onWheel` handler (line 2369) never did.** So trackpad / two-finger / wheel panning failed the
+  `moving` gate every frame → fell through to a FULL crisp re-render + `_refreshCache` per frame. That's the lag —
+  and it's worst **zoomed-in with images** because a full render upscales every large image bitmap each frame
+  (matches the user's "still laggy, especially zoomed in"). Mouse drag-pan was already smooth (it armed the path).
+- **Fix:** the onWheel PAN branch now sets `this._lastCamChange = this._now()` → trackpad pan uses the same cheap
+  blit path as drag-pan. ZOOM branch intentionally left unchanged (keeps wheel-zoom's crisp per-frame render — no
+  blur regression; zoom-out needs the full render anyway). One line, mirrors the proven pointer-drag path.
+- Pairs with v1.39's blit-offset rounding (crisp) + v1.38 margin-cache (no blank edges): trackpad pan now takes the
+  rounded, margin-padded blit instead of a full render. The user-approved compositor CSS-transform refactor is held
+  as a FOLLOW-UP — only needed if the blit's staticCv re-upload is still the bottleneck AFTER this fix (verify first;
+  the v1.34 ~28ms composite was a full-screen element-drag, likely not the cost at a normal panel width).
+- ⚠ Couldn't capture a confirming trace: shared debug-Chrome (2 Claude instances + user) kept tearing down the test
+  canvas / firing unrelated dialogs. Diagnosis is code-evident (pointer path sets the flag, wheel path didn't).
+  User reinstalls v1.40.0 + verifies trackpad pan.
+
 ## ✅ v1.39.0 — bullets in cards (Thymer-flow look) + PAN crispness (round blit) (2026-06-20, blind: chrome MCP down)
 - **Bullets like Thymer flow** (user: "is there a way to show bullets like flow thymer plugin?"): the rendered RECORD card
   body lines now draw `'• ' + ln.text` (was bare text — `_drawLineCard` already did this), AND the card EDITOR textarea

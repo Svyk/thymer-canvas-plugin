@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.39.0';
+const PLEXUS_VERSION = '1.40.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2366,7 +2366,7 @@ class CanvasView {
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
       this.dirty = true;
     };
-    const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll
+    const onWheel = (e) => { e.preventDefault(); this._abortCamAnim(); const st = this.plugin._settings || {}; const rect = this.wrap.getBoundingClientRect(); const wz = st.wheelZoom !== false; const zoomNow = e.ctrlKey ? !wz : wz; if (zoomNow) { this.camera.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.0012)); } else { this.camera.x += e.deltaX / this.camera.zoom; this.camera.y += e.deltaY / this.camera.zoom; this._lastCamChange = this._now(); } this.dirty = true; this._saveCamera(); }; // S3: wheel zoom vs scroll. PAN branch sets _lastCamChange to ARM the camera-blit fast-path (line ~4713 `moving` gate) — pointer-drag pan sets it (2301) but wheel/trackpad pan didn't, so every trackpad-pan frame fell through to a full crisp re-render (the lag, worst zoomed-in with upscaled images). Zoom branch intentionally omits it (keeps wheel-zoom's crisp per-frame render, no blur regression).
     const onKey = (e) => {
       if (this.editingId) return; // a text overlay is open — let it handle keys
       if (this._present) { // present mode: read-only; Esc exits, arrows/space step through frame-slides (P0.5)
