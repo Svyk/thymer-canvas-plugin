@@ -2,6 +2,12 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.22.0 — AI relation-suggest** (Tier 4). "AI suggest relations" → the model reads the board's record-card titles and
+  proposes DIRECTED links; a **checkbox modal** (user-gated, nothing written without accept) writes accepted links as a
+  real ref on the FROM record → TO (`ceEdgeSegments`, the CE-BRAIN ref-line → a Brain edge). The canvas as a graph-builder
+  (net-new links the user hasn't drawn). Pure `pxcParseLinkSuggestions` (tolerant of fenced/prose JSON, drops self-links/
+  out-of-range/non-int) + `pxcEsc` (XSS-safe innerHTML) — 6/6 node asserts. Reuses `_aiComplete`. Adversarial review =
+  **CLEAN** (XSS surface verified closed; accept-gating + bounds + write-direction all confirmed). Command on `ti-sparkles`.
 - **v1.21.0 — Timeline / Gantt lane** (Tier 2). "Arrange cards on a timeline" positions selected record cards on a real
   datetime axis (by Scheduled/Due/Start/…), optional swim-lanes by a 2nd property, draws weekly tick guides; **DRAG a
   card → re-dates the record in place** (`_setSchedule`, the loader-correct `DateTime` write) — two-way typed-data editing

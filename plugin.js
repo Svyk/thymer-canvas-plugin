@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.21.0';
+const PLEXUS_VERSION = '1.22.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -674,6 +674,16 @@ const PXC_DAY_MS = 86400000;
 function pxcTimelineX(ms, day0Ms, x0, pxPerDay) { return x0 + ((ms - day0Ms) / PXC_DAY_MS) * pxPerDay; }
 function pxcTimelineMs(x, day0Ms, x0, pxPerDay) { return day0Ms + Math.round((x - x0) / pxPerDay) * PXC_DAY_MS; } // snaps to the nearest day
 function pxcMsToIsoLocal(ms) { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function pxcEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); } // escape user text before innerHTML
+// AI RELATION-SUGGEST: tolerantly extract [{from,to,reason}] from the model's reply (raw JSON or fenced/with prose).
+function pxcParseLinkSuggestions(text) {
+  let arr = null;
+  try { arr = JSON.parse(text); } catch (_e) { const m = String(text == null ? '' : text).match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const s of arr) { if (!s || typeof s !== 'object') continue; const from = Number(s.from), to = Number(s.to); if (!Number.isInteger(from) || !Number.isInteger(to) || from === to) continue; out.push({ from, to, reason: String(s.reason || '').slice(0, 120) }); }
+  return out;
+}
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -3842,6 +3852,57 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'AI diagram: ' + els.length + ' element(s).', dismissible: true }); } catch (_e) {}
   }
+  // AI RELATION-SUGGEST: the model reads the record cards on the board and proposes meaningful directed links; accepted
+  // ones write a real ref on the FROM record → TO record (a DEFINED-ish edge Plexus Brain graphs). Net-new links the
+  // user hasn't drawn — the canvas as a graph-builder. (Accept is user-gated; nothing is written without confirmation.)
+  async _aiRelationSuggest() {
+    const cards = this.scene.elements.filter((e) => !e.isDeleted && (e.type === 'record' || e.type === 'board') && e.recordGuid);
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: put 2+ record cards on the board first.', dismissible: true }); } catch (_e) {} return; }
+    const list = [];
+    for (const card of cards) { let title = ''; try { const rec = await this.plugin.data.getRecord(card.recordGuid); title = (rec && rec.getName && rec.getName()) || ''; } catch (_e) {} if (title && !list.some((x) => x.guid === card.recordGuid)) list.push({ guid: card.recordGuid, title }); }
+    if (list.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: need 2+ distinct named records.', dismissible: true }); } catch (_e) {} return; }
+    try { this.plugin.ui.addToaster({ title: 'Plexus: asking the model for link suggestions…', dismissible: true }); } catch (_e) {}
+    const SYS = 'You connect ideas. Given notes as a JSON array of {id,title}, propose meaningful DIRECTED links. Output ONLY a JSON array of {"from":<id>,"to":<id>,"reason":"<short why>"}. Only genuinely meaningful links; omit weak ones; no self-links; max 12.';
+    let txt = null; try { txt = await this._aiComplete(SYS, JSON.stringify(list.map((x, i) => ({ id: i, title: x.title })))); } catch (_e) {}
+    if (txt == null) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed or no key set.', dismissible: true }); } catch (_e) {} return; }
+    const sugg = pxcParseLinkSuggestions(txt).filter((s) => list[s.from] && list[s.to]);
+    if (!sugg.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no link suggestions returned.', dismissible: true }); } catch (_e) {} return; }
+    const chosen = await this._pickSuggestions(sugg, list);
+    if (!chosen || !chosen.length) return;
+    let n = 0;
+    for (const s of chosen) {
+      const from = list[s.from], to = list[s.to]; if (!from || !to) continue;
+      try { const rec = await this.plugin.data.getRecord(from.guid); if (rec && rec.createLineItem) { await rec.createLineItem(null, null, 'ulist', ceEdgeSegments(to.guid, to.title), null); this._invalidateRec(from.guid); n++; } } catch (_e) {}
+    }
+    this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: 'Wrote ' + n + ' relation(s) — open Plexus Brain to see the new edges.', dismissible: true }); } catch (_e) {}
+  }
+  // Multi-select modal for AI suggestions: checkboxes (default ON) + Link/Cancel. Resolves to the accepted subset.
+  _pickSuggestions(sugg, list) {
+    try { this._injectRefPickerCss(); } catch (_e) {}
+    return new Promise((resolve) => {
+      const ov = document.createElement('div'); ov.className = 'pxc-modal';
+      const done = (val) => { try { ov.remove(); } catch (_e) {} resolve(val); };
+      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { e.stopPropagation(); done(null); } });
+      const box = document.createElement('div'); box.className = 'pxc-modal-box'; box.addEventListener('pointerdown', (e) => e.stopPropagation());
+      const lab = document.createElement('div'); lab.className = 'pxc-modal-label'; lab.textContent = 'AI suggested ' + sugg.length + ' link(s) — choose which to write:';
+      const listEl = document.createElement('div'); listEl.className = 'pxc-collist';
+      const checks = [];
+      sugg.forEach((s, i) => {
+        const row = document.createElement('label'); row.className = 'pxc-colrow'; row.style.display = 'flex'; row.style.alignItems = 'flex-start'; row.style.gap = '8px'; row.style.cursor = 'pointer';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true; checks.push(cb);
+        const txt = document.createElement('div'); txt.innerHTML = '<b>' + pxcEsc(list[s.from].title) + '</b> → <b>' + pxcEsc(list[s.to].title) + '</b>' + (s.reason ? '<div style="font-size:11px;opacity:.6">' + pxcEsc(s.reason) + '</div>' : '');
+        row.appendChild(cb); row.appendChild(txt); listEl.appendChild(row);
+      });
+      const rowBtns = document.createElement('div'); rowBtns.className = 'pxc-modal-row';
+      const ok = document.createElement('button'); ok.className = 'pxc-prop-btn'; ok.textContent = 'Write links';
+      const cancel = document.createElement('button'); cancel.className = 'pxc-prop-btn'; cancel.textContent = 'Cancel';
+      ok.addEventListener('click', () => done(sugg.filter((s, i) => checks[i].checked)));
+      cancel.addEventListener('click', () => done(null));
+      rowBtns.appendChild(ok); rowBtns.appendChild(cancel);
+      box.appendChild(lab); box.appendChild(listEl); box.appendChild(rowBtns); ov.appendChild(box); this.wrap.appendChild(ov);
+    });
+  }
   // B3: import a /cause-effect-chart JSON → native RCA elements at the viewport centre.
   async _ceImportJson() {
     const raw = await this._promptText('Paste a cause-effect chart JSON (from /cause-effect-chart):', '');
@@ -4508,6 +4569,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI suggest relations (writes refs)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiRelationSuggest(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
@@ -5326,6 +5388,17 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // AI RELATION-SUGGEST: tolerant suggestion parsing + HTML escaping.
+      aiSuggestTest: () => {
+        const a = pxcParseLinkSuggestions('[{"from":0,"to":1,"reason":"x"},{"from":2,"to":2},{"from":1,"to":3,"reason":"y"}]');
+        const b = pxcParseLinkSuggestions('Sure! ```json\n[{"from":1,"to":0,"reason":"z"}]\n``` done');
+        const c2 = pxcParseLinkSuggestions('not json at all');
+        return { a: a.length, b: b.length, ok:
+          a.length === 2 && a[0].from === 0 && a[0].to === 1 && a[1].from === 1 && a[1].to === 3 && // self-link dropped
+          b.length === 1 && b[0].from === 1 && b[0].to === 0 &&
+          c2.length === 0 &&
+          pxcEsc('<b>&"x"</b>') === '&lt;b&gt;&amp;"x"&lt;/b&gt;' };
       },
       // TIMELINE: ms↔x axis math round-trips at day granularity (snap to nearest day).
       timelineTest: () => {
