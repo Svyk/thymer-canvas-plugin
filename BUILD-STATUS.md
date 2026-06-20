@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.38.0 — Enter-to-edit overlap fix + PAN margin-cache (2026-06-19, blind: chrome MCP down, node+review only)
+- **Enter-to-edit "looks odd at first":** entering edit set `editingId` (next render skips the element) but the textarea
+  appeared immediately while the canvas still showed the element until the next RAF → a 1-frame "double." `_editText` now
+  forces a synchronous `this.render()` right after `editingId`, so the element clears in the same paint the textarea shows.
+- **Panning margin-cache (user: "especially the canvas panning"):** the pan-blit cache was exactly viewport-sized → revealed
+  edges blank until settle. NEW additive, DEBOUNCED background warm: `_warmMarginCache` (200ms idle, off the keystroke path;
+  bails on editing/drag/anim/mid-pan + glMode) renders the scene into a SEPARATE `_marginCv` padded 280px each side, via a
+  temporary `this.camera` shift (restored in `finally`). The camera-blit prefers `_marginCv` (via pure
+  `pxcMarginBlitOffset(cc,cam,M,dpr)`, node-tested; M=0 == old blit) when warm + at the same camera as the viewport cache,
+  else falls back to the viewport `_cacheCv`. **Display path + `_cacheCv` untouched** → worst case is a pan glitch, not a
+  display regression. Invalidation rides the existing `_cacheValid` gate; `_marginT`/`_marginCv` freed in destroy.
+- Adversarial `code-reviewer`: Change A fine; Change B correct (camera-shift sync, ctx-sharing, staleness, debounce,
+  geometry, lifecycle all verified) — fixed 1 MEDIUM (latent WebGL-backend corruption → warm now skips glMode). node-tested.
+- ⚠ BLIND this session (chrome MCP died w/ Chrome): geometry verified, but "panning feels smoother" / "overlap gone" need
+  a live test or re-profile. Pan-fix candidate notes in the v1.35 NOTE block remain if this approach needs tuning.
+
 ## ✅ v1.37.0 — editable cards: SEE + EDIT the nested tree (indent in the card) (2026-06-19)
 User: "I should see the tree in the card I edit, and create indentation there." The card editor loaded only top-level
 lines, flat; now it loads the full nested subtree and supports re-nesting.

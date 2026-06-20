@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.37.0';
+const PLEXUS_VERSION = '1.38.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -687,6 +687,15 @@ function pxcMiniFit(bounds, w, h, pad) {
   if (!bounds || !(bounds.w > 0) || !(bounds.h > 0)) return null;
   const iw = w - pad * 2, ih = h - pad * 2; const scale = Math.min(iw / bounds.w, ih / bounds.h);
   return { scale, ox: pad + (iw - bounds.w * scale) / 2 - bounds.x * scale, oy: pad + (ih - bounds.h * scale) / 2 - bounds.y * scale };
+}
+// PAN MARGIN CACHE: device-pixel transform to blit a scene cache (rendered at camera `cc` with `M` css-px of margin on
+// each side, so cacheCv-pixel(0,0) = world cc.x - M/cc.zoom) onto the canvas at the CURRENT camera `cam`. M=0 reduces to
+// the plain viewport blit. Pure + node-tested. While panning within the margin, revealed edges stay on cached content.
+function pxcMarginBlitOffset(cc, cam, M, dpr) {
+  const s = cam.zoom / cc.zoom;
+  const tx = (cc.x - M / cc.zoom - cam.x) * cam.zoom * dpr;
+  const ty = (cc.y - M / cc.zoom - cam.y) * cam.zoom * dpr;
+  return { s, tx, ty };
 }
 // BULK PROPERTY BRUSH: classify a typed value so the bulk write picks the right setter (a choice prop always uses
 // setChoice regardless; for non-choice props this routes date→DateTime, number→set(Number), else text). Pure + tested.
@@ -1815,7 +1824,36 @@ class CanvasView {
       if (this._cacheCv.width !== this.staticCv.width || this._cacheCv.height !== this.staticCv.height) { this._cacheCv.width = this.staticCv.width; this._cacheCv.height = this.staticCv.height; }
       const cctx = this._cacheCv.getContext('2d'); cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height); cctx.drawImage(this.staticCv, 0, 0);
       this._cacheCam = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom }; this._cacheValid = true;
+      this._marginValid = false; this._scheduleMarginWarm(); // PAN: (re)warm the margin-padded cache for smoother panning — debounced, off the edit hot path
     } catch (_e) { this._cacheValid = false; }
+  }
+  // PAN MARGIN CACHE: render the scene into a SEPARATE, margin-padded canvas (DEBOUNCED — only after the view goes idle, so
+  // it never costs a keystroke) so the pan-blit has cached content beyond the viewport edges; panning shows that instead of
+  // blank/re-rendered edges until you pan past the margin. The display path + the viewport `_cacheCv` are untouched (this is
+  // additive; the blit falls back to the viewport cache when this isn't warm). Temporarily shifts this.camera so per-element
+  // painters stay consistent with the cache transform, then restores it.
+  _scheduleMarginWarm() { if (this._marginT) clearTimeout(this._marginT); this._marginT = setTimeout(() => { this._marginT = null; try { this._warmMarginCache(); } catch (_e) {} }, 200); }
+  _warmMarginCache() {
+    if (this.renderer && this.renderer.kind === 'webgl') return; // WebGL: the margin is never shown (the display blit is glMode-gated) and renderer.begin would touch the on-screen GL layer with the shifted camera — don't warm it
+    if (this.destroyed || this.editingId || this._elDrag || this._camAnim || (this._now() - (this._lastCamChange || 0) < 160)) { this._scheduleMarginWarm(); return; } // not stable yet → retry
+    const M = 280, d = this.dpr, z = this.camera.zoom;
+    const W = Math.round((this.cssW + 2 * M) * d), H = Math.round((this.cssH + 2 * M) * d);
+    if (!this._marginCv) this._marginCv = document.createElement('canvas');
+    if (this._marginCv.width !== W || this._marginCv.height !== H) { this._marginCv.width = W; this._marginCv.height = H; }
+    const mctx = this._marginCv.getContext('2d'); const dark = !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark();
+    mctx.setTransform(1, 0, 0, 1, 0, 0); mctx.fillStyle = dark ? '#0f1117' : ((this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); mctx.fillRect(0, 0, W, H);
+    const sx = this.camera.x, sy = this.camera.y; this.camera.x = sx - M / z; this.camera.y = sy - M / z;
+    try {
+      this.renderer.begin(mctx, this.camera, d); this.renderer.grid();
+      const cm = (this.plugin._settings && this.plugin._settings.cullMargin != null) ? this.plugin._settings.cullMargin : 80;
+      const vw = this.cssW + 2 * M, vh = this.cssH + 2 * M, vx0 = this.camera.x - cm, vy0 = this.camera.y - cm, vx1 = this.camera.x + vw / z + cm, vy1 = this.camera.y + vh / z + cm;
+      this._ensureGrid(); const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0);
+      const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
+      for (const el of cand) { if (!el.isDeleted && el.type === 'frame') this.renderer.frame(el); }
+      for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; this.renderer.element(el); }
+      this.renderer.end();
+      this._marginCam = { x: sx, y: sy, zoom: z }; this._marginPx = M; this._marginValid = true;
+    } catch (_e) { this._marginValid = false; } finally { this.camera.x = sx; this.camera.y = sy; }
   }
   // PERF (drag): elements that move with the current drag = selection ∪ arrows bound to it. Returns null when a FRAME is
   // selected (a frame drag carries its contents — too broad to partial-cache; the caller falls back to a full render).
@@ -2469,6 +2507,7 @@ class CanvasView {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
     this.editingId = el.id;
+    this.dirty = true; try { this.render(); } catch (_e) {} // clear the element off the canvas NOW (same paint the textarea appears in) → no one-frame "double" overlap on entering edit
     const ta = document.createElement('textarea'); ta.className = 'pxc-textedit'; this._ta = ta;
     ta.value = (el.runs && el.runs.length) ? flattenRuns(el.runs) : (el.text || ''); ta.spellcheck = false;
     let prevFlat = ta.value; // CANVAS-SEG: baseline for mapping each flat edit back onto el.runs
@@ -4673,8 +4712,12 @@ class CanvasView {
       const cc = this._cacheCam, moving = !glMode && (!!this._camAnim || (this._now() - (this._lastCamChange || 0) < 110));
       const camMoved = cc && (cc.x !== this.camera.x || cc.y !== this.camera.y || cc.zoom !== this.camera.zoom);
       if (!dragMovers && moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
-        const s = z / cc.zoom, tx = (cc.x - this.camera.x) * z * d, ty = (cc.y - this.camera.y) * z * d;
-        sctx.setTransform(s, 0, 0, s, tx, ty); sctx.drawImage(this._cacheCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
+        // PAN: blit the margin-padded cache when it's warm + at the same camera as the viewport cache (so the revealed
+        // edges show cached content instead of blank); otherwise fall back to the viewport cache (M=0 = the old blit).
+        const useMargin = this._marginValid && this._marginCv && this._marginCam && this._marginCam.x === cc.x && this._marginCam.y === cc.y && this._marginCam.zoom === cc.zoom;
+        const blitCam = useMargin ? this._marginCam : cc, blitCv = useMargin ? this._marginCv : this._cacheCv, M = useMargin ? (this._marginPx || 0) : 0;
+        const o = pxcMarginBlitOffset(blitCam, this.camera, M, d);
+        sctx.setTransform(o.s, 0, 0, o.s, o.tx, o.ty); sctx.drawImage(blitCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
         this._scheduleSettle();
       } else {
         // Crisp full render. When dragging, this is the ONE build frame: render statics EXCLUDING movers, then FREEZE
@@ -4916,7 +4959,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
