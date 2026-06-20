@@ -10,7 +10,10 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.40.0';
+const PLEXUS_VERSION = '1.41.0';
+// Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
+// transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
+const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2922,6 +2925,19 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Captured “' + title + '” — a live record card.', dismissible: true }); } catch (_e) {}
   }
   _clipText(ctx, s, maxW) { s = String(s == null ? '' : s); if (ctx.measureText(s).width <= maxW) return s; while (s.length && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); return s + '…'; }
+  // Indent-Rainbow parity: draw ONE transcluded outline row the way the flow plugin renders it on a record — a depth-colored
+  // marker dot + a depth-colored vertical indent guide per ancestor level — instead of a plain '• '. STEP=13px/level, rowH=16,
+  // marker centered on the text's optical middle. Caller owns font + textBaseline('top'); we save/restore stroke+alpha+fill.
+  _drawOutlineRow(ctx, text, depth, tx, ty, textColor, maxW) {
+    const STEP = 13, rowH = 16, pal = PXC_RAINBOW, ind = depth * STEP;
+    ctx.save();
+    ctx.lineWidth = 1; ctx.globalAlpha = 0.45; // indent guides: one vertical per ancestor level, descending under that level's marker
+    for (let L = 0; L < depth; L++) { const gx = tx + L * STEP + 3.5; ctx.strokeStyle = pal[L % pal.length]; ctx.beginPath(); ctx.moveTo(gx, ty - 2); ctx.lineTo(gx, ty + rowH - 2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = pal[depth % pal.length]; ctx.beginPath(); ctx.arc(tx + ind + 3.5, ty + 6, 2.3, 0, Math.PI * 2); ctx.fill(); // marker dot
+    ctx.fillStyle = textColor; ctx.fillText(this._clipText(ctx, text || '', maxW - ind - 11), tx + ind + 11, ty);
+    ctx.restore();
+  }
   _drawRecordCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
@@ -2939,7 +2955,7 @@ class CanvasView {
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, '• ' + (ln.text || ''), maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth, bullet prefix like Thymer flow
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); ty += 16; } // TRANSCLUSION: record-style rainbow marker + indent guide per row (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3566,7 +3582,7 @@ class CanvasView {
     if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
     ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of data.children) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, '• ' + (ln.text || ''), maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth
+    for (const ln of data.children) { if (ty > y + h - 14) break; this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); ty += 16; } // TRANSCLUSION: record-style rainbow marker + indent guide per row (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   async _toggleTaskNode(el) {

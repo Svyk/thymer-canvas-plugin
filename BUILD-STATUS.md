@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.41.0 — transclusion outline rows = Indent-Rainbow look (record parity) (2026-06-20)
+- User clarified the "flow thymer plugin / bullets" ask: the issue is **on the canvas** — transcluded outline rows
+  should look like they do on a record (where the Indent Rainbow plugin paints them). The Indent Rainbow plugin
+  CANNOT paint a canvas card (it's a Canvas2D bitmap, not DOM), so the parity is **replicated in the canvas renderer**.
+- New `_drawOutlineRow(ctx, text, depth, tx, ty, textColor, maxW)`: per row, a **depth-colored marker dot** +
+  **depth-colored vertical indent guides** (one per ancestor level, descending under that level's marker), matching the
+  Svyk-fork Indent Rainbow `rainbow` palette `['#ef4444','#f97316','#eab308','#22c55e','#06b6d4','#3b82f6','#8b5cf6']`
+  (module const `PXC_RAINBOW`), guides at lineWidth 1 / alpha 0.45 like the plugin. Replaces the plain `• ` text bullet
+  (v1.39) in BOTH `_drawRecordCard` (record card body lines) and `_drawLineCard` (linecard children). STEP=13px/level.
+- Verified the VISUAL standalone in chrome-devtools (injected a sample card, screenshotted): red→orange→yellow dots by
+  depth + faint rainbow guides, record-like. (Card EDITOR textarea keeps the plain `• ` affordance — a textarea can't
+  draw colored dots; edit-vs-view, the v1.39 bullet-strip parse is unchanged.)
+- Runs on the full-render/settle path only (cards aren't redrawn per pan frame), so no hot-path cost. Ships with v1.40.
+
 ## ✅ v1.40.0 — PAN LAG ROOT CAUSE: trackpad/wheel pan bypassed the camera-blit fast-path (2026-06-20)
 - **The real bug** (found by reading the input handlers, not the blit): the camera-blit fast-path (render loop
   line ~4713) is gated on `moving = (now - _lastCamChange < 110)`. **Pointer-drag pan sets `_lastCamChange`
