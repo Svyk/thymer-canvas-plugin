@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.45.0';
+const PLEXUS_VERSION = '1.46.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -938,7 +938,7 @@ function pxcOutlineRows(all, root, cap, includeBlank, includeRoot) {
 // createLineItem'd. Keyed by a parent/after STACK (lastAt[d] = the last line placed at depth d). Caller refuses a count
 // DECREASE (deletion) + a prefix-reorder. `isLine` → row 0 is the linecard's main line: never moved (it's the anchor).
 async function pxcWriteCardTree(rec, items, parsed, body, isLine) {
-  const lastAt = []; let writes = 0, prevDepth = -1;
+  const lastAt = []; let writes = 0, fails = 0, richSkipped = 0, prevDepth = -1; // fails/richSkipped → honest toaster (the writes are independent + non-transactional; surface partial failures instead of always claiming success)
   for (let i = 0; i < parsed.length; i++) {
     let d = Math.min(parsed[i].depth, prevDepth + 1); if (d < 0) d = 0; // clamp over-indent to one deeper than the previous row (outline-editor behavior, never collapse to root unexpectedly)
     if (isLine && i === 0) d = 0; // the linecard's main line is the depth-0 anchor
@@ -949,17 +949,18 @@ async function pxcWriteCardTree(rec, items, parsed, body, isLine) {
     let li = null;
     if (i < items.length) {
       li = items[i].li;
-      if (!(isLine && i === 0) && d !== items[i].depth) { try { const m = await li.move(moveParent, after); if (m) { li = m; writes++; } } catch (_e) {} }
+      if (!(isLine && i === 0) && d !== items[i].depth) { try { const m = await li.move(moveParent, after); if (m) { li = m; writes++; } } catch (e) { fails++; console.warn('[Plexus] card-edit move', e); } }
       if (text !== (lineTextOf(items[i].li) || '')) {
         const segs = (items[i].li && items[i].li.segments) || []; const rich = segs.some((s) => s && s.type && s.type !== 'text');
-        if (!rich) { try { if (await li.setSegments([{ type: 'text', text: body[i] }])) writes++; } catch (_e) {} } // DATA SAFETY: never flatten a line carrying a ref/datetime/hashtag/bold/etc. to plain text (a no-title ref reads as '' so it'd look "edited") — leave rich lines untouched; edit them in the record
+        if (!rich) { try { if (await li.setSegments([{ type: 'text', text: body[i] }])) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit setSegments', e); } } // DATA SAFETY: never flatten a line carrying a ref/datetime/hashtag/bold/etc. to plain text (a no-title ref reads as '' so it'd look "edited") — leave rich lines untouched; edit them in the record
+        else richSkipped++; // the user changed a rich line's visible text — intentionally NOT written (would flatten the ref/date/format). Reported so they know to edit it in the record.
       }
     } else if (text) {
-      try { li = await rec.createLineItem(createParent, after, 'ulist', [{ type: 'text', text: body[i] }], null); if (li) writes++; } catch (_e) {}
+      try { li = await rec.createLineItem(createParent, after, 'ulist', [{ type: 'text', text: body[i] }], null); if (li) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit createLineItem', e); }
     }
     if (li) { lastAt[d] = li; lastAt.length = d + 1; prevDepth = d; }
   }
-  return writes;
+  return { writes, fails, richSkipped };
 }
 // IO-1: a native TASK node — backed by a REAL Thymer `task` line item (lineGuid on recordGuid). Its checkbox
 // toggles setTaskStatus, so the same task is live in the Task Board / Day View / @task search. A task dropped on
@@ -2946,14 +2947,17 @@ class CanvasView {
   // marker dot + a depth-colored vertical indent guide per ancestor level — instead of a plain '• '. STEP=13px/level, rowH=16,
   // marker centered on the text's optical middle. Caller owns font + textBaseline('top'); we save/restore stroke+alpha+fill.
   _drawOutlineRow(ctx, text, depth, tx, ty, textColor, maxW) {
-    const STEP = 13, rowH = 16, pal = PXC_RAINBOW, ind = depth * STEP;
+    const STEP = 13, lineH = 16, pal = PXC_RAINBOW, ind = depth * STEP;
+    const lines = pxcWrapLines(ctx, text || '', maxW - ind - 11); // WRAP long lines to multiple lines (was a single clipped line); returns the row height so the caller advances ty
+    const rowH = Math.max(lineH, lines.length * lineH);
     ctx.save();
-    ctx.lineWidth = 1; ctx.globalAlpha = 0.45; // indent guides: one vertical per ancestor level, descending under that level's marker
+    ctx.lineWidth = 1; ctx.globalAlpha = 0.45; // indent guides span the FULL wrapped row height
     for (let L = 0; L < depth; L++) { const gx = tx + L * STEP + 3.5; ctx.strokeStyle = pal[L % pal.length]; ctx.beginPath(); ctx.moveTo(gx, ty - 2); ctx.lineTo(gx, ty + rowH - 2); ctx.stroke(); }
     ctx.globalAlpha = 1;
-    ctx.fillStyle = pal[depth % pal.length]; ctx.beginPath(); ctx.arc(tx + ind + 3.5, ty + 6, 2.3, 0, Math.PI * 2); ctx.fill(); // marker dot
-    ctx.fillStyle = textColor; ctx.fillText(this._clipText(ctx, text || '', maxW - ind - 11), tx + ind + 11, ty);
+    ctx.fillStyle = pal[depth % pal.length]; ctx.beginPath(); ctx.arc(tx + ind + 3.5, ty + 6, 2.3, 0, Math.PI * 2); ctx.fill(); // marker dot stays on the first line
+    ctx.fillStyle = textColor; for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], tx + ind + 11, ty + i * lineH);
     ctx.restore();
+    return rowH;
   }
   _drawRecordCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
@@ -2972,7 +2976,7 @@ class CanvasView {
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); ty += 16; } // TRANSCLUSION: record-style rainbow marker + indent guide per row (Indent-Rainbow parity)
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3575,6 +3579,9 @@ class CanvasView {
       // reorder) → open the record. No blind delete; rich lines are never setSegments-flattened (guarded in pxcWriteCardTree).
       const origTexts = items.map((n) => lineTextOf(n.li) || '');
       const prefixTextMatches = () => { for (let i = 0; i < items.length; i++) if (parsed[i].text !== origTexts[i]) return false; return true; };
+      // INVARIANT (data-safety audit): this text-collision reorder check is sufficient ONLY because the editor has NO row-move
+      // affordance (Enter appends, Tab indents, Backspace outdents — you cannot drag a row up/down). If a future version adds
+      // drag-to-reorder of distinct-text rows, replace this with a positional/multiset-equality check or the guard can miss it.
       const isReorder = () => { if (parsed.length !== items.length) return false; const orig = Object.create(null); for (const t of origTexts) if (t) orig[t] = true; for (let i = 0; i < items.length; i++) { const t = parsed[i].text; if (t && t !== origTexts[i] && orig[t]) return true; } return false; };
       if (parsed.length < items.length || (parsed.length > items.length && !prefixTextMatches()) || isReorder()) {
         // NON-DESTRUCTIVE refuse: KEEP the box + the user's edits (don't set `done`, don't remove) so a mid-insert/reorder/
@@ -3582,9 +3589,15 @@ class CanvasView {
         try { this.plugin.ui.addToaster({ title: 'To insert between lines, reorder, or delete, open the record (double-click the title). Your edits are still here — text changes, indenting (Tab), and adding lines at the end save here; Esc discards.', dismissible: true }); } catch (_e) {} return;
       }
       done = true; try { box.remove(); } catch (_e) {} this._cardEdit = null; // committing for real now
-      let writes = 0; try { writes = await pxcWriteCardTree(rec, items, parsed, body, isLine); } catch (_e) {}
+      let res = { writes: 0, fails: 0, richSkipped: 0 }; try { res = await pxcWriteCardTree(rec, items, parsed, body, isLine); } catch (_e) {}
       if (this.destroyed) return;
-      if (writes) { if (isLine) { this._invalidateLine(card.lineGuid); this._invalidateLinesForRecord(guid); } this._invalidateRec(guid); this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Saved ' + writes + ' change' + (writes > 1 ? 's' : '') + ' to the source record.', dismissible: true }); } catch (_e) {} }
+      if (res.writes) { if (isLine) { this._invalidateLine(card.lineGuid); this._invalidateLinesForRecord(guid); } this._invalidateRec(guid); this.dirty = true; }
+      // HONEST toaster (writes are independent + non-transactional): report saved, failed, and rich-skipped lines truthfully
+      let msg = '';
+      if (res.writes) msg = 'Saved ' + res.writes + ' change' + (res.writes > 1 ? 's' : '');
+      if (res.fails) msg = (msg ? msg + '; ' : '') + res.fails + ' couldn’t be written (see console) — open the record to retry';
+      if (res.richSkipped) msg = (msg ? msg + '. ' : '') + res.richSkipped + ' line' + (res.richSkipped > 1 ? 's' : '') + ' with links/dates/formatting left unchanged — edit ' + (res.richSkipped > 1 ? 'those' : 'that') + ' in the record';
+      if (msg) { try { this.plugin.ui.addToaster({ title: 'Plexus: ' + msg + '.', dismissible: true }); } catch (_e) {} }
     };
     box.addEventListener('focusout', (ev) => { if (box.contains(ev.relatedTarget) || !document.hasFocus()) return; commit(); }); // commit when focus genuinely leaves the editor; NOT on an app/tab switch (hasFocus) and NOT when clicking another row inside
     const firstLeaf = (n) => { while (n && n.firstChild) n = n.firstChild; return n; };
@@ -3618,7 +3631,7 @@ class CanvasView {
     if (data.title) { ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText(this._clipText(ctx, '↳ ' + data.title, maxW), tx, ty); ty += 16; }
     ctx.font = '600 14px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, data.text || '(empty line)', maxW), tx, ty); ty += 22;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of data.children) { if (ty > y + h - 14) break; this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); ty += 16; } // TRANSCLUSION: record-style rainbow marker + indent guide per row (Indent-Rainbow parity)
+    for (const ln of data.children) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, '#5f6368', maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
     ctx.restore(); ctx.restore();
   }
   async _toggleTaskNode(el) {

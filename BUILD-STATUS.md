@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.46.0 — card text WRAPS (no more "…" truncation) + data-safety audit honesty fix (2026-06-20)
+- **Text wrap** (user: long lines truncated with "…"): `_drawOutlineRow` now `pxcWrapLines`-wraps to the available width and
+  RETURNS its (multi-line) height; the record-card + line-card loops advance `ty` by that. Indent guides span the full
+  wrapped height; the marker dot stays on the first line. Verified standalone in chrome (the EMP line wraps to 3 lines).
+- **Data-safety audit** (user asked to confirm we're good): adversarial review of the full write-back (pxcWriteCardTree +
+  guards + pxcOutlineRows) vs the SDK contract. VERDICT: **safe against data loss/corruption on every vector** — rich
+  segments (all 10 non-text types) never flattened (the `!rich` guard checks ORIGINAL segments, skips even if the user
+  retyped the row); no `li.move()` cycle/orphan/double-move (moveParent is always a processed ancestor; subtree carry +
+  original-depth equality); appends purely additive (createLineItem only, linecard appends land under the main line);
+  NO constructible silent wrong-write (count-grow needs unchanged prefix; reorder caught by text-collision; writes target
+  line HANDLES by identity → robust even to external reorders); `li.delete()` is NEVER called.
+- Only gap = **vector 5 (MED, not data-loss): non-atomic partial failure**. Fixed: `pxcWriteCardTree` now returns
+  `{writes, fails, richSkipped}`, `console.warn`s each swallowed SDK error, and the toaster is HONEST — "Saved N; K couldn't
+  be written (see console) — open the record to retry" + "M lines with links/dates/formatting left unchanged". Added the
+  reorder-heuristic INVARIANT comment (sufficient only because the editor has no drag-to-reorder; make it positional if added).
+
 ## ✅ v1.45.0 — FLOW EDITOR: card editor shows the rainbow flow while editing (Phase 2) (2026-06-20)
 - User: the rendered transclusion shows the Indent-Rainbow flow (v1.41/42) but the EDITOR was a plain textarea (no markers/
   guides). Replaced it with a per-row DOM outline editor in `_editCardBody`.
