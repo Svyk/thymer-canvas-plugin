@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.33.0 — image PASTE fixed; drag-from-panel proven blocked (2026-06-19, live chrome probes)
+The two EAPI probes, resolved empirically by attaching document-level drag/paste loggers in the debug Chrome:
+- **Image paste — FIXED.** Root cause: the canvas `onKey` handler intercepts Cmd+V and `preventDefault`s it → the native
+  `paste` event never fires → the `document` paste listener never runs while the canvas is focused. Fix: `_paste()` now,
+  when the internal canvas clipboard is empty, calls `_pasteSystemImage()` → `navigator.clipboard.read()` (the Cmd+V keydown
+  is a valid user gesture) → drops any image (incl. SVG) at the viewport centre. Web: one-time `clipboard-read` permission
+  prompt, then works (verified `hasClipboardRead`+secure+`permission:prompt` live). Internal element-copy still takes
+  priority (paste your last canvas copy first; system image when the internal clipboard is empty).
+- **Drag-from-panel — GENUINELY BLOCKED (not buildable).** Proven live: Thymer note lines (`.listitem`) are NOT
+  HTML5-draggable (`draggable:false`, no `draggable` attr); dragging one fires NO `dragstart` and places NO `dataTransfer`/
+  GUID. The 99 `draggable="true"` nodes are sidebar collection items, not note lines/records. So there is nothing to read —
+  it's a true Thymer editor-API gap (EAPI-4), exactly as the roadmap predicted. No DOM hack can recover data never emitted.
+
 ## ✅ v1.32.0 — Enter-to-edit + drag-perf static-layer cache (2026-06-19)
 Two user-reported items.
 - **Enter / F2 → edit the selected text element** (`onKey`): select a text box with ONE click (no navigation — first click

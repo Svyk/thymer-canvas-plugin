@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.32.0';
+const PLEXUS_VERSION = '1.33.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -1952,7 +1952,22 @@ class CanvasView {
     c.startBinding = null; c.endBinding = null; return c; // image fileId is shared on purpose
   }
   _copy() { this.plugin._clipboard = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map((el) => JSON.parse(JSON.stringify(el))); }
-  _paste() { const cb = this.plugin._clipboard; if (!cb || !cb.length) return; this.selected.clear(); for (const c of this._cloneBatch(cb, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
+  _paste() { const cb = this.plugin._clipboard; if (cb && cb.length) { this.selected.clear(); for (const c of this._cloneBatch(cb, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); return; } this._pasteSystemImage(); }
+  // IMAGE PASTE: the onKey Cmd+V `preventDefault` suppresses the native `paste` event, so the document paste listener
+  // never fires while the canvas is focused. Read the system clipboard ourselves (the Cmd+V keydown is a valid user
+  // gesture for navigator.clipboard.read()) and drop any image at the viewport centre. Silent on denied / no-image.
+  async _pasteSystemImage() {
+    if (this.destroyed || !navigator.clipboard || !navigator.clipboard.read) return;
+    let items = null; try { items = await navigator.clipboard.read(); } catch (_e) { return; }
+    for (const it of (items || [])) {
+      const type = (it.types || []).find((t) => t && t.indexOf('image/') === 0); if (!type) continue;
+      let blob = null; try { blob = await it.getType(type); } catch (_e) {} if (!blob) continue;
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      try { if (type === 'image/svg+xml') { const txt = await blob.text(); this._addSvgAsImage(txt, c.x, c.y); } else await this._addImageFromFile(blob, c.x, c.y); } catch (_e) {}
+      try { this.plugin.ui.addToaster({ title: 'Image pasted onto the canvas.', dismissible: true }); } catch (_e) {}
+      return;
+    }
+  }
   _duplicate() { if (!this.selected.size) return; const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean); this.selected.clear(); for (const c of this._cloneBatch(els, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
   _selectAll() { this.selected = new Set(this.scene.elements.filter((x) => !x.isDeleted).map((x) => x.id)); this.dirty = true; }
   _topGroup(el) { return el.groupIds && el.groupIds.length ? el.groupIds[el.groupIds.length - 1] : null; }
