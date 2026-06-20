@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
+Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.17.0 — Minimap / radar navigator** (Tier 4). Corner overlay of the whole scene + draggable viewport rect;
+  click/drag teleports the camera. Auto-hidden when everything fits the viewport. Scene **dots cached offscreen**
+  (`_miniDots`, rebuilt only on commit/`_miniDirty`, cap 4000) → per-frame cost = blit + one viewport rect (respects the
+  speed hot path). Pure `pxcMiniFit` fit math (7/7 node asserts: round-trip, inset, aspect, null-on-empty). Teleport via
+  `_miniHit`/`_miniTeleport` in the existing pointer handlers (no new listeners/timers). Toggle command (`ti-map`,
+  validated). Review: 2 defects fixed (toggle persistence used a non-existent `_saveSettings` → `savePlexusSettings`;
+  viewport rect now clipped to the panel).
+
 ## ✅ v1.16.0 — BACKREF-SYNC: cross-client synced backref index (2026-06-19, plan: staged-finding-ritchie Phase D)
 The note→canvas backref ↗ index moves off per-device `localStorage` onto a **synced Thymer blob** so it persists +
 round-trips across the **desktop app AND Chrome web** (the user's explicit requirement).

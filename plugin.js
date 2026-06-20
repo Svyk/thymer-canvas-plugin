@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.16.0';
+const PLEXUS_VERSION = '1.17.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -632,6 +632,13 @@ function pxcBrefMigrate(raw) { // accepts the OLD flat {lineGuid:{drawing,…}} 
 }
 function pxcBrefFlatten(nested) { const flat = {}; for (const d in nested) { const sub = nested[d]; for (const lg in sub) { const e = sub[lg]; const cur = flat[lg]; if (!cur || (e.t || 0) >= (cur.t || 0)) flat[lg] = { drawing: d, el: e.el, label: e.label, t: e.t || 0 }; } } return flat; } // newest wins if a line is referenced by 2 drawings
 function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const lg in b[d]) { const eb = b[d][lg], ea = a[d][lg]; if (!ea || (eb.t || 0) >= (ea.t || 0)) a[d][lg] = eb; } } return a; }
+// MINIMAP: fit scene-bounds into a w×h panel with padding → {scale, ox, oy}; world (wx,wy) → mini-local (ox+wx*scale,
+// oy+wy*scale). Inverse: world = (miniLocal - o)/scale. Pure + node-tested.
+function pxcMiniFit(bounds, w, h, pad) {
+  if (!bounds || !(bounds.w > 0) || !(bounds.h > 0)) return null;
+  const iw = w - pad * 2, ih = h - pad * 2; const scale = Math.min(iw / bounds.w, ih / bounds.h);
+  return { scale, ox: pad + (iw - bounds.w * scale) / 2 - bounds.x * scale, oy: pad + (ih - bounds.h * scale) / 2 - bounds.y * scale };
+}
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
   if (el.text == null || el.text === '') return;
@@ -1985,6 +1992,7 @@ class CanvasView {
       const stp = this.plugin._settings || {};
       if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 2 && stp.panRightMouse)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; } // S3: right-mouse pan
       if (e.button !== 0) return;
+      { const rct = this.wrap.getBoundingClientRect(), mpx = e.clientX - rct.left, mpy = e.clientY - rct.top; if (this._miniHit(mpx, mpy)) { this._miniDragging = true; this._miniTeleport(mpx, mpy); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // MINIMAP teleport
       moved = false; down = this._worldAt(e);
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (this.tool === 'select') {
@@ -2034,6 +2042,7 @@ class CanvasView {
       try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true;
     };
     const onMove = (e) => {
+      if (this._miniDragging) { const rct = this.wrap.getBoundingClientRect(); this._miniTeleport(e.clientX - rct.left, e.clientY - rct.top); return; } // MINIMAP drag
       if (!mode) { // CANVAS-SEG hover: pointer cursor over an inline ref run (no drag in progress)
         if (this.tool === 'select' && !this.editingId && !this._present && !this._eyedrop) {
           const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
@@ -2065,6 +2074,7 @@ class CanvasView {
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
     };
     const onUp = (e) => {
+      if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
       if (!mode) return; clearLP(); // S10: a quick tap-release never triggers the long-press open
       if (mode === 'create' && created) {
         normRect(created);
@@ -4144,8 +4154,55 @@ class CanvasView {
       for (const id of this.selected) { if (id === this.editingId) continue; const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); } // #6: don't double the textarea outline while editing
       ictx.setLineDash([]);
     }
+    this._renderMinimap(ictx, d); // MINIMAP: radar overlay (auto-hidden when everything fits the viewport)
   }
+  // MINIMAP — a corner radar of the whole scene + a draggable viewport rect; click/drag teleports the camera. Scene
+  // DOTS are cached offscreen and rebuilt only on commit (_miniDirty); per-frame cost = blit + one viewport rect.
+  _miniRect() { const w = 178, h = 116, mg = 14; return { x: Math.max(8, this.cssW - w - mg), y: Math.max(8, this.cssH - h - mg), w, h }; }
+  _renderMinimap(ictx, d) {
+    const st = this.plugin._settings || {};
+    if (st.minimap === false || this._present || this.editingId) { this._miniMap = null; return; }
+    const b = this._sceneBounds(); if (!b || !(b.w > 0) || !(b.h > 0)) { this._miniMap = null; return; }
+    const camX = this.camera.x, camY = this.camera.y, vw = this.cssW / this.camera.zoom, vh = this.cssH / this.camera.zoom;
+    const offscreen = b.x < camX - 1 || b.y < camY - 1 || b.x + b.w > camX + vw + 1 || b.y + b.h > camY + vh + 1;
+    if (!offscreen) { this._miniMap = null; return; } // everything fits → no minimap
+    const r = this._miniRect(), pad = 8, mapp = pxcMiniFit(b, r.w, r.h, pad); if (!mapp) { this._miniMap = null; return; }
+    this._miniMap = { rect: r, map: mapp };
+    ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.save();
+    ictx.globalAlpha = 0.93; ictx.fillStyle = PXC_DARK ? 'rgba(20,24,33,1)' : 'rgba(255,255,255,1)';
+    ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(r.x * d, r.y * d, r.w * d, r.h * d, 8 * d); else ictx.rect(r.x * d, r.y * d, r.w * d, r.h * d);
+    ictx.fill(); ictx.lineWidth = 1 * d; ictx.strokeStyle = PXC_DARK ? '#333a4a' : '#d0d4dc'; ictx.stroke();
+    const key = r.w + 'x' + r.h + '@' + Math.round(mapp.scale * 1e4);
+    if (this._miniDirty || !this._miniDots || this._miniKey !== key) { this._rebuildMiniDots(r, mapp, d); this._miniDirty = false; this._miniKey = key; }
+    ictx.save(); ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(r.x * d, r.y * d, r.w * d, r.h * d, 8 * d); else ictx.rect(r.x * d, r.y * d, r.w * d, r.h * d); ictx.clip(); // clip dots AND viewport rect to the panel (the rect can fall outside when panned away)
+    if (this._miniDots) ictx.drawImage(this._miniDots, r.x * d, r.y * d);
+    const vx = r.x + mapp.ox + camX * mapp.scale, vy = r.y + mapp.oy + camY * mapp.scale;
+    ictx.lineWidth = 1.5 * d; ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = 'rgba(124,92,255,0.14)';
+    ictx.fillRect(vx * d, vy * d, vw * mapp.scale * d, vh * mapp.scale * d); ictx.strokeRect(vx * d, vy * d, vw * mapp.scale * d, vh * mapp.scale * d);
+    ictx.restore();
+    ictx.restore();
+  }
+  _rebuildMiniDots(r, mapp, d) {
+    const cv = this._miniDots || (this._miniDots = document.createElement('canvas'));
+    cv.width = Math.max(1, Math.ceil(r.w * d)); cv.height = Math.max(1, Math.ceil(r.h * d));
+    const c = cv.getContext('2d'); c.setTransform(d, 0, 0, d, 0, 0); c.clearRect(0, 0, r.w, r.h); c.globalAlpha = 0.62;
+    let n = 0; const cap = 4000;
+    for (const el of this.scene.elements) { if (el.isDeleted) continue; if (++n > cap) break;
+      const x = mapp.ox + (el.x || 0) * mapp.scale, y = mapp.oy + (el.y || 0) * mapp.scale;
+      const w = Math.max(1.4, Math.abs(el.width || 0) * mapp.scale), h = Math.max(1.4, Math.abs(el.height || 0) * mapp.scale);
+      c.fillStyle = el.type === 'frame' ? 'rgba(154,160,166,0.7)' : (el.strokeColor || '#7c5cff');
+      c.fillRect(x, y, w, h);
+    }
+  }
+  _miniTeleport(px, py) {
+    const mm = this._miniMap; if (!mm) return; const r = mm.rect, mapp = mm.map;
+    const wx = (px - r.x - mapp.ox) / mapp.scale, wy = (py - r.y - mapp.oy) / mapp.scale;
+    this.camera.x = wx - (this.cssW / this.camera.zoom) / 2; this.camera.y = wy - (this.cssH / this.camera.zoom) / 2;
+    this._lastCamChange = this._now(); this.dirty = true; this._saveCamera();
+  }
+  _miniHit(px, py) { const mm = this._miniMap; if (!mm) return false; const r = mm.rect; return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h; }
   scheduleSave() {
+    this._miniDirty = true; // MINIMAP: scene changed → rebuild dot cache on next paint
     this._cacheValid = false; this._gridDirty = true; // content changed → rebuild render cache + spatial index lazily
     // edit save: record an undo step (push the prior committed state, snapshot the new one)
     if (this._committed !== undefined) { this._undo.push(this._committed); this._trimUndo(); this._redo = []; }
@@ -4267,6 +4324,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle minimap', icon: 'ti-map', onSelected: () => { if (!this._settings) this._settings = {}; this._settings.minimap = this._settings.minimap === false; try { savePlexusSettings(this._settings); } catch (_e) {} for (const v of this._views) { v._miniDirty = true; v.dirty = true; } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
@@ -5063,6 +5121,16 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // MINIMAP: fit math round-trips (world↔mini), respects padding, and centres bounds in the panel.
+      miniMapTest: () => {
+        const b = { x: -100, y: 50, w: 400, h: 200 }, W = 178, H = 116, pad = 8;
+        const m = pxcMiniFit(b, W, H, pad);
+        const toMini = (wx, wy) => ({ x: m.ox + wx * m.scale, y: m.oy + wy * m.scale });
+        const toWorld = (mx, my) => ({ x: (mx - m.ox) / m.scale, y: (my - m.oy) / m.scale });
+        const p = toMini(b.x, b.y), q = toMini(b.x + b.w, b.y + b.h), rt = toWorld(p.x, p.y);
+        const inset = p.x >= pad - 0.01 && q.x <= W - pad + 0.01 && p.y >= pad - 0.01 && q.y <= H - pad + 0.01;
+        return { scale: m.scale, inset, ok: !!m && m.scale > 0 && inset && Math.abs(rt.x - b.x) < 1e-6 && Math.abs(rt.y - b.y) < 1e-6 && pxcMiniFit({ x: 0, y: 0, w: 0, h: 0 }, W, H, pad) === null };
       },
       // BACKREF-SYNC: per-drawing sub-maps — migrate (flat→nested), flatten (newest wins), merge, prune (GC).
       brefStoreTest: () => {
