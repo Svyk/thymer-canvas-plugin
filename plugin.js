@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.18.0';
+const PLEXUS_VERSION = '1.19.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2656,6 +2656,23 @@ class CanvasView {
     const hint = (done === 0 && unmatched > 0) ? ' — “' + value + '” isn’t a valid choice for “' + name + '”' : '';
     try { this.plugin.ui.addToaster({ title: 'Set “' + name + '” = “' + value + '” on ' + done + '/' + cards.length + ' card(s)' + hint + '.', dismissible: true }); } catch (_e) {}
   }
+  // QUICK-CAPTURE: type a title → create a typed record + drop a live card at the viewport centre. Reuses the
+  // last-used collection (localStorage) for a true one-step capture; falls back to the collection picker the first time.
+  async _quickCapture() {
+    const title = await this._promptText('Quick-capture — new record title:', '');
+    if (!title) return;
+    let col = null, lastGuid = null;
+    try { lastGuid = localStorage.getItem('plexus_create_col'); } catch (_e) {}
+    if (lastGuid) { try { const cols = await this.plugin.data.getAllCollections(); col = (cols || []).find((c) => { try { return (c.getGuid && c.getGuid()) === lastGuid; } catch (_e) { return false; } }) || null; } catch (_e) {} }
+    if (!col) col = await this._pickCollection('Create “' + title + '” in collection:');
+    if (!col) return;
+    let guid = null; try { guid = col.createRecord(title); } catch (_e) {}
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the record.', dismissible: true }); } catch (_e) {} return; }
+    await getRecordPoll(this.plugin, guid, 8);
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    this._invalidateRec(guid); this._insertRecordCard(guid, c.x, c.y); // inserts + selects + saves; card pulls title/lines live
+    try { this.plugin.ui.addToaster({ title: 'Captured “' + title + '” — a live record card.', dismissible: true }); } catch (_e) {}
+  }
   _clipText(ctx, s, maxW) { s = String(s == null ? '' : s); if (ctx.measureText(s).width <= maxW) return s; while (s.length && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); return s + '…'; }
   _drawRecordCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
@@ -4372,6 +4389,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle minimap', icon: 'ti-map', onSelected: () => { if (!this._settings) this._settings = {}; this._settings.minimap = this._settings.minimap === false; try { savePlexusSettings(this._settings); } catch (_e) {} for (const v of this._views) { v._miniDirty = true; v.dirty = true; } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Bulk set property (selected cards)', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._bulkBrush(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Quick-capture (new record card)', icon: 'ti-plus', onSelected: () => { const v = this._activeView(); if (v) v._quickCapture(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.

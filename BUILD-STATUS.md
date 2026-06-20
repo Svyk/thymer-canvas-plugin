@@ -2,6 +2,10 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.19.0 — Quick-capture command bar** (Tier 3). "Plexus: Quick-capture" → type a title → creates a typed record in
+  the remembered last-used collection (else the picker) → drops a live record card at the viewport centre. Pure reuse of
+  reviewed paths (`_promptText`/`_pickCollection`/`createRecord`/`getRecordPoll`/`_insertRecordCard`); structured-from-birth
+  (the card immediately joins Brain edges/queries/styling). Command on `ti-plus`. Adversarial review = **CLEAN**.
 - **v1.18.0 — Bulk Property Brush** (Tier 2). Marquee-select record cards → "Plexus: Bulk set property" → `Property: value`
   writes ONE typed property across all selected records (spreadsheet fill-down on real records). **Schema-safe routing
   (review-hardened, TS-6):** there's no runtime `PluginProperty.type`, so route only by CONFIDENT signals — `choices()`
