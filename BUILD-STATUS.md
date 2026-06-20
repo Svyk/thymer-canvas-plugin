@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.43.0 — PAN→PAUSE→PAN root cause: settle invalidated the margin cache (2026-06-20)
+- User hint (the key): continuous panning is smooth; the glitch only happens on **pan → pause → pan**. Instrumented the
+  exact cycle live (longtask observer + per-frame timing) → **ZERO long tasks** → it's NOT a CPU hitch, it's a VISUAL
+  fallback to the blank-edged viewport cache.
+- ROOT CAUSE: `_refreshCache` (fires on every settle) set `_marginValid=false`, and `useMargin` demanded an EXACT
+  `_marginCam===_cacheCam` match. The re-warm is debounced AND `_warmMarginCache` bails while the camera is moving. So:
+  pan→pause (settle invalidates the margin) → resume within the re-warm window → blit drops to the exact-viewport cache →
+  blank/re-rendered edges. Continuous panning never settles → margin stays valid → smooth. Exactly the reported symptom.
+- FIX (first-principles — the margin is a CONTENT snapshot, not a camera-locked one):
+  1. `_refreshCache` no longer invalidates the margin (a camera settle doesn't change content). Content changes self-heal
+     (`_cacheValid=false` → next full render → `_refreshCache` → re-warm).
+  2. New `_marginCovers()` — blit uses the margin for ANY same-zoom camera whose view is within ±M screen px of `_marginCam`
+     (node-proven: |dxScreen|≤M-1 keeps the rounded blit covering the viewport; 0 false-positives over 3606 cases).
+     `useMargin` now gates on coverage, not exact-camera equality.
+  3. Re-center faster after a pause: warm debounce 200→90ms, idle-bail 160→110ms (still off the hot path — bails during
+     active motion). Resize now also invalidates the margin (its dims derive from cssW/cssH).
+- Stacks with v1.40 (trackpad arms the blit) + v1.39 (crisp rounded blit) + v1.38 (margin cache). node-tested coverage
+  predicate; couldn't self-verify live (shared-Chrome tab churn) — user reinstalls + verifies pan→pause→pan.
+
 ## ✅ v1.42.0 — transclusion NESTING root cause: depth from parent_guid, not getChildren() (2026-06-20)
 - User: transcluded outline rows render FLAT (no visible indentation) even though the record shows clear nesting.
 - ROOT CAUSE (proven via live `get_line_items` on record 1ARSM7792BTCP422K0193X7M3H): `rec.getLineItems()` returns the

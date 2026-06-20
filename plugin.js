@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.42.0';
+const PLEXUS_VERSION = '1.43.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1602,7 +1602,7 @@ class CanvasView {
     if (scroller && scroller.scrollHeight > scroller.clientHeight + 1) { h = Math.max(160, h - (scroller.scrollHeight - scroller.clientHeight)); this.wrap.style.height = h + 'px'; }
     const w = this.wrap.clientWidth || this.host.clientWidth || 600;
     for (const cv of [this.staticCv, this.iCv]) { cv.width = Math.round(w * this.dpr); cv.height = Math.round(h * this.dpr); cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
-    this.cssW = w; this.cssH = h; this._cacheValid = false; this._dragLayerValid = false; // canvas resized → both caches stale (rebuilt on next crisp render)
+    this.cssW = w; this.cssH = h; this._cacheValid = false; this._dragLayerValid = false; this._marginValid = false; // canvas resized → all caches stale, incl. the margin (its dimensions derive from cssW/cssH)
   }
   _byId(id) { return this.scene.elements.find((e) => e.id === id && !e.isDeleted); }
   _singleSel() { if (this.selected.size !== 1) return null; return this._byId([...this.selected][0]); }
@@ -1826,7 +1826,7 @@ class CanvasView {
       if (this._cacheCv.width !== this.staticCv.width || this._cacheCv.height !== this.staticCv.height) { this._cacheCv.width = this.staticCv.width; this._cacheCv.height = this.staticCv.height; }
       const cctx = this._cacheCv.getContext('2d'); cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height); cctx.drawImage(this.staticCv, 0, 0);
       this._cacheCam = { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom }; this._cacheValid = true;
-      this._marginValid = false; this._scheduleMarginWarm(); // PAN: (re)warm the margin-padded cache for smoother panning — debounced, off the edit hot path
+      this._scheduleMarginWarm(); // PAN: re-CENTER the margin cache at the new camera (debounced). DON'T invalidate the existing one — a camera settle doesn't change CONTENT, and the old margin stays usable for any nearby camera via _marginCovers(). This is the pan→pause→pan fix: previously this set _marginValid=false, so resuming a pan inside the 200ms re-warm window dropped to the blank-edged viewport cache. Content changes self-heal (they set _cacheValid=false → next full render → _refreshCache → re-warm with fresh content).
     } catch (_e) { this._cacheValid = false; }
   }
   // PAN MARGIN CACHE: render the scene into a SEPARATE, margin-padded canvas (DEBOUNCED — only after the view goes idle, so
@@ -1834,10 +1834,15 @@ class CanvasView {
   // blank/re-rendered edges until you pan past the margin. The display path + the viewport `_cacheCv` are untouched (this is
   // additive; the blit falls back to the viewport cache when this isn't warm). Temporarily shifts this.camera so per-element
   // painters stay consistent with the cache transform, then restores it.
-  _scheduleMarginWarm() { if (this._marginT) clearTimeout(this._marginT); this._marginT = setTimeout(() => { this._marginT = null; try { this._warmMarginCache(); } catch (_e) {} }, 200); }
+  _scheduleMarginWarm() { if (this._marginT) clearTimeout(this._marginT); this._marginT = setTimeout(() => { this._marginT = null; try { this._warmMarginCache(); } catch (_e) {} }, 90); } // 90ms (was 200): re-center the margin sooner after a pause so a pan→pause→pan burst keeps full coverage. Still off the hot path — _warmMarginCache bails while the camera is actively moving.
+  // PAN: is the warm margin cache geometrically usable for the CURRENT camera? It's a content snapshot rendered at _marginCam
+  // with M px of padding each side, so it covers ANY same-zoom camera whose view sits within ±M screen px of _marginCam
+  // (node-proven: |dxScreen|≤M keeps the rounded blit covering the viewport). Replaces the old exact `_marginCam===cc` match —
+  // which dropped to the blank-edged viewport cache after every settle (the pan→pause→pan glitch).
+  _marginCovers() { const mc = this._marginCam; if (!mc || mc.zoom !== this.camera.zoom) return false; const M = this._marginPx || 0; if (M <= 1) return false; return Math.abs((this.camera.x - mc.x) * this.camera.zoom) <= M - 1 && Math.abs((this.camera.y - mc.y) * this.camera.zoom) <= M - 1; }
   _warmMarginCache() {
     if (this.renderer && this.renderer.kind === 'webgl') return; // WebGL: the margin is never shown (the display blit is glMode-gated) and renderer.begin would touch the on-screen GL layer with the shifted camera — don't warm it
-    if (this.destroyed || this.editingId || this._elDrag || this._camAnim || (this._now() - (this._lastCamChange || 0) < 160)) { this._scheduleMarginWarm(); return; } // not stable yet → retry
+    if (this.destroyed || this.editingId || this._elDrag || this._camAnim || (this._now() - (this._lastCamChange || 0) < 110)) { this._scheduleMarginWarm(); return; } // not stable yet → retry (110ms idle, was 160 — re-center the margin sooner after a pause)
     const M = 280, d = this.dpr, z = this.camera.zoom;
     const W = Math.round((this.cssW + 2 * M) * d), H = Math.round((this.cssH + 2 * M) * d);
     if (!this._marginCv) this._marginCv = document.createElement('canvas');
@@ -4730,7 +4735,7 @@ class CanvasView {
       if (!dragMovers && moving && this._cacheValid && this._cacheCv && camMoved && this.camera.zoom >= cc.zoom * 0.985) {
         // PAN: blit the margin-padded cache when it's warm + at the same camera as the viewport cache (so the revealed
         // edges show cached content instead of blank); otherwise fall back to the viewport cache (M=0 = the old blit).
-        const useMargin = this._marginValid && this._marginCv && this._marginCam && this._marginCam.x === cc.x && this._marginCam.y === cc.y && this._marginCam.zoom === cc.zoom;
+        const useMargin = this._marginValid && this._marginCv && this._marginCovers(); // COVERAGE not exact-match: usable for any same-zoom camera within ±M of _marginCam, so pan→pause→pan keeps the padded cache instead of dropping to the blank-edged viewport cache
         const blitCam = useMargin ? this._marginCam : cc, blitCv = useMargin ? this._marginCv : this._cacheCv, M = useMargin ? (this._marginPx || 0) : 0;
         const o = pxcMarginBlitOffset(blitCam, this.camera, M, d);
         sctx.setTransform(o.s, 0, 0, o.s, Math.round(o.tx), Math.round(o.ty)); sctx.drawImage(blitCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0); // ROUND to integer device px: a fractional blit offset makes drawImage interpolate (the blur seen while panning); pixel-aligned = crisp
