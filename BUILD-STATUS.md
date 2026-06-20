@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.52.0 — connection backref shows the connection's NAME ("connection: Test") (2026-06-20)
+- User (Image #31/#32): the note-side "Canvas References" entry read the generic "connection" but should reflect what the
+  connection actually SAYS ("Test"). Deduction: if "Test" were a midpoint label, v1.51's reindex would already have shown it
+  via `labelByConn` — it showed "connection", so "Test" is a connected TEXT NODE (an endpoint), which `labelByConn`
+  (midpoint-labels only) never inspects.
+- `_reindexBackrefs` connection pass now derives a `connName` = "what the connection says": the midpoint label if present,
+  ELSE the text of a bound text endpoint (`type==='text' && !midBinding`, runs-aware, whitespace-collapsed, 40-char cap with
+  ellipsis); the note side reads `connection: <name>` (bare "connection" only when truly unnamed). node-tested 7 scenarios
+  (midpoint label, text endpoint, unnamed both sides, text→linecard, label-beats-endpoint, long-truncate, runs-only text).
+- NEXT: Phase 4 — target a SPECIFIC body line WITHIN a record card + a REGION of an image (the blue flag), per Image #25.
+
 ## ✅ v1.51.0 — CONNECTION → BACKREF: a connection lights up the note side (Connections Phase 3) (2026-06-20)
 - A connection (arrow/line) bound to a record/line card now registers a back-reference, so the note/record gets the `↗`
   flag + cinematic flyback — using the EXISTING machinery, NO new note-side code.

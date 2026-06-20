@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.51.0';
+const PLEXUS_VERSION = '1.52.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3937,7 +3937,15 @@ class CanvasView {
       // guid (label = the connector's midpoint label). Opening that record/line then shows the ↗ flag + flyback to the
       // connection (via the existing _scanRefBadges/_openBackrefPicker/_flashAnchor). Both endpoints register (bidirectional).
       if (el.type === 'arrow' || el.type === 'line') {
-        const lbl = labelByConn.get(el.id) || 'connection';
+        // Connection display name = "what the connection says": the midpoint label if there is one, ELSE the text of a
+        // bound text endpoint (the user connected a "Test" text box straight to the card → the note side should still read
+        // "connection: Test"). Either way the note side reads "connection: <name>"; bare "connection" only when truly unnamed.
+        let connName = labelByConn.get(el.id) || '';
+        if (!connName) for (const b of [el.startBinding, el.endBinding]) {
+          if (!b || !b.elementId) continue; const e = byId.get(b.elementId);
+          if (e && e.type === 'text' && !e.midBinding) { const tx = (e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '') || '').replace(/\s+/g, ' ').trim(); if (tx) { connName = tx.length > 40 ? tx.slice(0, 39) + '…' : tx; break; } }
+        }
+        const lbl = connName ? ('connection: ' + connName) : 'connection';
         for (const b of [el.startBinding, el.endBinding]) {
           if (!b || !b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
           if (t.type === 'record' && t.recordGuid) put(t.recordGuid, el.id, lbl, 'record');
