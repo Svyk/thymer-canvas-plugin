@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.49.0';
+const PLEXUS_VERSION = '1.50.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2086,6 +2086,19 @@ class CanvasView {
     return [{ x: cx, y: y - o }, { x: x + w + o, y: cy }, { x: cx, y: y + h + o }, { x: x - o, y: cy }];
   }
   _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
+  // CONNECT (forgiving end-bind): the CLOSEST connectable element whose bbox is within `radiusPx` (screen px) of a world
+  // point — so dragging a connection TOWARD a card snaps to it even if you release a bit short, not only when you land
+  // exactly inside it. Used as the fallback after the precise _bindableAt (which still wins when you're truly over a target).
+  _nearestBindable(wx, wy, radiusPx, excludeId) {
+    const r = (radiusPx || 30) / this.camera.zoom; let best = null, bestD = Infinity;
+    for (const el of this._gridTopFirst(wx - r, wy - r, r * 2, r * 2)) {
+      if (el.isDeleted || el.id === excludeId || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue;
+      const x0 = Math.min(el.x, el.x + (el.width || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), y1 = Math.max(el.y, el.y + (el.height || 0));
+      const dx = Math.max(x0 - wx, 0, wx - x1), dy = Math.max(y0 - wy, 0, wy - y1), d = Math.hypot(dx, dy);
+      if (d <= r && d < bestD) { bestD = d; best = el; }
+    }
+    return best;
+  }
   _updateBindings() {
     // PERF: runs on EVERY pointermove during a drag. ONE O(n) scan collects bound arrows + connection-label text elements;
     // EARLY-RETURN when nothing is bound (the common case → no per-frame cost on connection-free scenes). The idMap (id→el)
@@ -2376,7 +2389,7 @@ class CanvasView {
         freedrawBBox(created); this.dirty = true; return;
       }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
-      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the bindable shape under the arrow end ('connect' = a nub-drag connection, same draw)
+      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id) || this._nearestBindable(w.x, w.y, 44, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target, not only when exactly over it). 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
@@ -2398,7 +2411,7 @@ class CanvasView {
         if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
         else {
           const lp = created.points[created.points.length - 1];
-          const s1 = this._bindableAt(lp[0], lp[1], created.id);
+          const s1 = this._bindableAt(lp[0], lp[1], created.id) || this._nearestBindable(lp[0], lp[1], 44, created.id); // forgiving end-bind: snap to a nearby target if not released exactly on it (Image #30: end floated below the card)
           if (mode !== 'connect') { const s0 = this._bindableAt(created.points[0][0], created.points[0][1], created.id); if (s0) created.startBinding = { elementId: s0.id }; } // connect mode: startBinding is the source element (the nub sits OUTSIDE it, so don't recompute s0)
           if (s1) created.endBinding = { elementId: s1.id };
           this._updateBindings();

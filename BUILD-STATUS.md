@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.50.0 — forgiving connection end-bind (snap to a nearby target) (2026-06-20)
+- User (Image #30): a connection's end floated ~40px below the card — it only bound when released EXACTLY on the target.
+- `_nearestBindable(wx, wy, radiusPx, excludeId)`: the CLOSEST connectable element whose bbox is within `radiusPx` (screen
+  px, zoom-scaled) of the point (distance-to-bbox, 0 if inside; excludes arrow/line/frame). Used as the FALLBACK after the
+  precise `_bindableAt` in BOTH the live bind-hover (onMove linear/connect) and the release-bind (onUp) at **44px** — so
+  dragging a connection TOWARD a card snaps to it, and the dashed hover indicator shows the snap target. node-tested
+  (near binds, far rejects, inside binds, nearest-of-competing wins, zoom-scaled).
+- NEXT: Phase 3 (in progress) — connection → backref + line/image-region targeting.
+
 ## ✅ v1.49.0 — edge-drag-to-connect (Heptabase ergonomic) + label-editor polish (Phase 2 follow-up) (2026-06-20)
 - User feedback on Phase 2: labels look great, but (a) drawing an arrow from a circle to a card "didn't work" (connTest
   PASSES → binding is fine; the real gap is the ERGONOMIC — they expected to drag from an element to connect, not pick the
