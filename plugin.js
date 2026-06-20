@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.17.0';
+const PLEXUS_VERSION = '1.18.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -638,6 +638,19 @@ function pxcMiniFit(bounds, w, h, pad) {
   if (!bounds || !(bounds.w > 0) || !(bounds.h > 0)) return null;
   const iw = w - pad * 2, ih = h - pad * 2; const scale = Math.min(iw / bounds.w, ih / bounds.h);
   return { scale, ox: pad + (iw - bounds.w * scale) / 2 - bounds.x * scale, oy: pad + (ih - bounds.h * scale) / 2 - bounds.y * scale };
+}
+// BULK PROPERTY BRUSH: classify a typed value so the bulk write picks the right setter (a choice prop always uses
+// setChoice regardless; for non-choice props this routes date→DateTime, number→set(Number), else text). Pure + tested.
+function pxcToIsoDate(s) {
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s); if (m) return m[1] + '-' + String(+m[2]).padStart(2, '0') + '-' + String(+m[3]).padStart(2, '0');
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s); if (m) return m[3] + '-' + String(+m[1]).padStart(2, '0') + '-' + String(+m[2]).padStart(2, '0');
+  return null;
+}
+function pxcClassifyValue(v) {
+  const s = String(v == null ? '' : v).trim();
+  const iso = pxcToIsoDate(s); if (iso) return { kind: 'date', iso };
+  if (/^-?\d+(\.\d+)?$/.test(s)) return { kind: 'number', num: Number(s) };
+  return { kind: 'text', text: s };
 }
 function drawText(ctx, el) {
   if (el.runs && el.runs.length) { drawRuns(ctx, el); return; } // CANVAS-SEG: inline-run text
@@ -2610,6 +2623,39 @@ class CanvasView {
     return null;
   }
   _invalidateRec(guid) { if (this._recCache && this._recCache.has(guid)) { this._recCache.delete(guid); this.dirty = true; } }
+  // BULK PROPERTY BRUSH: set ONE typed property to the same value across all selected record cards in one gesture —
+  // spreadsheet fill-down on REAL records (a choice prop uses setChoice; date→DateTime; number→set(Number); else text).
+  async _bulkBrush() {
+    const cards = [...this.selected].map((id) => this._byId(id)).filter((e) => e && (e.type === 'record' || e.type === 'board') && e.recordGuid);
+    if (!cards.length) { try { this.plugin.ui.addToaster({ title: 'Select one or more record cards first (marquee/shift-click).', dismissible: true }); } catch (_e) {} return; }
+    const raw = await this._promptText('Set a property on ' + cards.length + ' card(s) — “Property: value”:', '');
+    if (!raw) return;
+    const m = String(raw).match(/^\s*([^:]+?)\s*:\s*([\s\S]+?)\s*$/);
+    if (!m) { try { this.plugin.ui.addToaster({ title: 'Use the form  Property: value  (e.g. Status: Done).', dismissible: true }); } catch (_e) {} return; }
+    const name = m[1], value = m[2], cls = pxcClassifyValue(value);
+    let done = 0, unmatched = 0;
+    for (const card of cards) {
+      try {
+        const rec = await this.plugin.data.getRecord(card.recordGuid); if (!rec || !rec.prop) continue;
+        const p = rec.prop(name); if (!p) continue;
+        // Route by DECLARED type, not by value (TS-6): writing a Number/DateTime object onto a text field corrupts it,
+        // and there's no runtime PluginProperty.type. Confident signals only: choices()→choice; a CURRENT date value
+        // confirms a datetime prop; otherwise write the RAW STRING and let Thymer coerce per the prop's own type.
+        let opts = null; try { opts = p.choices && p.choices(); } catch (_e) {}
+        let ok = false;
+        if (opts && opts.length) { let r = false; try { r = p.setChoice(value); } catch (_e) {} if (r === false) unmatched++; else ok = true; } // choice → replace selection by label
+        else {
+          let curDate = null; try { curDate = p.date && p.date(); } catch (_e) {}
+          if (curDate != null && cls.kind === 'date') { try { p.set(DateTime.parseDateTimeString(cls.iso).value()); ok = true; } catch (_e) { try { p.set(value); ok = true; } catch (_e2) {} } } // confirmed datetime → typed write
+          else { try { p.set(value); ok = true; } catch (_e) {} } // SAFE default: raw string (never a forced Number/object onto an unconfirmed type)
+        }
+        if (ok) { done++; this._invalidateRec(card.recordGuid); }
+      } catch (_e) {}
+    }
+    this.dirty = true;
+    const hint = (done === 0 && unmatched > 0) ? ' — “' + value + '” isn’t a valid choice for “' + name + '”' : '';
+    try { this.plugin.ui.addToaster({ title: 'Set “' + name + '” = “' + value + '” on ' + done + '/' + cards.length + ' card(s)' + hint + '.', dismissible: true }); } catch (_e) {}
+  }
   _clipText(ctx, s, maxW) { s = String(s == null ? '' : s); if (ctx.measureText(s).width <= maxW) return s; while (s.length && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); return s + '…'; }
   _drawRecordCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
@@ -4325,6 +4371,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Schedule card (re-date in place)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._scheduleCard(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle minimap', icon: 'ti-map', onSelected: () => { if (!this._settings) this._settings = {}; this._settings.minimap = this._settings.minimap === false; try { savePlexusSettings(this._settings); } catch (_e) {} for (const v of this._views) { v._miniDirty = true; v.dirty = true; } } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Bulk set property (selected cards)', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._bulkBrush(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
@@ -5121,6 +5168,19 @@ class Plugin extends AppPlugin {
         const got = this._lookupBackref(k);
         try { this._brefPruneDrawing('__pxc_test_D__'); } catch (_e) {}
         return { got, ok: !!got && got.drawing === '__pxc_test_D__' && got.el === 'E' && got.label === 'L' };
+      },
+      // BULK PROPERTY BRUSH: value classification routes the right setter for non-choice props.
+      bulkBrushTest: () => {
+        const c = pxcClassifyValue, iso = pxcToIsoDate;
+        const a = c('Done'), b = c('2026-07-01'), d = c('7/1/2026'), e = c('42'), f = c('-3.5'), g = c('  Hello world ');
+        return { a: a.kind, b: b.iso, d: d.iso, e: e.num, ok:
+          a.kind === 'text' && a.text === 'Done' &&
+          b.kind === 'date' && b.iso === '2026-07-01' &&
+          d.kind === 'date' && d.iso === '2026-07-01' &&
+          e.kind === 'number' && e.num === 42 &&
+          f.kind === 'number' && f.num === -3.5 &&
+          g.kind === 'text' && g.text === 'Hello world' &&
+          iso('2026-7-1') === '2026-07-01' && iso('not a date') === null };
       },
       // MINIMAP: fit math round-trips (world↔mini), respects padding, and centres bounds in the panel.
       miniMapTest: () => {

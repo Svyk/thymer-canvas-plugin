@@ -2,6 +2,14 @@
 
 ## 🆕 Phase E — net-new features (staged-finding-ritchie, user-approved all 4 tiers) — IN PROGRESS
 Each is fully-native, no editor API; node-verified + adversarially reviewed like Phases A–D.
+- **v1.18.0 — Bulk Property Brush** (Tier 2). Marquee-select record cards → "Plexus: Bulk set property" → `Property: value`
+  writes ONE typed property across all selected records (spreadsheet fill-down on real records). **Schema-safe routing
+  (review-hardened, TS-6):** there's no runtime `PluginProperty.type`, so route only by CONFIDENT signals — `choices()`
+  (len-gated) → `setChoice` (replace); a CURRENT `date()` value confirms datetime → `DateTime.parseDateTimeString().value()`;
+  **everything else → raw `p.set(string)`** (Thymer coerces per the prop's own type — never forces a Number/DateTime
+  object onto an unconfirmed-type field, which was the corruption vector). Per-card try/catch (one failure doesn't abort),
+  `done/total` + choice-not-found hint. Pure `pxcClassifyValue`/`pxcToIsoDate` (9/9 node asserts). Command on `ti-checkbox`.
+  Review: 3 defects fixed (date-on-non-datetime corruption, false `&& p.number` type-guard, choice-mismatch feedback).
 - **v1.17.0 — Minimap / radar navigator** (Tier 4). Corner overlay of the whole scene + draggable viewport rect;
   click/drag teleports the camera. Auto-hidden when everything fits the viewport. Scene **dots cached offscreen**
   (`_miniDots`, rebuilt only on commit/`_miniDirty`, cap 4000) → per-frame cost = blit + one viewport rect (respects the
