@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.52.0';
+const PLEXUS_VERSION = '1.53.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1509,6 +1509,8 @@ class CanvasView {
     this.tool = 'select'; this.selected = new Set();
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
+    this._lineRects = new Map(); // CONNECTIONS Phase 4: cardId → [{lineGuid, dy, h}] body-line bands (relative to card top, captured each raster) — line-level connection targeting
+    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] — which lines/regions are CURRENT connection targets (the blue flag + region highlight); rebuilt in _updateBindings
     this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
   }
   mount() {
@@ -1714,6 +1716,39 @@ class CanvasView {
   }
   // The region's world outline — the freehand polygon if present, else the rectangle quad.
   _regionShapeWorld(el, frac, fracPoly) { return (fracPoly && fracPoly.length >= 3) ? this._imgRegionPolyWorld(el, fracPoly) : this._imgRegionQuad(el, frac); }
+  // ── CONNECTIONS Phase 4: line-level (record-card body line) + image-region connection sub-targets ──
+  // World rect of one body line of a record card. dy is RELATIVE to the card top (captured each raster) so a MOVE tracks
+  // without a re-raster; null when the card hasn't rastered or the line scrolled out of the captured window.
+  _lineRectWorld(el, lineGuid) {
+    if (!el || el.type !== 'record' || !lineGuid || el.angle) return null; // rotated card → degrade to whole-card binding (axis-aligned band would misplace the endpoint/flag); whole-card path is rotation-naive but correct
+    const bands = this._lineRects.get(el.id); if (!bands) return null;
+    const b = bands.find((z) => z.lineGuid === lineGuid); if (!b) return null;
+    return { x: el.x, y: el.y + b.dy, w: el.width, h: b.h };
+  }
+  // Which body line (lineGuid) of a record card is under a world point — null over the title / below the last row / outside /
+  // on a rotated card (degrade to whole-card binding so the endpoint + flag stay consistent with _lineRectWorld).
+  _lineGuidAtCard(el, wx, wy) {
+    if (!el || el.type !== 'record' || el.angle) return null;
+    const bands = this._lineRects.get(el.id); if (!bands || !bands.length) return null;
+    if (wx < el.x || wx > el.x + el.width) return null;
+    for (const b of bands) if (wy >= el.y + b.dy && wy <= el.y + b.dy + b.h) return b.lineGuid;
+    return null;
+  }
+  // The pseudo-shape bindPoint should route an endpoint to: a specific body line, a marked image region, else the whole element.
+  _bindTargetShape(binding, el) {
+    if (binding && binding.lineGuid && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
+    if (binding && binding.frac && el.type === 'image') { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; }
+    return el;
+  }
+  // The currently-marked region on THIS image (crop/lasso → _pendingImgRegion), to attach as a connection sub-target.
+  _regionAt(img) { const p = this._pendingImgRegion; return (img && p && p.imgId === img.id && p.frac) ? { frac: p.frac, fracPoly: p.fracPoly } : null; }
+  // Build a binding {elementId, lineGuid?/frac?/fracPoly?} for a release point over a target element.
+  _bindingFor(s, wx, wy) {
+    const b = { elementId: s.id };
+    if (s.type === 'record') { const lg = this._lineGuidAtCard(s, wx, wy); if (lg) b.lineGuid = lg; }
+    else if (s.type === 'image') { const r = this._regionAt(s); if (r) { b.frac = r.frac; if (r.fracPoly) b.fracPoly = r.fracPoly; } }
+    return b;
+  }
   _polyBBox(pts) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); } return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
@@ -2112,11 +2147,20 @@ class CanvasView {
       if ((el.type === 'arrow' || el.type === 'line') && el.points && el.points.length >= 2 && (el.startBinding || el.endBinding)) arrows.push(el);
       else if (el.type === 'text' && el.midBinding) labels.push(el);
     }
+    // CONNECTIONS Phase 4: which lines/regions are CURRENT connection sub-targets (drives the blue flag + region highlight).
+    // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
+    const lineT = new Map(), regionT = new Map();
+    for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
+      if (!b || !b.elementId) continue;
+      if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
+      else if (b.frac) { let r = regionT.get(b.elementId); if (!r) regionT.set(b.elementId, r = []); r.push({ frac: b.frac, fracPoly: b.fracPoly }); }
+    }
+    this._connLineTargets = lineT; this._connRegionTargets = regionT;
     if (!arrows.length && !labels.length) return; // nothing bound → zero work
     const updArrow = (el) => {
       let changed = false;
-      if (el.startBinding) { const s = lookup(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(s, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; }
-      if (el.endBinding) { const s = lookup(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(s, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
+      if (el.startBinding) { const s = lookup(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(this._bindTargetShape(el.startBinding, s), o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; } // route to a bound LINE band / image REGION when the binding carries one (Phase 4), else the whole element
+      if (el.endBinding) { const s = lookup(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(this._bindTargetShape(el.endBinding, s), o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
       if (changed) linearBBox(el);
     };
     const updLabel = (el) => { if (!el.midBinding) return; const a = lookup(el.midBinding.arrowId); if (!a || a.isDeleted || (a.type !== 'arrow' && a.type !== 'line')) { el.midBinding = null; return; } const m = pxcPolyMidpoint(routedPoints(a)); if (m) { el.x = m.x - (Math.abs(el.width) || 0) / 2; el.y = m.y - (Math.abs(el.height) || 0) / 2; } }; // guard: a label freed in an earlier fixpoint pass must not crash a later pass
@@ -2389,7 +2433,7 @@ class CanvasView {
         freedrawBBox(created); this.dirty = true; return;
       }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
-      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); this._bindHover = this._bindableAt(w.x, w.y, created.id) || this._nearestBindable(w.x, w.y, 44, created.id); this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target, not only when exactly over it). 'connect' = a nub-drag.
+      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const bh = this._bindableAt(w.x, w.y, created.id) || this._nearestBindable(w.x, w.y, 44, created.id); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
@@ -2412,8 +2456,8 @@ class CanvasView {
         else {
           const lp = created.points[created.points.length - 1];
           const s1 = this._bindableAt(lp[0], lp[1], created.id) || this._nearestBindable(lp[0], lp[1], 44, created.id); // forgiving end-bind: snap to a nearby target if not released exactly on it (Image #30: end floated below the card)
-          if (mode !== 'connect') { const s0 = this._bindableAt(created.points[0][0], created.points[0][1], created.id); if (s0) created.startBinding = { elementId: s0.id }; } // connect mode: startBinding is the source element (the nub sits OUTSIDE it, so don't recompute s0)
-          if (s1) created.endBinding = { elementId: s1.id };
+          if (mode !== 'connect') { const s0p = created.points[0]; const s0 = this._bindableAt(s0p[0], s0p[1], created.id); if (s0) created.startBinding = this._bindingFor(s0, s0p[0], s0p[1]); } // connect mode: startBinding is the source element (the nub sits OUTSIDE it, so don't recompute s0). Phase 4: _bindingFor attaches the targeted body LINE / image REGION
+          if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
           this._updateBindings();
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
@@ -2440,7 +2484,7 @@ class CanvasView {
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this._connHover = null; // clear the connect-nub hover so it re-resolves on the next hover
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this._bindHoverSub = null; this._connHover = null; // clear the connect-nub hover so it re-resolves on the next hover
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
       this.dirty = true;
     };
@@ -2957,7 +3001,7 @@ class CanvasView {
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
-        try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth })); } catch (_e) {} // [{text, depth}] — depth from parent_guid chain (getChildren() returns [] on the flat load)
+        try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // [{text, depth, lineGuid}] — depth from parent_guid chain (getChildren() returns [] on the flat load); lineGuid → line-level connection targeting (Phase 4)
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -3051,7 +3095,9 @@ class CanvasView {
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = dark ? '#8b9096' : '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = titleCol; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; ty += this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
+    const bands = []; // Phase 4: capture each body row's band (relative to card top) for line-level connection targeting + the blue flag
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; const rh = this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); if (ln.lineGuid) bands.push({ lineGuid: ln.lineGuid, dy: ty - y, h: rh }); ty += rh; } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
+    this._lineRects.set(el.id, bands); // dy is RELATIVE to the card top → tracks a MOVE without a re-raster; a resize re-rasters and recomputes
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3948,7 +3994,7 @@ class CanvasView {
         const lbl = connName ? ('connection: ' + connName) : 'connection';
         for (const b of [el.startBinding, el.endBinding]) {
           if (!b || !b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
-          if (t.type === 'record' && t.recordGuid) put(t.recordGuid, el.id, lbl, 'record');
+          if (t.type === 'record' && t.recordGuid) { if (b.lineGuid) put(b.lineGuid, el.id, lbl, 'line'); else put(t.recordGuid, el.id, lbl, 'record'); } // Phase 4: bound to a SPECIFIC body line → key the backref by lineGuid so the note's SOURCE LINE gets the ↗ (not the whole record)
           else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line');
         }
       }
@@ -4812,6 +4858,7 @@ class CanvasView {
     const st = this.plugin._settings || {};
     this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
+    try { this._updateBindings(); } catch (_e) {} // CONNECTIONS Phase 4: settle bindings + build the line/region flag-target maps on open (so the blue flag shows without waiting for the first edit)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -4938,11 +4985,39 @@ class CanvasView {
         if (q && q.length) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(124,92,255,0.14)'; ictx.fill(); ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 1.8 / z; ictx.setLineDash([7 / z, 4 / z]); ictx.stroke(); ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0); }
       } else { this._pendingImgRegion = null; }
     }
-    if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
-      const s = this._bindHover;
+    // CONNECTIONS Phase 4: persistent overlay for line/region connection targets — a little blue flag on every targeted body
+    // line + a cyan outline on every bound image region. CANVAS-OVERLAY ONLY (zero source-note mutation), world-space so it
+    // tracks the card/image live; the note's source line independently gets the ↗ via _reindexBackrefs (keyed by lineGuid).
+    if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size)) {
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-      ictx.strokeStyle = '#7c5cff'; ictx.lineWidth = 2 / z; ictx.setLineDash([7 / z, 4 / z]);
-      ictx.strokeRect(Math.min(s.x, s.x + s.width) - 3, Math.min(s.y, s.y + s.height) - 3, Math.abs(s.width) + 6, Math.abs(s.height) + 6);
+      if (this._connLineTargets) for (const [cardId, set] of this._connLineTargets) {
+        const el = this._byId(cardId); if (!el || el.isDeleted || el.type !== 'record') continue;
+        for (const lg of set) {
+          const lr = this._lineRectWorld(el, lg); if (!lr) continue;
+          ictx.fillStyle = 'rgba(14,165,233,0.10)'; ictx.fillRect(lr.x, lr.y, lr.w, lr.h); // subtle band tint on the targeted line
+          const fx = lr.x + 6, fy = lr.y + 2, ph = Math.min(12, Math.max(8, lr.h - 2)); // little flag: pole + pennant, between the accent stripe and the marker dot
+          ictx.fillStyle = '#0ea5e9'; ictx.fillRect(fx, fy, 1.6, ph);
+          ictx.beginPath(); ictx.moveTo(fx + 1.6, fy); ictx.lineTo(fx + 7.5, fy + 3); ictx.lineTo(fx + 1.6, fy + 6); ictx.closePath(); ictx.fill();
+        }
+      }
+      if (this._connRegionTargets) for (const [imgId, regs] of this._connRegionTargets) {
+        const el = this._byId(imgId); if (!el || el.isDeleted || el.type !== 'image') continue;
+        for (const rg of regs) {
+          const q = this._regionShapeWorld(el, rg.frac, rg.fracPoly); if (!q || !q.length) continue;
+          ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath();
+          ictx.fillStyle = 'rgba(14,165,233,0.10)'; ictx.fill(); ictx.strokeStyle = '#0ea5e9'; ictx.lineWidth = 1.6 / z; ictx.stroke();
+        }
+      }
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
+      const s = this._bindHover, sub = this._bindHoverSub;
+      ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      ictx.lineWidth = 2 / z; ictx.setLineDash([7 / z, 4 / z]);
+      let drew = false; // Phase 4: outline the LINE BAND / image REGION when releasing here targets one, else the whole element
+      if (sub && sub.lineGuid) { const lr = this._lineRectWorld(s, sub.lineGuid); if (lr) { ictx.fillStyle = 'rgba(14,165,233,0.14)'; ictx.fillRect(lr.x, lr.y, lr.w, lr.h); ictx.strokeStyle = '#0ea5e9'; ictx.strokeRect(lr.x + 0.5 / z, lr.y, lr.w - 1 / z, lr.h); drew = true; } }
+      else if (sub && sub.frac) { const q = this._regionShapeWorld(s, sub.frac, sub.fracPoly); if (q && q.length) { ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(14,165,233,0.14)'; ictx.fill(); ictx.strokeStyle = '#0ea5e9'; ictx.stroke(); drew = true; } }
+      if (!drew) { ictx.strokeStyle = '#7c5cff'; ictx.strokeRect(Math.min(s.x, s.x + s.width) - 3, Math.min(s.y, s.y + s.height) - 3, Math.abs(s.width) + 6, Math.abs(s.height) + 6); }
       ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
     if (this._connHover && !this._connHover.isDeleted && this.tool === 'select' && !this.editingId) { // CONNECT: edge nubs on the hovered element — drag one to draw a bound connection. Gated on select-mode + not-editing so a stale hover never paints phantom nubs (review 2a/2b).

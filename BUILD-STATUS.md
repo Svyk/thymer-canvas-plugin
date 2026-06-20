@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.53.0 — CONNECTIONS Phase 4: line-level + image-region targeting (the blue flag) (2026-06-20)
+- A connection endpoint can now bind to a SPECIFIC body line of a record card or a REGION of an image, not just the whole
+  element. Binding shape gained optional sub-target fields: `{elementId, lineGuid?, frac?, fracPoly?}`.
+- **Card LINE target (Image #25):** drag an arrow onto a specific body row of a record card → it binds to THAT line. The
+  endpoint tracks the line live (`_lineRectWorld`, dy relative to card top → follows a move without a re-raster), the line
+  gets a canvas-drawn **blue flag** (cyan pole+pennant + subtle band tint, overlay-only), and the note's SOURCE LINE gets
+  the `↗` (because `_reindexBackrefs` now keys the backref by `lineGuid` when the binding carries one). Open the record →
+  the cited line shows the ↗ → click → flyback to the connection.
+- **Image REGION target:** mark a region (crop/lasso → `_pendingImgRegion`), then connect an arrow to the image → it binds
+  to the region; the endpoint tracks the region (`_imgRegionWorld`) and the region gets a cyan outline. No region → whole image.
+- **Mechanics:** `_recFor` carries `lineGuid` per body row; `_drawRecordCard` captures per-line bands into `_lineRects`;
+  `_lineGuidAtCard`/`_regionAt`/`_bindingFor` resolve the sub-target at the release point (onUp) + live hover (onMove,
+  `_bindHoverSub` outlines the band/region); `_updateBindings` routes endpoints via `_bindTargetShape` and rebuilds
+  `_connLineTargets`/`_connRegionTargets` (drives the flag overlay; cleared when the last connection goes); `_updateBindings`
+  also runs once on load so flags show on open. node-tested (12: band hit-test incl. title/below/outside/rotated, move-tracking,
+  reindex line-keying vs whole-card). CANVAS-OVERLAY ONLY — zero source-note mutation (the locked constraint).
+- NEXT: Phase 5 — multi-ref nav polish (picker rows show the connection label; land on the exact connection).
+
 ## ✅ v1.52.0 — connection backref shows the connection's NAME ("connection: Test") (2026-06-20)
 - User (Image #31/#32): the note-side "Canvas References" entry read the generic "connection" but should reflect what the
   connection actually SAYS ("Test"). Deduction: if "Test" were a midpoint label, v1.51's reindex would already have shown it
