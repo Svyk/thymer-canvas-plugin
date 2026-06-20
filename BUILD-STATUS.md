@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.39.0 — bullets in cards (Thymer-flow look) + PAN crispness (round blit) (2026-06-20, blind: chrome MCP down)
+- **Bullets like Thymer flow** (user: "is there a way to show bullets like flow thymer plugin?"): the rendered RECORD card
+  body lines now draw `'• ' + ln.text` (was bare text — `_drawLineCard` already did this), AND the card EDITOR textarea
+  shows `'  '*depth + '• ' + text` per line. Commit strips the indent + the literal `/^• ?/` glyph (ONLY my rendered bullet,
+  never a user's `-`/`*`) before the data-safety guards run → `parsed[i].text`/`body[i]` stay bullet-free, so
+  `prefixTextMatches`/`isReorder`/`pxcWriteCardTree` compare against `lineTextOf` unchanged. node-tested 7 cases (depth+text
+  round-trip, user dash/star NOT stripped, literal-`• ` text survives, new no-bullet line tolerant, Tab-before-bullet).
+- **Panning crispness — GIF analysis** (user: "analyze this gif and offer a panning fix"): the GIF showed content BLURRY
+  in-motion → CRISP on settle. Root cause = the camera-blit offset `tx/ty` is FRACTIONAL device px as the camera pans by
+  sub-pixel amounts → `drawImage` bilinear-interpolates (the blur). Fix: `Math.round(o.tx), Math.round(o.ty)` at the blit —
+  a pixel-aligned 1:1 blit (s=1 for pure pan) is crisp. Zoom path (s≠1) unaffected (sub-px origin shift is negligible; the
+  scale interpolates regardless). Worst case = a ≤1-device-px snap to exact position on settle (imperceptible at 2× DPR).
+  Complements v1.38 margin-cache (blank-edge fix); together: crisp + no blank edges while panning.
+- ⚠ BLIND (chrome MCP down): geometry/parse node-verified + reviewed; "panning feels crisp now" needs a live confirm.
+
 ## ✅ v1.38.0 — Enter-to-edit overlap fix + PAN margin-cache (2026-06-19, blind: chrome MCP down, node+review only)
 - **Enter-to-edit "looks odd at first":** entering edit set `editingId` (next render skips the element) but the textarea
   appeared immediately while the canvas still showed the element until the next RAF → a 1-frame "double." `_editText` now

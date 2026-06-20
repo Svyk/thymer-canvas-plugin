@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.38.0';
+const PLEXUS_VERSION = '1.39.0';
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
@@ -2939,7 +2939,7 @@ class CanvasView {
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = '#1e1e1e'; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#5f6368';
-    for (const ln of rec.lines) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, ln.text || '', maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth
+    for (const ln of rec.lines) { if (ty > y + h - 14) break; const ind = (ln.depth || 0) * 13; ctx.fillText(this._clipText(ctx, '• ' + (ln.text || ''), maxW - ind), tx + ind, ty); ty += 16; } // TRANSCLUSION INDENTATION: nest by depth, bullet prefix like Thymer flow
     ctx.restore(); ctx.restore();
   }
   _insertRecordCard(guid, wx, wy) {
@@ -3508,7 +3508,7 @@ class CanvasView {
     const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);
     const titleH = isLine ? 4 : 26; // record card: skip the read-only title band; linecard: edit from the top
     const ta = document.createElement('textarea'); ta.spellcheck = false;
-    ta.value = items.map((n) => '  '.repeat(n.depth) + (lineTextOf(n.li) || '')).join('\n'); // show the nesting as leading indentation (Tab / Shift+Tab to re-nest)
+    ta.value = items.map((n) => '  '.repeat(n.depth) + '• ' + (lineTextOf(n.li) || '')).join('\n'); // show the nesting as leading indentation + a bullet glyph like Thymer flow (Tab / Shift+Tab to re-nest; the '• ' is stripped on commit)
     ta.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:4px 6px;font-family:system-ui,sans-serif;line-height:1.33;resize:none;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28)';
     ta.style.left = (s.x + 8 * z) + 'px'; ta.style.top = (s.y + titleH * z) + 'px';
     ta.style.width = Math.max(80, (Math.abs(card.width) - 16) * z) + 'px';
@@ -3519,9 +3519,10 @@ class CanvasView {
     const commit = async () => {
       if (done) return; done = true;
       const raw = ta.value.split('\n'); try { ta.remove(); } catch (_e) {} this._cardEdit = null;
-      // Parse leading indentation (2 spaces / level) → depth; `body` keeps each row's text minus its leading indent.
-      const parsed = raw.map((t) => { const sp = ((t.match(/^ */) || [''])[0]).length; return { depth: sp >> 1, text: t.trim() }; });
-      const body = raw.map((t) => t.replace(/^ +/, ''));
+      // Parse leading indentation (2 spaces / level) → depth; strip the leading indent AND the '• ' bullet glyph (only the
+      // literal bullet I render — never a user's '-'/'*' so text isn't clobbered). `body` keeps each row's text minus both.
+      const parsed = raw.map((t) => { const lead = (t.match(/^ */) || [''])[0]; const rest = t.slice(lead.length).replace(/^• ?/, ''); return { depth: lead.length >> 1, text: rest.trim() }; });
+      const body = raw.map((t) => { const lead = (t.match(/^ */) || [''])[0]; return t.slice(lead.length).replace(/^• ?/, ''); });
       if (isLine && parsed.length) parsed[0].depth = 0; // the linecard's main line is the depth-0 anchor
       // SAFE write-back: allow TEXT edits, RE-NESTING (Tab/Shift+Tab depth changes), and APPENDS — all keyed by the
       // row→line positional map, which holds for those ops. Refuse a count DECREASE (deletion) or a prefix whose existing
@@ -4717,7 +4718,7 @@ class CanvasView {
         const useMargin = this._marginValid && this._marginCv && this._marginCam && this._marginCam.x === cc.x && this._marginCam.y === cc.y && this._marginCam.zoom === cc.zoom;
         const blitCam = useMargin ? this._marginCam : cc, blitCv = useMargin ? this._marginCv : this._cacheCv, M = useMargin ? (this._marginPx || 0) : 0;
         const o = pxcMarginBlitOffset(blitCam, this.camera, M, d);
-        sctx.setTransform(o.s, 0, 0, o.s, o.tx, o.ty); sctx.drawImage(blitCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0);
+        sctx.setTransform(o.s, 0, 0, o.s, Math.round(o.tx), Math.round(o.ty)); sctx.drawImage(blitCv, 0, 0); sctx.setTransform(1, 0, 0, 1, 0, 0); // ROUND to integer device px: a fractional blit offset makes drawImage interpolate (the blur seen while panning); pixel-aligned = crisp
         this._scheduleSettle();
       } else {
         // Crisp full render. When dragging, this is the ONE build frame: render statics EXCLUDING movers, then FREEZE
