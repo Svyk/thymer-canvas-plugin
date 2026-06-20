@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.45.0 — FLOW EDITOR: card editor shows the rainbow flow while editing (Phase 2) (2026-06-20)
+- User: the rendered transclusion shows the Indent-Rainbow flow (v1.41/42) but the EDITOR was a plain textarea (no markers/
+  guides). Replaced it with a per-row DOM outline editor in `_editCardBody`.
+- Each row = `[gutter: depth-coloured indent guides + a marker dot][contentEditable text]`, reusing `PXC_RAINBOW` + STEP=13
+  (matches the canvas `_drawOutlineRow`). A long line wraps WITHIN its row (marker pinned at top) — why per-row beats a
+  textarea+overlay. Box built unscaled + `transform:scale(z)` for zoom. Keys: Tab/Shift+Tab re-indent (clamp prevDepth+1,
+  linecard main line stays 0); Enter splits at the caret + carries the tail into a new sibling row; Backspace at line start
+  outdents; Esc discards; Cmd/Ctrl+Enter or blur-out commits. Paste = plain text.
+- COMMIT reuses the UNCHANGED `pxcWriteCardTree` + the same data-safety guards. node-tested the round-trip + FIXED a latent
+  trailing-whitespace false-refuse (parsed.text is now UNTRIMMED = body, so a source line with trailing space doesn't read
+  as "changed" and block an append).
+- Adversarial `code-reviewer`: fixed the one real data-UX bug it found — a mid-list Enter that the guard refuses used to
+  REMOVE the box first → discarded the WHOLE edit session. Commit is now **non-destructive on refuse**: guards run BEFORE
+  removing the box; a refused structural change keeps the box + all edits open + a clear toaster (Esc to discard). Also:
+  Escape no longer depends on resolving the active row (+ `box._lastRow` fallback); focusout doesn't commit on app/tab
+  switch (`document.hasFocus()`); Backspace caret check uses firstLeaf; text `min-width:0` so it wraps not overflows.
+- Visually verified the row rendering standalone in chrome (rainbow dots by depth + guides + wrapped first line). The
+  behavioral keys (Enter/Esc/focusout) need a live editor → user verifies after reinstall.
+- CONTRACT LIMIT (carried from the original safe-commit design, unchanged): editing an existing line AND appending in the
+  same session refuses (avoids mid-insert ambiguity) — now NON-destructive. Text-only edits, re-indent, and clean end-appends
+  all commit. Relax only with a fresh data-safety review.
+
 ## ✅ v1.44.0 — PANNING REDESIGN: O(1) compositor pan (100K shapes as smooth as one image) (2026-06-20)
 - Hard requirement: pan must be O(1) regardless of scene size. The old model re-touched/re-uploaded the staticCv bitmap
   every pan frame (cost ∝ canvas pixels) + a fixed ±280px margin snapshot → not bulletproof, doesn't scale.

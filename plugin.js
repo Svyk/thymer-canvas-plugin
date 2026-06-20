@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.44.0';
+const PLEXUS_VERSION = '1.45.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3540,48 +3540,67 @@ class CanvasView {
     if (this.destroyed) return;
     const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);
     const titleH = isLine ? 4 : 26; // record card: skip the read-only title band; linecard: edit from the top
-    const ta = document.createElement('textarea'); ta.spellcheck = false;
-    ta.value = items.map((n) => '  '.repeat(n.depth) + '• ' + (lineTextOf(n.li) || '')).join('\n'); // show the nesting as leading indentation + a bullet glyph like Thymer flow (Tab / Shift+Tab to re-nest; the '• ' is stripped on commit)
-    ta.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:4px 6px;font-family:system-ui,sans-serif;line-height:1.33;resize:none;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28)';
-    ta.style.left = (s.x + 8 * z) + 'px'; ta.style.top = (s.y + titleH * z) + 'px';
-    ta.style.width = Math.max(80, (Math.abs(card.width) - 16) * z) + 'px';
-    ta.style.height = Math.max(38, (Math.abs(card.height) - titleH - 10) * z) + 'px';
-    ta.style.fontSize = (12 * z) + 'px';
-    this.wrap.appendChild(ta); setTimeout(() => { try { ta.focus(); ta.select(); } catch (_e) {} }, 0);
-    let done = false; this._cardEdit = { ta, card, abort: () => { done = true; } }; // abort lets destroy() cancel without writing
+    const STEP = 13, PAL = PXC_RAINBOW; // FLOW EDITOR: one DOM row per line, each with the depth-coloured marker dot + indent
+    // guides (matching the rendered card's _drawOutlineRow) + editable text. Tab/Shift+Tab re-indent; Enter appends a sibling
+    // row; commit reuses pxcWriteCardTree + the SAME data-safety guards. The box is built UNSCALED + transform:scale(z) for zoom.
+    const box = document.createElement('div');
+    box.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:5px 6px;font:12px system-ui,sans-serif;overflow:auto;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28);transform-origin:0 0';
+    box.style.left = (s.x + 8 * z) + 'px'; box.style.top = (s.y + titleH * z) + 'px';
+    box.style.width = Math.max(80, Math.abs(card.width) - 16) + 'px';
+    box.style.maxHeight = Math.max(38, Math.abs(card.height) - titleH - 10) + 'px';
+    box.style.transform = 'scale(' + z + ')';
+    const gutterHTML = (depth) => { let h = ''; for (let L = 0; L < depth; L++) h += '<div style="position:absolute;top:0;bottom:0;left:' + (L * STEP + 3) + 'px;width:1px;background:' + PAL[L % PAL.length] + ';opacity:.45"></div>'; h += '<div style="position:absolute;top:6px;left:' + (depth * STEP + 2) + 'px;width:5px;height:5px;border-radius:50%;background:' + PAL[depth % PAL.length] + '"></div>'; return h; };
+    const setDepth = (row, depth) => { row._depth = depth; row._gutter.style.flex = '0 0 ' + (depth * STEP + 14) + 'px'; row._gutter.innerHTML = gutterHTML(depth); };
+    const rows = [];
+    const makeRow = (text, depth) => {
+      const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:flex-start;min-height:18px';
+      const gutter = document.createElement('div'); gutter.style.cssText = 'position:relative;align-self:stretch'; row._gutter = gutter;
+      const txt = document.createElement('div'); txt.contentEditable = 'true'; txt.spellcheck = false; txt.textContent = text || ''; txt.style.cssText = 'flex:1 1 auto;outline:none;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.4;padding:0 1px;min-width:0'; row._txt = txt; // min-width:0 → text wraps (like the card) instead of overflowing a deeply-nested narrow row
+      txt.addEventListener('focus', () => { box._lastRow = row; }); // track the active row so Escape/keys resolve even if document.activeElement lags
+      txt.addEventListener('paste', (ev) => { ev.preventDefault(); const t = (((ev.clipboardData || window.clipboardData).getData('text')) || '').replace(/\s*\n\s*/g, ' '); try { document.execCommand('insertText', false, t); } catch (_e2) {} }); // paste as plain text (no embedded newlines/HTML)
+      row.appendChild(gutter); row.appendChild(txt); setDepth(row, depth); return row;
+    };
+    for (const it of items) { const r = makeRow(lineTextOf(it.li) || '', it.depth); rows.push(r); box.appendChild(r); }
+    this.wrap.appendChild(box);
+    const curRow = () => { const a = document.activeElement; for (const r of rows) if (r._txt === a || r.contains(a)) return r; return null; };
+    setTimeout(() => { try { rows[0] && rows[0]._txt.focus(); } catch (_e) {} }, 0);
+    let done = false; this._cardEdit = { ta: box, card, abort: () => { done = true; } }; // `ta` = the editor element (destroy() removes it)
     const commit = async () => {
-      if (done) return; done = true;
-      const raw = ta.value.split('\n'); try { ta.remove(); } catch (_e) {} this._cardEdit = null;
-      // Parse leading indentation (2 spaces / level) → depth; strip the leading indent AND the '• ' bullet glyph (only the
-      // literal bullet I render — never a user's '-'/'*' so text isn't clobbered). `body` keeps each row's text minus both.
-      const parsed = raw.map((t) => { const lead = (t.match(/^ */) || [''])[0]; const rest = t.slice(lead.length).replace(/^• ?/, ''); return { depth: lead.length >> 1, text: rest.trim() }; });
-      const body = raw.map((t) => { const lead = (t.match(/^ */) || [''])[0]; return t.slice(lead.length).replace(/^• ?/, ''); });
+      if (done) return;
+      const body = rows.map((r) => (r._txt.textContent || '').replace(/\s*\n\s*/g, ' '));
+      const parsed = body.map((text, i) => ({ depth: rows[i]._depth, text })); // UNTRIMMED (= body) so the structural guards + pxcWriteCardTree compare exactly against lineTextOf — a source line with trailing whitespace must not read as "changed" (it would falsely refuse an append)
       if (isLine && parsed.length) parsed[0].depth = 0; // the linecard's main line is the depth-0 anchor
-      // SAFE write-back: allow TEXT edits, RE-NESTING (Tab/Shift+Tab depth changes), and APPENDS — all keyed by the
-      // row→line positional map, which holds for those ops. Refuse a count DECREASE (deletion) or a prefix whose existing
-      // TEXT changed alongside a count grow (an ambiguous mid-insert/reorder) → open the record. No blind .delete().
+      // SAFE write-back (UNCHANGED contract): allow TEXT edits, RE-NESTING (Tab/Shift+Tab), and APPENDS — keyed by the
+      // row→line positional map. Refuse a count DECREASE (deletion) or a count GROW whose existing prefix changed (mid-insert/
+      // reorder) → open the record. No blind delete; rich lines are never setSegments-flattened (guarded in pxcWriteCardTree).
       const origTexts = items.map((n) => lineTextOf(n.li) || '');
       const prefixTextMatches = () => { for (let i = 0; i < items.length; i++) if (parsed[i].text !== origTexts[i]) return false; return true; };
-      // count-same REORDER/SWAP guard: the row→line map is positional, so a changed row whose new text equals a DIFFERENT
-      // existing line's text is a move (not an edit) and would re-parent/rewrite the WRONG line. Refuse → open the record.
       const isReorder = () => { if (parsed.length !== items.length) return false; const orig = Object.create(null); for (const t of origTexts) if (t) orig[t] = true; for (let i = 0; i < items.length; i++) { const t = parsed[i].text; if (t && t !== origTexts[i] && orig[t]) return true; } return false; };
       if (parsed.length < items.length || (parsed.length > items.length && !prefixTextMatches()) || isReorder()) {
-        try { this.plugin.ui.addToaster({ title: 'To delete or reorder lines, open the record (double-click the title). Editing text, indenting (Tab), and adding lines work here.', dismissible: true }); } catch (_e) {} return;
+        // NON-DESTRUCTIVE refuse: KEEP the box + the user's edits (don't set `done`, don't remove) so a mid-insert/reorder/
+        // delete never silently discards a whole edit session. They can fix the structure, open the record, or Esc to discard.
+        try { this.plugin.ui.addToaster({ title: 'To insert between lines, reorder, or delete, open the record (double-click the title). Your edits are still here — text changes, indenting (Tab), and adding lines at the end save here; Esc discards.', dismissible: true }); } catch (_e) {} return;
       }
+      done = true; try { box.remove(); } catch (_e) {} this._cardEdit = null; // committing for real now
       let writes = 0; try { writes = await pxcWriteCardTree(rec, items, parsed, body, isLine); } catch (_e) {}
       if (this.destroyed) return;
       if (writes) { if (isLine) { this._invalidateLine(card.lineGuid); this._invalidateLinesForRecord(guid); } this._invalidateRec(guid); this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Saved ' + writes + ' change' + (writes > 1 ? 's' : '') + ' to the source record.', dismissible: true }); } catch (_e) {} }
     };
-    ta.addEventListener('blur', commit);
-    ta.addEventListener('keydown', (ev) => {
+    box.addEventListener('focusout', (ev) => { if (box.contains(ev.relatedTarget) || !document.hasFocus()) return; commit(); }); // commit when focus genuinely leaves the editor; NOT on an app/tab switch (hasFocus) and NOT when clicking another row inside
+    const firstLeaf = (n) => { while (n && n.firstChild) n = n.firstChild; return n; };
+    const caretOffset = (txt) => { try { const sel = window.getSelection(); if (!sel || !sel.rangeCount) return (txt.textContent || '').length; const pre = document.createRange(); pre.selectNodeContents(txt); pre.setEnd(sel.getRangeAt(0).endContainer, sel.getRangeAt(0).endOffset); return pre.toString().length; } catch (_e) { return (txt.textContent || '').length; } };
+    box.addEventListener('keydown', (ev) => {
       ev.stopPropagation(); // the canvas host swallows keys otherwise
-      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { ta.remove(); } catch (_e) {} this._cardEdit = null; return; }
-      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); ta.blur(); return; }
-      if (ev.key === 'Tab') { // TEXT-INDENT: re-nest the current row by ±2 leading spaces (Tab in / Shift+Tab out)
-        ev.preventDefault(); const v = ta.value, ss = ta.selectionStart, ls = v.lastIndexOf('\n', ss - 1) + 1;
-        if (ev.shiftKey) { let rm = 0; while (rm < 2 && v[ls + rm] === ' ') rm++; if (rm) { ta.value = v.slice(0, ls) + v.slice(ls + rm); const c = Math.max(ls, ss - rm); ta.selectionStart = ta.selectionEnd = c; } }
-        else { ta.value = v.slice(0, ls) + '  ' + v.slice(ls); ta.selectionStart = ta.selectionEnd = ss + 2; }
+      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { box.remove(); } catch (_e) {} this._cardEdit = null; return; } // Escape never depends on resolving the active row
+      const row = curRow() || box._lastRow; if (!row) return;
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); commit(); return; }
+      if (ev.key === 'Enter') { // split the line at the caret, carry the tail into a new sibling row at the same depth (appending at the END commits; a mid-list split refuses non-destructively on commit)
+        ev.preventDefault(); const full = row._txt.textContent || '', off = caretOffset(row._txt); row._txt.textContent = full.slice(0, off);
+        const nr = makeRow(full.slice(off), row._depth); const idx = rows.indexOf(row); rows.splice(idx + 1, 0, nr); row.after(nr);
+        try { nr._txt.focus(); const sel2 = window.getSelection(); const r2 = document.createRange(); r2.setStart(nr._txt, 0); r2.collapse(true); sel2.removeAllRanges(); sel2.addRange(r2); } catch (_e) {} return;
       }
+      if (ev.key === 'Tab') { ev.preventDefault(); const idx = rows.indexOf(row); const prevD = idx > 0 ? rows[idx - 1]._depth : -1; const cap = (isLine && idx === 0) ? 0 : prevD + 1; if (ev.shiftKey) { if (row._depth > 0) setDepth(row, row._depth - 1); } else if (row._depth < cap) setDepth(row, row._depth + 1); try { row._txt.focus(); } catch (_e) {} return; } // re-indent, clamp to prev depth + 1 (linecard main line stays 0)
+      if (ev.key === 'Backspace') { const sel = window.getSelection(); const rg = sel && sel.rangeCount ? sel.getRangeAt(0) : null; const atStart = rg && rg.collapsed && rg.startOffset === 0 && (rg.startContainer === row._txt || rg.startContainer === firstLeaf(row._txt)); if (atStart && row._depth > 0) { ev.preventDefault(); setDepth(row, row._depth - 1); try { row._txt.focus(); } catch (_e) {} } } // at line start → outdent (deletion needs the record, per the commit contract)
     });
   }
   _drawLineCard(ctx, el) {
