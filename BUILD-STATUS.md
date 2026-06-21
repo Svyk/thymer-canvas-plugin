@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.65.0 — @ref chip hover preview (round 4) (2026-06-20)
+- Hovering a record-ref chip on the canvas (a whole-element ref OR an inline `@`/`@@` ref run) now shows a `.pxc-refpreview`
+  popover: the referenced record's **title + first body lines** (via the live `_recFor` cache — uncached shows "Loading…" then
+  re-shows once the fetch lands). `pointer-events:none`; hidden on hover-off / drag / destroy. (Image refs deferred — they
+  resolve through the separate attachment path.)
+- DIAGNOSIS via the live dump (`test.dump`): the "blub" was an ellipse and v1.64's edge-only handles already cleaned the
+  selection; the "connection has no thumbnail" was a non-issue — `_regionThumb` resolves the image (602×1306) and returns a
+  valid `dataURL(5338)`, so the canvas info card DOES render the thumbnail on the text→image connection (the user was hovering
+  a text→card connection, which has no image). No code fix needed for the thumbnail.
+
 ## ✅ v1.64.0 — shape selection: drop the empty-corner handles (round 4) (2026-06-20)
 - LIVE DUMP confirmed the "blub" is an ELLIPSE (758×464 hachure) and the v1.61 outline DID hug it (Image #50) — the remaining
   "box with empty space" was the **4 bbox CORNER handles** sitting in the empty corners. Fix: for shapes whose outline hugs the
