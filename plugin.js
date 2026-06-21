@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.61.0';
+const PLEXUS_VERSION = '1.62.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5546,7 +5546,7 @@ class Plugin extends AppPlugin {
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
-  _teardown() { for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */ }
+  _teardown() { try { this._hideBrefHover(); } catch (_e) {} try { this._closeBrefMenu(); } catch (_e) {} for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */ }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
   // S9: shared bounded LRU image-decode cache. One Image per fileId across every view. Returns the ready
@@ -5782,7 +5782,7 @@ class Plugin extends AppPlugin {
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-imgref-css';
-    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-canvas-refs{margin:2px 0 6px}.plexus-cref-list{display:flex;flex-direction:column;gap:1px;margin-top:3px}.plexus-cref-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--color-text-400,#444)}.plexus-cref-row:hover{background:var(--sidebar-bg-hover,rgba(124,92,255,.12))}.plexus-cref-ic{flex:0 0 auto;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;color:#fff;font:600 10px/1 system-ui,sans-serif}.plexus-cref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px/1.3 system-ui,sans-serif}.plexus-cref-from,.plexus-bref-from{flex:0 1 auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;font-style:italic}.plexus-cref-dir,.plexus-bref-dir{flex:0 0 auto;opacity:.75;font-weight:700}.plexus-cref-thumb,.plexus-bref-thumb{flex:0 0 auto;width:34px;height:24px;object-fit:cover;border-radius:3px;border:1px solid rgba(127,127,127,.4)}';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-canvas-refs{margin:2px 0 6px}.plexus-cref-list{display:flex;flex-direction:column;gap:1px;margin-top:3px}.plexus-cref-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--color-text-400,#444)}.plexus-cref-row:hover{background:var(--sidebar-bg-hover,rgba(124,92,255,.12))}.plexus-cref-ic{flex:0 0 auto;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;color:#fff;font:600 10px/1 system-ui,sans-serif}.plexus-cref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px/1.3 system-ui,sans-serif}.plexus-cref-from,.plexus-bref-from{flex:0 1 auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;font-style:italic}.plexus-cref-dir,.plexus-bref-dir{flex:0 0 auto;opacity:.75;font-weight:700}.plexus-cref-thumb,.plexus-bref-thumb{flex:0 0 auto;width:34px;height:24px;object-fit:cover;border-radius:3px;border:1px solid rgba(127,127,127,.4)}.plexus-bref-hover{position:fixed;z-index:2147483646;max-width:300px;display:flex;flex-direction:column;gap:6px;padding:8px;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);font:13px/1.35 system-ui,sans-serif;pointer-events:none}.plexus-bh-row{display:flex;align-items:center;gap:9px}.plexus-bh-thumb{flex:0 0 auto;width:96px;height:64px;object-fit:cover;border-radius:5px;border:1px solid rgba(127,127,127,.45)}.plexus-bh-txt{display:flex;flex-direction:column;gap:2px;min-width:0}.plexus-bh-from{font-style:italic;opacity:.72;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-bh-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-bh-dir{opacity:.8;font-weight:700;margin-right:3px}';
     document.head.appendChild(s);
   }
   // F1: arrow-direction glyph for a connection backref, relative to THIS note ('in' = points here).
@@ -5811,6 +5811,30 @@ class Plugin extends AppPlugin {
     if (en.from || en.img) { const d = document.createElement('span'); d.className = 'plexus-' + cls + '-dir'; d.textContent = this._dirGlyph(en.dir); row.appendChild(d); }
     const lbl = document.createElement('span'); lbl.className = 'plexus-' + cls + '-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
   }
+  // round-4: a rich HOVER popover for a note-side canvas reference (a line's blue ↗ flag or a record row) — shows, per entry,
+  // a BIG image-region thumbnail + the source → direction → label breadcrumb. Connection refs read like the canvas info card;
+  // a plain @ref gracefully shows just its name. pointer-events:none so it never blocks the badge's click.
+  _showBrefHover(entries, anchorEl) {
+    this._hideBrefHover();
+    const arr = (Array.isArray(entries) ? entries : [entries]).filter(Boolean); if (!arr.length) return;
+    const pop = document.createElement('div'); pop.className = 'plexus-bref-hover'; this._brefHoverEl = pop;
+    for (const en of arr) {
+      const row = document.createElement('div'); row.className = 'plexus-bh-row';
+      if (en.img) { const u = this._regionThumb(en.img); if (u) { const im = document.createElement('img'); im.className = 'plexus-bh-thumb'; im.src = u; row.appendChild(im); } }
+      const txt = document.createElement('div'); txt.className = 'plexus-bh-txt';
+      if (en.from) { const fr = document.createElement('div'); fr.className = 'plexus-bh-from'; fr.textContent = en.from; txt.appendChild(fr); }
+      const l2 = document.createElement('div'); l2.className = 'plexus-bh-lbl';
+      if (en.from || en.img) { const dg = document.createElement('span'); dg.className = 'plexus-bh-dir'; dg.textContent = this._dirGlyph(en.dir); l2.appendChild(dg); }
+      l2.appendChild(document.createTextNode(en.label || 'reference')); txt.appendChild(l2); row.appendChild(txt);
+      pop.appendChild(row);
+    }
+    document.body.appendChild(pop);
+    try { const r = anchorEl.getBoundingClientRect(), pw = pop.offsetWidth || 240, ph = pop.offsetHeight || 70, vw = window.innerWidth, vh = window.innerHeight;
+      let left = Math.round(r.left); if (left + pw > vw - 8) left = Math.max(8, vw - pw - 8);
+      let top = Math.round(r.bottom + 6); if (top + ph > vh - 8) top = Math.max(8, Math.round(r.top) - ph - 6);
+      pop.style.left = left + 'px'; pop.style.top = top + 'px'; } catch (_e) {}
+  }
+  _hideBrefHover() { if (this._brefHoverEl) { try { this._brefHoverEl.remove(); } catch (_e) {} this._brefHoverEl = null; } }
   // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
   _scanImageBadges() {
     let idx; try { idx = this._loadXref(); } catch (_e) { return; }
@@ -5836,6 +5860,7 @@ class Plugin extends AppPlugin {
     if (n > 1) { const c = document.createElement('span'); c.className = 'plexus-backref-count'; c.textContent = String(n); badge.appendChild(c); }
     badge.title = n > 1 ? (n + ' canvas references — click to choose which to fly to') : ('Zoom to “' + (arr[0] ? this._brefText(arr[0]) : 'this') + '” on the canvas'); // F1: tooltip carries the from → label breadcrumb
     badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (n <= 1) { if (arr[0]) this._navToCanvasAnchor(arr[0]); } else this._openBackrefPicker(arr, badge); });
+    badge.addEventListener('mouseenter', () => this._showBrefHover(arr, badge)); badge.addEventListener('mouseleave', () => this._hideBrefHover()); // round-4: hovering the ↗ flag → rich popover (source/direction/thumbnail)
     return badge;
   }
   // MULTI-REF (request 5): when a line/record is referenced by >1 canvas element, the ↗ opens a small picker — choose
@@ -5928,6 +5953,7 @@ class Plugin extends AppPlugin {
       this._appendBrefContent(row, en, 'cref'); // F1/F3: from → dir → label (+ region thumbnail)
       row.title = 'Fly to this reference on the canvas';
       row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(en); });
+      const _en = en; row.addEventListener('mouseenter', () => this._showBrefHover([_en], row)); row.addEventListener('mouseleave', () => this._hideBrefHover()); // round-4: hover → big-thumbnail rich popover
       list.appendChild(row);
     }
     slot.appendChild(list);
@@ -6015,6 +6041,7 @@ class Plugin extends AppPlugin {
   // Note → canvas: open the cited drawing (or reuse an already-open view) and flash the cited element/region.
   // Match views by recordGuid (set at construction) — NOT rec.guid (async-loaded, unreliable); the codebase pattern.
   async _navToCanvasAnchor(entry) {
+    try { this._hideBrefHover(); } catch (_e) {} // round-4: dismiss the hover popover when a ref is clicked
     if (!entry || !entry.drawing) return;
     const find = () => [...this._views].filter((v) => v.recordGuid === entry.drawing).pop();
     let view = find();

@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.62.0 — note-side rich hover popover for canvas references (round 4) (2026-06-20)
+- User: the note-side canvas references + line blue-flags should show the source ("Legendary brand"), direction, and an image
+  preview — like the canvas info card — on hover, for records AND lines. Confirmed: all refs, hover popover.
+- New `_showBrefHover`/`_hideBrefHover`: hovering a line's blue `↗` flag (`_mkBackrefBadge`) OR a record's "Canvas References"
+  row (`_injectCanvasRefSection`) shows a `.plexus-bref-hover` popover with, per entry, a BIG cropped image-region thumbnail +
+  the `<source> <dir glyph> <label>` breadcrumb (reuses `_regionThumb` + `_dirGlyph`; multi-ref shows one rich row each).
+  Connection refs read like the canvas info card; a plain `@`-ref shows just its name. `pointer-events:none` (never blocks the
+  click); hidden on mouseleave / nav-click / teardown.
+- NOTE: the rich source/direction/thumbnail is connection data — a plain `@`-ref to a record (e.g. "Pastabilites") still shows
+  its name (no connection to describe). Image-region CONNECTIONS get the thumbnail.
+- Round 4 (shape outline + note-side hover) COMPLETE.
+
 ## ✅ v1.61.0 — shape-hugging selection outline (round 4) (2026-06-20)
 - User: a non-rectangular shape's selection box is a rectangle with empty "black" corners around the visual. Confirmed choice:
   the selection OUTLINE should hug the shape; resize handles stay on the bounding box.
