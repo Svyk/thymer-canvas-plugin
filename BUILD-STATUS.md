@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.59.0 — blub-drag: connect-nub viewport-clamp (round 3, D) (2026-06-20)
+- "Dragging a connection FROM the blub (a screen-filling ellipse) doesn't work." Root cause: `_connNubsFor` places the 4
+  edge-drag nubs at the bbox edge-midpoints; for a huge element those are far off-screen → `_nubAt` (11px screen hit) never
+  matches → the connect drag never starts.
+- Fix: clamp each nub into the VISIBLE world rect (inset 28px from each viewport edge). No-op for any nub already on-screen
+  (small/normal elements unchanged); a huge element's 4 nubs now sit at the screen edges → reachable → drag-to-connect works.
+  `_nubAt`, the overlay, and onDown all consume the same clamped positions. node-tested (9: small unchanged, huge clamps in,
+  partial-offscreen clamps only the off-screen nub).
+- NEXT: C canvas connection UX (v1.60) — clickable ↗ badge while editing, direction-always + source/thumbnail on hover/select, two-button whole-vs-region.
+
 ## ✅ v1.58.0 — backref index self-healing (stale/dup refs) + picker dismiss + F3 thumbnail fix (round 3, A+B) (2026-06-20)
 Round-3 feedback (plan `~/.claude/plans/staged-finding-ritchie.md`); root-caused via a 4-way parallel investigation + a live `plexus_backref` dump (one line target carried 3 connector entries, two identical). All node-tested + adversarially reviewed.
 - **A1 reindex-on-load:** `_reindexBackrefs` ran ONLY in `saveNow`, so a drawing not re-opened/saved never pruned orphaned connector entries. Now also runs on canvas OPEN → opening a drawing self-heals its sub-map from live elements.

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.58.0';
+const PLEXUS_VERSION = '1.59.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2149,7 +2149,13 @@ class CanvasView {
   _connNubsFor(el) {
     const x = Math.min(el.x, el.x + (el.width || 0)), y = Math.min(el.y, el.y + (el.height || 0)), w = Math.abs(el.width || 0), h = Math.abs(el.height || 0);
     const cx = x + w / 2, cy = y + h / 2, o = 14 / this.camera.zoom;
-    return [{ x: cx, y: y - o }, { x: x + w + o, y: cy }, { x: cx, y: y + h + o }, { x: x - o, y: cy }];
+    const nubs = [{ x: cx, y: y - o }, { x: x + w + o, y: cy }, { x: cx, y: y + h + o }, { x: x - o, y: cy }];
+    // D (round 3): a screen-filling element's bbox-edge nubs land OFF-SCREEN → unreachable → you can't drag a connection from
+    // it (the "blub"). Clamp each nub into the VISIBLE world rect (inset from each viewport edge) so it's always reachable.
+    // No-op for any nub already on-screen → small/normal elements are unchanged; a huge element's 4 nubs sit at the screen edges.
+    const z = this.camera.zoom, m = 28 / z, vx0 = this.camera.x + m, vy0 = this.camera.y + m, vx1 = this.camera.x + this.cssW / z - m, vy1 = this.camera.y + this.cssH / z - m;
+    if (vx1 > vx0 && vy1 > vy0) for (const n of nubs) { n.x = Math.max(vx0, Math.min(vx1, n.x)); n.y = Math.max(vy0, Math.min(vy1, n.y)); }
+    return nubs;
   }
   _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
   // CONNECT (forgiving end-bind): the CLOSEST connectable element whose bbox is within `radiusPx` (screen px) of a world
