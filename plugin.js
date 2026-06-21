@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.56.0';
+const PLEXUS_VERSION = '1.57.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1739,7 +1739,7 @@ class CanvasView {
   // The pseudo-shape bindPoint should route an endpoint to: a specific body line, a marked image region, else the whole element.
   _bindTargetShape(binding, el) {
     if (binding && binding.lineGuid && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
-    if (binding && binding.frac && el.type === 'image') { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; }
+    if (binding && binding.frac && (el.type === 'image' || isRoughShape(el.type))) { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; } // F2: a region of an image OR a rough shape
     return el;
   }
   // The currently-marked region on THIS image (crop/lasso → _pendingImgRegion), to attach as a connection sub-target.
@@ -1751,6 +1751,7 @@ class CanvasView {
     else if (s.type === 'image') { const r = this._regionAt(s); if (r) { b.frac = r.frac; if (r.fracPoly) b.fracPoly = r.fracPoly; } }
     return b;
   }
+  _ptInBBox(el, x, y) { const b = this._elBBox(el); return !!(b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); } // F2: is a world point inside an element's bbox (region-mark target test)
   _polyBBox(pts) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); } return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
@@ -2378,6 +2379,13 @@ class CanvasView {
       { const rct = this.wrap.getBoundingClientRect(), mpx = e.clientX - rct.left, mpy = e.clientY - rct.top; if (this._miniHit(mpx, mpy)) { this._miniDragging = true; this._miniTeleport(mpx, mpy); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // MINIMAP teleport
       moved = false; down = this._worldAt(e);
       const rect = this.wrap.getBoundingClientRect(); const sp = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      // F2 drop-to-mark: a connection was just dropped on an image/shape → the NEXT press ON it draws the exact region;
+      // a press OFF it cancels (keeps the whole-element link). Works regardless of the current tool.
+      if (this._pendingRegionLink) {
+        const prl = this._pendingRegionLink, rel = this._byId(prl.elId);
+        if (rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+        this._pendingRegionLink = null; this.dirty = true;
+      }
       if (this.tool === 'select') {
         const sel = this._singleSel();
         if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'table' || sel.type === 'board' || sel.type === 'frame')) {
@@ -2459,7 +2467,7 @@ class CanvasView {
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const startElId = created.startBinding && created.startBinding.elementId; const bh = this._bindableAt(w.x, w.y, created.id, startElId) || this._nearestBindable(w.x, w.y, 44, created.id, startElId); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target), EXCLUDING the source (B2). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
-      if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
+      if (mode === 'crop' || mode === 'regionmark') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
@@ -2484,6 +2492,12 @@ class CanvasView {
           const s1 = this._bindableAt(lp[0], lp[1], created.id, startElId) || this._nearestBindable(lp[0], lp[1], 44, created.id, startElId); // forgiving end-bind, EXCLUDING the source (B2: a big source's bbox no longer snaps the end back onto itself → no collapse)
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
           this._updateBindings();
+          // F2 drop-to-mark: dropped on an image/shape with NO region yet → offer to draw the exact sub-region with the next drag.
+          if (s1 && (s1.type === 'image' || isRoughShape(s1.type)) && created.endBinding && !created.endBinding.frac && !created.endBinding.lineGuid) {
+            this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding' };
+            const what = s1.type === 'image' ? 'image' : 'shape';
+            try { this.plugin.ui.addToaster({ title: 'Drag on the ' + what + ' to mark the exact region — or press Esc / click away to link the whole ' + what + '.', dismissible: true }); } catch (_e) {}
+          }
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
         created = null;
@@ -2491,6 +2505,15 @@ class CanvasView {
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
         if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
+      }
+      else if (mode === 'regionmark') { // F2: finalize the drop-to-mark region → write frac into the connection's binding (else keep the whole-element link)
+        const rect = this._cropRect; this._cropRect = null; const prl = this._pendingRegionLink; this._pendingRegionLink = null;
+        const rel = prl && this._byId(prl.elId), arrow = prl && this._byId(prl.arrowId);
+        if (rect && rect.w > 3 && rect.h > 3 && rel && !rel.isDeleted && arrow && !arrow.isDeleted && arrow[prl.key]) {
+          const frac = this._imgRegionFrac(rel, rect);
+          if (frac) { arrow[prl.key] = { elementId: rel.id, frac }; this._updateBindings(); this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Linked to the marked region.', dismissible: true }); } catch (_e) {} }
+        }
+        this.dirty = true;
       }
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
@@ -2556,8 +2579,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } } // tool switch → drop a stale connect-hover so no phantom nub / bogus connect (review 2a)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; }
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2: Esc keeps the whole-element link
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -4920,7 +4943,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; // undo/redo replaced the scene → cache + index stale
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; // undo/redo replaced the scene → cache + index + pending region state stale (F2)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
@@ -5010,11 +5033,16 @@ class CanvasView {
       this.renderer.ghosts(); this.renderer.end();
       ictx.setTransform(1, 0, 0, 1, 0, 0); // reset for the handle/overlay blocks below
     }
+    if (this._pendingRegionLink) { // F2: a connection was dropped on this image/shape → outline it cyan, "mark a region here"
+      const rel = this._byId(this._pendingRegionLink.elId);
+      if (rel && !rel.isDeleted) { const b = this._elBBox(rel); if (b) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ictx.fillStyle = 'rgba(14,165,233,0.06)'; ictx.fillRect(b.x, b.y, b.w, b.h); ictx.strokeStyle = '#0ea5e9'; ictx.lineWidth = 2 / z; ictx.setLineDash([8 / z, 5 / z]); ictx.strokeRect(b.x - 2 / z, b.y - 2 / z, b.w + 4 / z, b.h + 4 / z); ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0); } }
+      else this._pendingRegionLink = null;
+    }
     if (this._cropRect) {
-      const r = this._cropRect;
+      const r = this._cropRect, regionMode = !!this._pendingRegionLink; // F2: region-mark marquee is cyan (matches the connection/region theme); crop stays amber
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-      ictx.fillStyle = 'rgba(245,158,11,0.12)'; ictx.fillRect(r.x, r.y, r.w, r.h);
-      ictx.strokeStyle = '#f59e0b'; ictx.lineWidth = 1.4 / z; ictx.setLineDash([6 / z, 4 / z]);
+      ictx.fillStyle = regionMode ? 'rgba(14,165,233,0.14)' : 'rgba(245,158,11,0.12)'; ictx.fillRect(r.x, r.y, r.w, r.h);
+      ictx.strokeStyle = regionMode ? '#0ea5e9' : '#f59e0b'; ictx.lineWidth = 1.4 / z; ictx.setLineDash([6 / z, 4 / z]);
       ictx.strokeRect(r.x, r.y, r.w, r.h); ictx.setLineDash([]);
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
@@ -5050,7 +5078,7 @@ class CanvasView {
         }
       }
       if (this._connRegionTargets) for (const [imgId, regs] of this._connRegionTargets) {
-        const el = this._byId(imgId); if (!el || el.isDeleted || el.type !== 'image') continue;
+        const el = this._byId(imgId); if (!el || el.isDeleted || (el.type !== 'image' && !isRoughShape(el.type))) continue; // F2: region targets on an image OR a rough shape
         for (const rg of regs) {
           const q = this._regionShapeWorld(el, rg.frac, rg.fracPoly); if (!q || !q.length) continue;
           ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath();

@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.57.0 — drop-to-mark precise region linking (F2) (2026-06-20)
+- Connecting to **part of an image or a rough shape** is now obvious + precise. Drag a connection and drop its END on an
+  image/shape with no pre-marked region → the element outlines cyan ("mark a region here") and the NEXT drag draws a marquee
+  that becomes the connection's `endBinding.frac` (a true sub-region link). Esc / click-away keeps the whole-element link.
+- Reuses the crop machinery: a new `regionmark` pointer mode shares the marquee (`_cropRect`, cyan in region-mode); on release
+  `_imgRegionFrac(el, rect)` → `arrow.endBinding = {elementId, frac}` → `_updateBindings` routes the endpoint to the region.
+  Region support generalized from images to rough shapes (`_bindTargetShape` + the Phase 4 region-highlight overlay) since
+  `_imgRegionFrac/World`/`_regionShapeWorld` are bbox-generic.
+- State: `_pendingRegionLink = {arrowId, elId, key}`, cleared on mark / press-off-target / Esc / tool-switch; the affordance
+  overlay self-clears if the target is deleted. The existing "mark region first, then connect" path still works.
+- Scene-element binding only (saved in the drawing's scene blob) — zero source-note mutation. adversarially reviewed.
+- Connection round-2 (B1–B4, F1–F3) COMPLETE.
+
 ## ✅ v1.56.0 — connection backref dialog: direction breadcrumb (F1) + image-region thumbnail (F3) (2026-06-20)
 - The note-side backref dialog ("Canvas References" section + the multi-ref picker + the ↗ tooltip) now reads as a
   **breadcrumb**: `<from>  <dir glyph>  <label>` — e.g. `This brand had promise → connection: Test`. `from` = the connection's
