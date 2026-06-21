@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.73.0 — granular cite caption (cited text now shows) + start a connection FROM a region (2026-06-21)
+- **Phase A — the cited text now shows in the note.** A composite Cite (image region + a text box) pasted only the image; the
+  text content was dropped (only el-id + bbox kept; the ↗ flyback worked but nothing rendered the words). Now `_copyImageRefToClip`
+  captures each text target's content (`el.text || flattenRuns(el.runs)`, whitespace-collapsed, deduped, capped 280) into
+  `clip.captions`; `_pasteImageRef` creates a **quoted, editable text line per caption right after the pasted image** (a real
+  persisted note line — searchable/copyable, no filename round-trip needed). One ↗ still flies back to all targets. [confirmed:
+  combined image + editable caption]
+- **Phase B/F — start an arrow FROM a region.** The binding model already routes a region on either endpoint; this adds the UI.
+  Command **"Plexus: Connect from a region"** → Pen/Box chooser → draw a region (over an image → pins to it; empty space → fixed)
+  → it shows **green connect nubs** → drag a nub to a target → an arrow whose **START** is the region (`startBinding =
+  {group:{ids:[],regions:[region]}}`). `_armRegionDraw`/`_finishRegionDraw` made nullable-arrow + branch (null → `_pendingSourceRegion`);
+  reuses `_regionTargetFromPoly`/`_connNubsFor`/`_groupUnionWorld`/`_polyBBox`/`_regionShapeWorld` and the existing connect-drag
+  finalize. Cleared on Esc/tool-switch/undo/destroy. Node tests: caption 7/7, source-region 8/8; all prior suites green.
+- **Review (2-dim Workflow + verify): 3 LOW findings, all fixed:** (1) a source-region connect whose END is dragged back onto
+  the SAME image made a degenerate self-loop — the guard only checked `group.ids`; now it also checks `group.regions[].elId`.
+  (2) the keyboard tool-switch (v/r/o/…) didn't clear `_pendingSourceRegion` → orphan green nubs; now cleared (parity with
+  `_userToolSwitch`). (3) a sub-4px tap on a source nub discarded the pending region; now a tiny tap **re-arms** it (via a
+  transient `_srcRegion` marker, deleted on commit so it never serializes). Fix node-test 6/6.
+
 ## ✅ v1.72.0 — round-5 D: Pen/Lasso "draw a region to link to" (link an arrow to ANY area) (2026-06-21)
 - Dropping an arrow's end in the **void** (empty canvas) now opens a 3-button menu (`_showRegionLinkChoice`): **✎ Pen a region**,
   **▢ Box a region**, **⬚ Lasso elements (group)** (the existing element-group flow). Pen/Box arm `_pendingRegionDraw` + force the

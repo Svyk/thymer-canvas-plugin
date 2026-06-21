@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.72.0';
+const PLEXUS_VERSION = '1.73.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1636,7 +1636,7 @@ class CanvasView {
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
   // region-draw never self-cancels.
-  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); }
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); }
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -1827,25 +1827,47 @@ class CanvasView {
     box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
     box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
   }
+  // round-5 F: "Connect from a region" — a centered Pen/Box chooser; the chosen tool draws a SOURCE region (arrow=null), then
+  // green nubs appear on it and the next nub-drag starts a connection FROM the region.
+  _showSourceRegionChoice() {
+    this._closeRegionChoice();
+    const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
+    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Draw a SOURCE region…'; box.appendChild(lab);
+    const mk = (txt, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
+    mk('✎ Pen a region', () => { this._closeRegionChoice(); this._armRegionDraw(null, 'startBinding', 'pen'); });
+    mk('▢ Box a region', () => { this._closeRegionChoice(); this._armRegionDraw(null, 'startBinding', 'lasso'); });
+    this.wrap.appendChild(box);
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 170, bh = box.offsetHeight || 78;
+    box.style.left = Math.max(4, (ww - bw) / 2) + 'px';
+    box.style.top = Math.max(4, (wh - bh) / 2) + 'px';
+  }
+  // round-5 D/F: arm a region draw. `arrow` null ⇒ a SOURCE region (you'll drag a connection FROM it); else an end-bind on that arrow.
   _armRegionDraw(arrow, key, mode) {
-    const a = this._byId(arrow.id); if (!a || a.isDeleted) return;
-    this._pendingRegionDraw = { arrowId: a.id, key, mode };
+    const a = arrow ? this._byId(arrow.id) : null;
+    if (arrow && (!a || a.isDeleted)) return; // an existing arrow must still be alive
+    this._pendingRegionDraw = { arrowId: a ? a.id : null, key, mode };
     this.tool = (mode === 'pen') ? 'pen' : 'lasso'; this._syncToolbar();
-    try { this.plugin.ui.addToaster({ title: mode === 'pen' ? 'Draw a region with the pen — over an image to pin it there, anywhere else for a free area.' : 'Drag a loop to mark a region to link to.', dismissible: true }); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: mode === 'pen' ? 'Draw a region with the pen — over an image to pin it there, anywhere else for a free area.' : 'Drag a loop to mark a region.', dismissible: true }); } catch (_e) {}
     this.dirty = true;
   }
-  // round-5 D: finish a drawn region (pen stroke / lasso loop) → bind the pending arrow's endpoint to it as a one-region group.
+  // round-5 D/F: finish a drawn region. With a pending arrow → bind its endpoint (one-region group). With NO arrow (source) →
+  // stash it as `_pendingSourceRegion`; nubs render on it and the next nub-drag starts a connection FROM the region.
   _finishRegionDraw(poly) {
     const prd = this._pendingRegionDraw; this._pendingRegionDraw = null;
     this.tool = 'select'; this._syncToolbar();
     if (!prd) return;
-    const arrow = this._byId(prd.arrowId); if (!arrow || arrow.isDeleted) return;
-    if (!poly || poly.length < 3) { try { this.plugin.ui.addToaster({ title: 'Region too small — the connection end is unchanged.', dismissible: true }); } catch (_e) {} return; }
-    const region = this._regionTargetFromPoly(poly, arrow.id, prd.key);
+    if (!poly || poly.length < 3) { try { this.plugin.ui.addToaster({ title: 'Region too small — nothing changed.', dismissible: true }); } catch (_e) {} return; }
+    const region = this._regionTargetFromPoly(poly, prd.arrowId, prd.key);
     if (!region) { try { this.plugin.ui.addToaster({ title: 'Could not capture the region.', dismissible: true }); } catch (_e) {} return; }
-    arrow[prd.key] = { group: { ids: [], regions: [region] } };
-    this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); this.dirty = true;
-    try { this.plugin.ui.addToaster({ title: region.worldPoly ? 'Connected to a free region.' : 'Connected to an image region.', dismissible: true }); } catch (_e) {}
+    if (prd.arrowId) {
+      const arrow = this._byId(prd.arrowId); if (!arrow || arrow.isDeleted) return;
+      arrow[prd.key] = { group: { ids: [], regions: [region] } };
+      this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); this.dirty = true;
+      try { this.plugin.ui.addToaster({ title: region.worldPoly ? 'Connected to a free region.' : 'Connected to an image region.', dismissible: true }); } catch (_e) {}
+    } else { // round-5 F: a SOURCE region
+      this._pendingSourceRegion = { region, nubs: null }; this.dirty = true;
+      try { this.plugin.ui.addToaster({ title: 'Region ready — drag the green dot from it to start a connection.', dismissible: true }); } catch (_e) {}
+    }
   }
   // A drawn poly → a region target: image-anchored {elId,frac,fracPoly} when mostly over an image (tracks it), else a fixed
   // absolute {worldPoly}. Self-loop guard: never anchor to the OTHER endpoint's bound element.
@@ -2453,6 +2475,8 @@ class CanvasView {
   _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
   // round-5 B: a press on a multi-selection's group-connect nub (drawn last frame) → the nub world point + the member ids.
   _groupNubAt(sp) { if (!this._groupNubs || !this._groupNubIds) return null; for (const n of this._groupNubs) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 12) return { x: n.x, y: n.y, ids: this._groupNubIds }; } return null; }
+  // round-5 F: a press on a pending SOURCE-region nub (drawn last frame) → the nub world point + the region to start a connection FROM.
+  _sourceNubAt(sp) { const psr = this._pendingSourceRegion; if (!psr || !psr.nubs) return null; for (const n of psr.nubs) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 12) return { x: n.x, y: n.y, region: psr.region }; } return null; }
   // CONNECT (forgiving end-bind): the CLOSEST connectable element whose bbox is within `radiusPx` (screen px) of a world
   // point — so dragging a connection TOWARD a card snaps to it even if you release a bit short, not only when you land
   // exactly inside it. Used as the fallback after the precise _bindableAt (which still wins when you're truly over a target).
@@ -2715,6 +2739,9 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
+        // round-5 F (connect-from-region): pressing a SOURCE-region nub draws an arrow whose START is the drawn region.
+        const srNub = this._sourceNubAt(sp);
+        if (srNub) { mode = 'connect'; created = makeLinear(srNub.x, srNub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { group: { ids: [], regions: [srNub.region] } }; created._srcRegion = srNub.region; this.scene.elements.push(created); this._pendingSourceRegion = null; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } // _srcRegion marker → a tiny tap re-arms the pending source region in onUp
         // round-5 B (select-then-connect): pressing a GROUP nub on a ≥2 multi-selection draws an arrow BOUND to the whole group.
         // BEFORE the single-nub check so it wins on a multi-selection. Keep the selection (the group target) — don't clear it.
         const gnub = this._groupNubAt(sp);
@@ -2818,15 +2845,15 @@ class CanvasView {
       } else if ((mode === 'linear' || mode === 'connect') && created) { // 'connect' = a nub-drag (startBinding already set to the source element); same finalize as a tool-drawn arrow
         linearBBox(created);
         const dx = created.points[1][0] - created.points[0][0], dy = created.points[1][1] - created.points[0][1];
-        if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
+        if (Math.hypot(dx, dy) < 4) { created.isDeleted = true; if (created._srcRegion) { this._pendingSourceRegion = { region: created._srcRegion, nubs: null }; this.dirty = true; } } // round-5 F: a tiny tap on the source nub drew no connection → keep the source region pending (don't discard it on a fat-finger tap)
         else {
           const lp = created.points[created.points.length - 1], sp0 = created.points[0];
           let startElId = created.startBinding && created.startBinding.elementId; // 'connect' nub-drag: set in onDown
           if (mode !== 'connect') { const s0 = this._bindableAt(sp0[0], sp0[1], created.id); if (s0) { created.startBinding = this._bindingFor(s0, sp0[0], sp0[1]); startElId = s0.id; } } // tool-drawn arrow: bind the START first so we can EXCLUDE it from the end-snap. Phase 4: _bindingFor attaches the targeted LINE / image REGION
           const s1 = this._bindableAt(lp[0], lp[1], created.id, startElId) || this._nearestBindable(lp[0], lp[1], 44, created.id, startElId); // forgiving end-bind, EXCLUDING the source (B2: a big source's bbox no longer snaps the end back onto itself → no collapse)
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
-          // round-5 B: a group-nub arrow (start = a group) must not snap its END back onto a group MEMBER (self-loop). Drop such an end-bind → free endpoint.
-          if (created.endBinding && created.startBinding && created.startBinding.group && created.startBinding.group.ids && created.startBinding.group.ids.indexOf(created.endBinding.elementId) >= 0) created.endBinding = null;
+          // round-5 B/F: a group/source-region arrow (start = a group of ids OR image regions) must not snap its END back onto a start MEMBER or a start REGION's image (self-loop). Drop such an end-bind → free endpoint.
+          if (created.endBinding && created.endBinding.elementId && created.startBinding && created.startBinding.group) { const g = created.startBinding.group, eid = created.endBinding.elementId; if ((g.ids && g.ids.indexOf(eid) >= 0) || (g.regions && g.regions.some((r) => r.elId === eid))) created.endBinding = null; }
           this._updateBindings();
           // F2 drop-to-mark + C3: dropped on an image/shape with NO region → offer WHOLE vs a region via a two-button prompt.
           if (s1 && (s1.type === 'image' || isRoughShape(s1.type)) && created.endBinding && !created.endBinding.frac && !created.endBinding.lineGuid) {
@@ -2846,6 +2873,7 @@ class CanvasView {
             const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
             this._showRegionLinkChoice(created, 'endBinding', sp2.x, sp2.y);
           }
+          if (created._srcRegion) delete created._srcRegion; // round-5 F: drop the transient marker so it doesn't serialize onto the committed arrow
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
         created = null;
@@ -2947,8 +2975,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / pending group-link / pending region-draw
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region (round-5 F)
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -5264,7 +5292,8 @@ class CanvasView {
     }
     el = el || (this.selected.size === 1 ? this._singleSel() : null);
     const regionImgId = targets.length ? targets[0].imgId : null;
-    for (const id of this.selected) { if (id === regionImgId) continue; const e = this._byId(id); if (!e) continue; const bb = this._elBBox(e); if (!bb) continue; targets.push({ kind: 'el', el: id, region: bb, bb, isImage: e.type === 'image' }); }
+    const textOf = (e) => (e && (e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || '').replace(/\s+/g, ' ').trim(); // round-5 E: a text target's content, for the editable caption beneath the pasted image
+    for (const id of this.selected) { if (id === regionImgId) continue; const e = this._byId(id); if (!e) continue; const bb = this._elBBox(e); if (!bb) continue; const tg = { kind: 'el', el: id, region: bb, bb, isImage: e.type === 'image' }; if (e.type === 'text') { const tx = textOf(e); if (tx) tg.tx = tx; } targets.push(tg); }
     if (!targets.length && el && el.type === 'image') { const bb = this._elBBox(el); targets.push({ kind: 'el', el: el.id, region: bb, bb, isImage: true }); }
     if (!targets.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to cite — drag the Lasso (S) over a region, circle it with the Pen, select element(s), or pick an image, then Cite.', dismissible: true }); } catch (_e) {} return false; }
     const prim = targets[0];
@@ -5294,13 +5323,18 @@ class CanvasView {
     const region = prim.region;
     const extra = targets.slice(1).map((tg) => tg.kind === 'region'
       ? { el: tg.imgId, inImage: true, frac: tg.frac, fracPoly: tg.fracPoly, region: tg.region }
-      : { el: tg.el, region: tg.region });
+      : (tg.tx ? { el: tg.el, region: tg.region, text: tg.tx } : { el: tg.el, region: tg.region }));
+    // round-5 E: every cited TEXT target's content → editable caption line(s) beneath the pasted image (deduped, capped). The
+    // caption is a real persisted note line (created at paste), so it needs no filename round-trip — it survives cross-device on its own.
+    const captions = []; const seenCap = new Set();
+    for (const tg of targets) { if (!tg.tx || seenCap.has(tg.tx)) continue; seenCap.add(tg.tx); captions.push(tg.tx.length > 280 ? tg.tx.slice(0, 279) + '…' : tg.tx); }
     this.plugin._imgRefClip = {
       png, sourceRecordGuid: this.recordGuid, label, region,
       elementId: prim.kind === 'region' ? prim.imgId : prim.el,
       crop: (prim.kind === 'el' && prim.isImage) ? ((this._byId(prim.el) || {}).crop || null) : null,
       inImage: prim.kind === 'region' ? true : undefined, frac: prim.frac, fracPoly: prim.fracPoly,
       extra: extra.length ? extra : undefined,
+      captions: captions.length ? captions : undefined,
       w: Math.round((region && region.w) || 0), h: Math.round((region && region.h) || 0),
     };
     this._pendingImgRegion = null; this.dirty = true;
@@ -5357,7 +5391,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group/draw state stale (F2/C3/round-5 B/D)
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group/draw/source state stale (F2/C3/round-5 B/D/F)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
@@ -5630,6 +5664,21 @@ class CanvasView {
         this.dirty = true;
       }
     }
+    // round-5 F: a pending SOURCE region ("Connect from a region") shows its outline + GREEN connect nubs — drag a nub to start a
+    // connection FROM the region. Rendered regardless of selection (a source region has no selected element). Nubs stored for onDown.
+    if (this._pendingSourceRegion && this._pendingSourceRegion.region) {
+      const sr = this._pendingSourceRegion.region; let bbox = null, outline = null;
+      if (sr.worldPoly && sr.worldPoly.length >= 3) { bbox = this._polyBBox(sr.worldPoly); outline = sr.worldPoly.map(([x, y]) => ({ x, y })); }
+      else if (sr.elId) { const im = this._byId(sr.elId); if (im && !im.isDeleted) { bbox = this._imgRegionWorld(im, sr.frac); const q = this._regionShapeWorld(im, sr.frac, sr.fracPoly); if (q && q.length) outline = q; } }
+      if (bbox && isFinite(bbox.x)) {
+        ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+        if (outline && outline.length) { ictx.setLineDash([6 / z, 4 / z]); ictx.strokeStyle = '#10b981'; ictx.lineWidth = 1.6 / z; ictx.beginPath(); ictx.moveTo(outline[0].x, outline[0].y); for (let i = 1; i < outline.length; i++) ictx.lineTo(outline[i].x, outline[i].y); ictx.closePath(); ictx.stroke(); ictx.setLineDash([]); }
+        const nubs = this._connNubsFor({ x: bbox.x, y: bbox.y, width: bbox.w, height: bbox.h }); this._pendingSourceRegion.nubs = nubs;
+        ictx.setTransform(1, 0, 0, 1, 0, 0); const rr2 = 5 * d;
+        for (const n of nubs) { const s = this.camera.worldToScreen(n.x, n.y); ictx.beginPath(); ictx.arc(s.x * d, s.y * d, rr2, 0, 7); ictx.fillStyle = '#10b981'; ictx.fill(); ictx.lineWidth = 1.5 * d; ictx.strokeStyle = '#fff'; ictx.stroke(); }
+        ictx.setTransform(1, 0, 0, 1, 0, 0);
+      } else { this._pendingSourceRegion.nubs = null; }
+    }
     this._groupNubs = null; this._groupNubIds = null; // round-5 B: recomputed below only for a ≥2 multi-selection
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -5788,6 +5837,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Add task', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._addTaskNode(); } }); // IO-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Cite selection (copy reference)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._copyImageRefToClip(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
@@ -6066,6 +6116,9 @@ class Plugin extends AppPlugin {
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
     if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra }); } catch (_e) {} }
+    // round-5 E: editable caption line(s) for every cited TEXT target, placed right AFTER the image (sibling) — real, readable
+    // Thymer text (searchable/copyable), quoted. The single ↗ on the image still flies back to ALL targets (via extra[]).
+    if (imgLine && clip.captions && clip.captions.length) { let after = imgLine; for (const cap of clip.captions) { try { const capLine = await rec.createLineItem(parentLine, after, 'ulist', [{ type: 'text', text: '“' + cap + '”' }], null); if (capLine) after = capLine; } catch (_e) {} } }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
     return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
