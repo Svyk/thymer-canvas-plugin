@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.55.0';
+const PLEXUS_VERSION = '1.56.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -661,8 +661,10 @@ function pxcHasExactTitle(rows, query) { const q = String(query || '').trim().to
 // drawing's sub-map. localStorage holds the hot copy; a synced blob on a singleton record carries it cross-device.
 const BREF_REC_TITLE = '⚙ Plexus Backref Index';
 const BREF_FILE = 'plexus-backref-index.json';
-// STORE v2 (multi-ref): `{ [drawing]: { [target]: { [elId]: {label, kind, t} } } }` — a target may be referenced by
-// MANY canvas elements (so the note-side ↗ can offer a picker). Dedup is by elId (two runs in one element → one entry).
+// STORE v2 (multi-ref): `{ [drawing]: { [target]: { [elId]: {label, kind, t, from?, dir?, img?} } } }` — a target may be
+// referenced by MANY canvas elements (so the note-side ↗ can offer a picker). Dedup is by elId (two runs in one element →
+// one entry). Connection backrefs also carry the OTHER endpoint's name (from), arrow direction (dir), and image-region
+// reference (img = {fileId, frac, fracPoly}) for the dialog breadcrumb/thumbnail (F1/F3) — reference-only, no pixel data.
 // pxcBrefMigrate normalizes BOTH legacy shapes (flat {target:{drawing,el,…}} and nested-single {drawing:{target:{el,…}}}).
 function pxcBrefMigrate(raw) {
   const out = {}; if (!raw || typeof raw !== 'object') return out;
@@ -679,7 +681,7 @@ function pxcBrefMigrate(raw) {
 // Flatten → `{ [target]: [{drawing, el, label, kind, t}, …] }` (ALL refs to a target, newest first). One row per (drawing,el).
 function pxcBrefFlatten(nested) {
   const flat = {};
-  for (const d in nested) { const sub = nested[d]; for (const target in sub) { const m = sub[target]; for (const elId in m) { const e = m[elId]; (flat[target] = flat[target] || []).push({ drawing: d, el: elId, label: e.label, kind: e.kind || 'line', t: e.t || 0 }); } } }
+  for (const d in nested) { const sub = nested[d]; for (const target in sub) { const m = sub[target]; for (const elId in m) { const e = m[elId]; const o = { drawing: d, el: elId, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; if (e.from) o.from = e.from; if (e.dir) o.dir = e.dir; if (e.img) o.img = e.img; (flat[target] = flat[target] || []).push(o); } } } // F1/F3: carry the connection breadcrumb fields through to the renderer
   for (const target in flat) flat[target].sort((a, b) => (b.t || 0) - (a.t || 0));
   return flat;
 }
@@ -3993,12 +3995,23 @@ class CanvasView {
   // `@@`/`@` runs; line targets keyed by lineGuid, record targets keyed by record guid. Self-healing: edited-away or
   // deleted refs vanish on the next save. Image refs are skipped (the xref / `_scanImageBadges` path owns those).
   _reindexBackrefs() {
-    const map = {}; // { targetGuid: { elId: {label, kind} } } — ALL refs to a target (multi-ref picker); dedup by elId
-    const put = (guid, elId, label, kind) => { if (!guid || !elId) return; const m = (map[guid] = map[guid] || {}); if (!m[elId]) m[elId] = { label: label || 'ref', kind }; };
+    const map = {}; // { targetGuid: { elId: {label, kind, from?, dir?, img?} } } — ALL refs to a target (multi-ref picker); dedup by elId
+    const put = (guid, elId, label, kind, extra) => { if (!guid || !elId) return; const m = (map[guid] = map[guid] || {}); if (m[elId]) return; m[elId] = { label: label || 'ref', kind }; if (extra) { if (extra.from) m[elId].from = extra.from; if (extra.dir) m[elId].dir = extra.dir; if (extra.img) m[elId].img = extra.img; } }; // F1/F3: a connection also carries the OTHER endpoint's name (from), arrow direction (dir), and image-region ref (img)
     const els = (this.scene && this.scene.elements) || [];
     // PASS 1: id→element + connector→label-text maps (one scan), for the connection-backref pass below.
     const byId = new Map(), labelByConn = new Map();
     for (const el of els) { if (!el || el.isDeleted) continue; byId.set(el.id, el); if (el.type === 'text' && el.midBinding && el.midBinding.arrowId) { const t = (el.text || '').trim(); if (t) labelByConn.set(el.midBinding.arrowId, t); } }
+    // F1/F3: describe a connection's OTHER endpoint for the note-side breadcrumb — a card title / line snippet / text / shape / image (+ its region ref for a thumbnail). Names clipped; safe on missing cache.
+    const clip = (s) => { s = (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim(); return s.length > 40 ? s.slice(0, 39) + '…' : s; };
+    const descEnd = (b) => {
+      if (!b || !b.elementId) return null; const e = byId.get(b.elementId); if (!e) return null;
+      const rc = this._recCache;
+      if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: clip((ln && ln.text)) || 'line' }; } return { name: clip(rec && rec.title) || 'note' }; }
+      if (e.type === 'linecard') { const rec = rc && rc.get(e.recordGuid); return { name: clip(rec && rec.title) || 'line' }; }
+      if (e.type === 'text') return { name: clip(e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' };
+      if (e.type === 'image') return { name: 'image', img: { fileId: e.fileId, frac: b.frac || null, fracPoly: b.fracPoly || null } };
+      return { name: clip(e.type) || 'shape' };
+    };
     for (const el of els) {
       if (!el || el.isDeleted) continue;
       if (el.isRef) {
@@ -4025,8 +4038,13 @@ class CanvasView {
         const lbl = connName ? ('connection: ' + connName) : 'connection';
         for (const b of [el.startBinding, el.endBinding]) {
           if (!b || !b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
-          if (t.type === 'record' && t.recordGuid) { if (b.lineGuid) put(b.lineGuid, el.id, lbl, 'line'); else put(t.recordGuid, el.id, lbl, 'record'); } // Phase 4: bound to a SPECIFIC body line → key the backref by lineGuid so the note's SOURCE LINE gets the ↗ (not the whole record)
-          else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line');
+          // F1/F3: the OTHER endpoint (source/context) + the arrow direction relative to THIS note, for the dialog breadcrumb.
+          const ob = (b === el.startBinding) ? el.endBinding : el.startBinding, other = descEnd(ob), isStart = (b === el.startBinding);
+          const headHere = isStart ? el.startArrowhead : el.endArrowhead, headThere = isStart ? el.endArrowhead : el.startArrowhead;
+          const dir = (headHere && headThere) ? 'both' : headHere ? 'in' : headThere ? 'out' : 'none'; // 'in' = arrow points AT this note (from → here); 'out' = away; 'both' = ↔; 'none' = plain line
+          const extra = { from: other && other.name, dir, img: other && other.img };
+          if (t.type === 'record' && t.recordGuid) { if (b.lineGuid) put(b.lineGuid, el.id, lbl, 'line', extra); else put(t.recordGuid, el.id, lbl, 'record', extra); } // Phase 4: bound to a SPECIFIC body line → key the backref by lineGuid so the note's SOURCE LINE gets the ↗ (not the whole record)
+          else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line', extra);
         }
       }
     }
@@ -5592,7 +5610,7 @@ class Plugin extends AppPlugin {
     if (!drawing) return; const s = this._brefStore(); const targets = map ? Object.keys(map) : [];
     if (!targets.length) { if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } return; }
     const t = Date.now(); const sub = {};
-    for (const target of targets) { const inner = map[target] || {}; const om = {}; for (const elId in inner) { const e = inner[elId]; om[elId] = { label: e.label || 'ref', kind: e.kind || 'line', t }; } sub[target] = om; }
+    for (const target of targets) { const inner = map[target] || {}; const om = {}; for (const elId in inner) { const e = inner[elId]; const o = { label: e.label || 'ref', kind: e.kind || 'line', t }; if (e.from) o.from = e.from; if (e.dir && e.dir !== 'none') o.dir = e.dir; if (e.img) o.img = e.img; om[elId] = o; } sub[target] = om; } // F1/F3: persist the connection breadcrumb fields (from/dir/img) so the note-side dialog can render them
     s[drawing] = sub; this._brefSaveLocal(); this._brefSyncSchedule();
   }
   _brefPruneDrawing(drawing) { const s = this._brefStore(); if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } } // GC: drawing trashed → drop its sub-map (no ghost ↗)
@@ -5630,8 +5648,32 @@ class Plugin extends AppPlugin {
   _injectImgRefCss() {
     if (document.getElementById('plexus-imgref-css')) return;
     const s = document.createElement('style'); s.id = 'plexus-imgref-css';
-    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-canvas-refs{margin:2px 0 6px}.plexus-cref-list{display:flex;flex-direction:column;gap:1px;margin-top:3px}.plexus-cref-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--color-text-400,#444)}.plexus-cref-row:hover{background:var(--sidebar-bg-hover,rgba(124,92,255,.12))}.plexus-cref-ic{flex:0 0 auto;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;color:#fff;font:600 10px/1 system-ui,sans-serif}.plexus-cref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px/1.3 system-ui,sans-serif}';
+    s.textContent = '.plexus-imgref-wrap{position:relative}.plexus-imgref-badge{position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:50%;background:rgba(124,92,255,.95);color:#fff;display:grid;place-items:center;font:600 14px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:6;user-select:none;transition:transform .12s}.plexus-imgref-badge:hover{transform:scale(1.14);background:#7c5cff}.plexus-backref-badge{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;margin:0 0 0 5px;border-radius:50%;background:rgba(14,165,233,.92);color:#fff;font:600 11px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle;user-select:none;transition:transform .12s}.plexus-backref-badge:hover{transform:scale(1.18);background:#0ea5e9}.plexus-backref-count{position:absolute;top:-7px;right:-7px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#ef4444;color:#fff;font:700 9px/14px system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}.plexus-bref-menu{position:fixed;z-index:2147483646;min-width:200px;max-width:340px;max-height:300px;overflow-y:auto;background:#1b1f2a;color:#e6e8ee;border:1px solid #333a4a;border-radius:9px;box-shadow:0 10px 34px rgba(0,0,0,.42);padding:5px;font:13px/1.35 system-ui,sans-serif}.plexus-bref-head{padding:5px 9px 7px;font-size:11px;letter-spacing:.02em;opacity:.55;text-transform:uppercase}.plexus-bref-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer}.plexus-bref-row:hover{background:rgba(124,92,255,.22)}.plexus-bref-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}.plexus-bref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plexus-canvas-refs{margin:2px 0 6px}.plexus-cref-list{display:flex;flex-direction:column;gap:1px;margin-top:3px}.plexus-cref-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--color-text-400,#444)}.plexus-cref-row:hover{background:var(--sidebar-bg-hover,rgba(124,92,255,.12))}.plexus-cref-ic{flex:0 0 auto;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;color:#fff;font:600 10px/1 system-ui,sans-serif}.plexus-cref-lbl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px/1.3 system-ui,sans-serif}.plexus-cref-from,.plexus-bref-from{flex:0 1 auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;font-style:italic}.plexus-cref-dir,.plexus-bref-dir{flex:0 0 auto;opacity:.75;font-weight:700}.plexus-cref-thumb,.plexus-bref-thumb{flex:0 0 auto;width:34px;height:24px;object-fit:cover;border-radius:3px;border:1px solid rgba(127,127,127,.4)}';
     document.head.appendChild(s);
+  }
+  // F1: arrow-direction glyph for a connection backref, relative to THIS note ('in' = points here).
+  _dirGlyph(dir) { return dir === 'both' ? '↔' : dir === 'out' ? '←' : dir === 'in' ? '→' : '·'; }
+  _brefText(en) { const lbl = (en && en.label) || 'reference'; return (en && (en.from || en.img)) ? ((en.img ? 'image' : en.from) + ' ' + this._dirGlyph(en.dir) + ' ' + lbl) : lbl; } // plain-text breadcrumb for tooltips
+  // F3: a small cropped PNG thumbnail of an image-region endpoint (data URL), or null. The image lives in THIS drawing's
+  // scene, so _imgFor resolves it; the canvas is same-origin (blob object URL) so toDataURL is not tainted.
+  _regionThumb(imgRef) {
+    try {
+      if (!imgRef || !imgRef.fileId) return null;
+      const im = this._imgFor(imgRef.fileId); if (!im || !(im.naturalWidth || im.width)) return null;
+      const nw = im.naturalWidth || im.width, nh = im.naturalHeight || im.height, f = imgRef.frac;
+      const sx = f ? Math.max(0, f.rx) * nw : 0, sy = f ? Math.max(0, f.ry) * nh : 0, sw = f ? Math.max(0.02, f.rw) * nw : nw, sh = f ? Math.max(0.02, f.rh) * nh : nh;
+      const TW = 52, TH = Math.max(20, Math.min(64, Math.round(TW * (sh / Math.max(1, sw)))));
+      const c = document.createElement('canvas'); c.width = TW; c.height = TH; c.getContext('2d').drawImage(im, sx, sy, sw, sh, 0, 0, TW, TH);
+      return c.toDataURL('image/png');
+    } catch (_e) { return null; }
+  }
+  // F1/F3: append the connection breadcrumb to a backref row — `<from / thumbnail>  <dir glyph>  <label>` — falling back to
+  // just the label for a plain (non-connection) ref. `cls` = 'cref' (record-page section) or 'bref' (multi-ref picker).
+  _appendBrefContent(row, en, cls) {
+    if (en.img) { const url = this._regionThumb(en.img); if (url) { const im = document.createElement('img'); im.className = 'plexus-' + cls + '-thumb'; im.src = url; row.appendChild(im); } else { const f = document.createElement('span'); f.className = 'plexus-' + cls + '-from'; f.textContent = 'image'; row.appendChild(f); } }
+    else if (en.from) { const f = document.createElement('span'); f.className = 'plexus-' + cls + '-from'; f.textContent = en.from; row.appendChild(f); }
+    if (en.from || en.img) { const d = document.createElement('span'); d.className = 'plexus-' + cls + '-dir'; d.textContent = this._dirGlyph(en.dir); row.appendChild(d); }
+    const lbl = document.createElement('span'); lbl.className = 'plexus-' + cls + '-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
   }
   // Overlay a ↗ badge on the top-right of every pasted image-reference (idempotent; cheap; exits fast when none).
   _scanImageBadges() {
@@ -5656,7 +5698,7 @@ class Plugin extends AppPlugin {
     const arr = Array.isArray(entries) ? entries : [entries]; const n = arr.length;
     const badge = document.createElement('span'); badge.className = 'plexus-backref-badge'; badge.textContent = '↗';
     if (n > 1) { const c = document.createElement('span'); c.className = 'plexus-backref-count'; c.textContent = String(n); badge.appendChild(c); }
-    badge.title = n > 1 ? (n + ' canvas references — click to choose which to fly to') : ('Zoom to “' + ((arr[0] && arr[0].label) || 'this') + '” on the canvas');
+    badge.title = n > 1 ? (n + ' canvas references — click to choose which to fly to') : ('Zoom to “' + (arr[0] ? this._brefText(arr[0]) : 'this') + '” on the canvas'); // F1: tooltip carries the from → label breadcrumb
     badge.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (n <= 1) { if (arr[0]) this._navToCanvasAnchor(arr[0]); } else this._openBackrefPicker(arr, badge); });
     return badge;
   }
@@ -5669,7 +5711,7 @@ class Plugin extends AppPlugin {
     for (const en of entries) {
       const row = document.createElement('div'); row.className = 'plexus-bref-row';
       const dot = document.createElement('span'); dot.className = 'plexus-bref-dot'; dot.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(dot);
-      const lbl = document.createElement('span'); lbl.className = 'plexus-bref-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
+      this._appendBrefContent(row, en, 'bref'); // F1/F3: from → dir → label (+ region thumbnail)
       row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); try { menu.remove(); } catch (_e2) {} this._brefMenuClose = null; this._navToCanvasAnchor(en); });
       menu.appendChild(row);
     }
@@ -5725,7 +5767,7 @@ class Plugin extends AppPlugin {
     if (!panel) { let n = root; for (let i = 0; i < 8 && n; i++) { if (/editor-panel/.test(n.className || '')) { panel = n; break; } n = n.parentElement; } }
     const body = panel ? panel.querySelector('.tlr-body') : null;
     if (!body) return false; // backreferences footer not rendered → caller falls back to the inline badge
-    const sig = entries.length + ':' + entries.map((e) => e.el + '|' + (e.label || '')).join(',');
+    const sig = entries.length + ':' + entries.map((e) => e.el + '|' + (e.label || '') + '|' + (e.from || '') + '|' + (e.dir || '') + (e.img ? '|i' : '')).join(','); // re-render when the breadcrumb (from/dir/thumb) changes too (F1/F3)
     const existing = body.querySelector(':scope > .plexus-canvas-refs');
     if (existing) { if (existing.getAttribute('data-pxc-sig') === sig) return true; existing.remove(); }
     const slot = document.createElement('div'); slot.className = 'tlr-section-slot plexus-canvas-refs'; slot.setAttribute('data-pxc-sig', sig);
@@ -5734,7 +5776,7 @@ class Plugin extends AppPlugin {
     for (const en of entries) {
       const row = document.createElement('div'); row.className = 'plexus-cref-row';
       const ic = document.createElement('span'); ic.className = 'plexus-cref-ic'; ic.textContent = '↗'; ic.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(ic);
-      const lbl = document.createElement('span'); lbl.className = 'plexus-cref-lbl'; lbl.textContent = en.label || 'reference'; row.appendChild(lbl);
+      this._appendBrefContent(row, en, 'cref'); // F1/F3: from → dir → label (+ region thumbnail)
       row.title = 'Fly to this reference on the canvas';
       row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(en); });
       list.appendChild(row);

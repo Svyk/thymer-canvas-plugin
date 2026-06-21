@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.56.0 — connection backref dialog: direction breadcrumb (F1) + image-region thumbnail (F3) (2026-06-20)
+- The note-side backref dialog ("Canvas References" section + the multi-ref picker + the ↗ tooltip) now reads as a
+  **breadcrumb**: `<from>  <dir glyph>  <label>` — e.g. `This brand had promise → connection: Test`. `from` = the connection's
+  OTHER endpoint (a card title / body-line snippet / text node / shape / "image"); the glyph encodes arrow direction relative
+  to this note (→ in · ← out · ↔ both · · plain line) derived from `startArrowhead`/`endArrowhead`.
+- **Image-region thumbnail (F3):** when the other endpoint is an image region, the row shows a small cropped `<img>`
+  thumbnail (`_regionThumb` → cropped offscreen-canvas `toDataURL`; same-origin blob so not tainted; try/catch → falls back
+  to the word "image"). The image lives in the same drawing, so `_imgFor(fileId)` resolves it.
+- **Mechanics:** `_reindexBackrefs` enriches each connection entry with `{from, dir, img}` (via a `descEnd(binding)` closure +
+  arrowhead-direction); `_appendBrefContent` renders the breadcrumb; `_dirGlyph`/`_brefText` helpers; the section `sig` now
+  includes from/dir/img so it re-renders on change. **CRITICAL fix (adversarial review):** `_setDrawingBackrefs` AND
+  `pxcBrefFlatten` rebuilt entries keeping only `{label,kind,t}` — they now carry `from/dir/img` through, or the features
+  would have been silently inert. node-tested (F1 derivation 8 cases + the full persistence round-trip).
+- Reference-only in the synced index (no pixel data); back-compat (old entries / plain refs render as the bare label).
+  Canvas-overlay + synced index ONLY — zero source-note mutation.
+- NEXT: F2 drop-to-mark precise region linking (v1.57).
+
 ## ✅ v1.55.0 — connection bug-fix pass (dark cards · arrow-shrink · delete-clears-ref · centered label) (2026-06-20)
 Round-2 user feedback on the connection system (plan: `~/.claude/plans/staged-finding-ritchie.md`). Four fixes, all node-tested + adversarially reviewed clean (zero source-note mutation):
 - **B1 dark-mode card surface:** `_drawRecordCard`/`_drawLineCard` treated the hardcoded default `backgroundColor:'#ffffff'` as user-chosen, so cards stayed white on a dark canvas (Image #35). Now the DEFAULT white follows the theme (`#1b1d24` dark); an explicit non-white bg is still respected.
