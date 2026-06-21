@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.55.0 — connection bug-fix pass (dark cards · arrow-shrink · delete-clears-ref · centered label) (2026-06-20)
+Round-2 user feedback on the connection system (plan: `~/.claude/plans/staged-finding-ritchie.md`). Four fixes, all node-tested + adversarially reviewed clean (zero source-note mutation):
+- **B1 dark-mode card surface:** `_drawRecordCard`/`_drawLineCard` treated the hardcoded default `backgroundColor:'#ffffff'` as user-chosen, so cards stayed white on a dark canvas (Image #35). Now the DEFAULT white follows the theme (`#1b1d24` dark); an explicit non-white bg is still respected.
+- **B2 arrow-shrink when connecting from a big shape/image:** the forgiving end-snap (`_nearestBindable`) didn't exclude the START-bound element, so a large source whose bbox swallowed the release point snapped the END back onto the source → both ends collapsed onto one shape → tiny stub. Fix: `_bindableAt`/`_nearestBindable` gained `excludeId2` (the source), threaded through onMove + onUp (start bound first so it's known); `_nearestBindable` also prefers the smallest-area element on a containment tie. node-tested.
+- **B3 deleting a connection now clears its backref:** `_scanRefBadges` only ever appended badges; it now RECONCILES — removes the stale `↗` / "Canvas References" section when the index no longer cites a line/record (cross-drawing-safe via the flatten). Early-return preserved for the no-refs case.
+- **B4 centered label editor:** the connection-label textarea anchored top-left and drifted off the line while typing; now it anchors centered on the connection midpoint (`translate(-50%,-50%)` + center) and tracks the midpoint as it grows.
+- NEXT: F1 direction breadcrumb in the dialog + F3 region thumbnail (v1.56); F2 drop-to-mark precise region linking (v1.57).
+
 ## ✅ v1.54.0 — CONNECTIONS Phase 5: multi-ref nav polish + see-your-connections (2026-06-20)
 - **Flyback frames the WHOLE connection.** Clicking a note-side ↗ for a connection used to spotlight only the arrow's bbox.
   `_connFlashExtras(arrow)` now adds both bound endpoints as flash items, each at the EXACT sub-target it cites (a body-line

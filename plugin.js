@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.54.0';
+const PLEXUS_VERSION = '1.55.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2120,12 +2120,13 @@ class CanvasView {
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
-  _bindableAt(wx, wy, excludeId) {
+  _bindableAt(wx, wy, excludeId, excludeId2) {
     const tol = 8 / this.camera.zoom;
     // CONNECTIONS: bind an endpoint to ANY content element (card / linecard / image / text-label / shape / board / …) so you
     // can connect anything. Never bind to another connector's body (arrow/line) or a big frame container. hitElement is bbox
     // for non-shapes (good enough) + precise for rough shapes; _gridTopFirst gives z-order so the topmost element wins.
-    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue; if (hitElement(el, wx, wy, tol)) return el; }
+    // excludeId2 = the START-bound element (B2) → the end-snap never lands back on the source (which would collapse the arrow).
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId || el.id === excludeId2 || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue; if (hitElement(el, wx, wy, tol)) return el; }
     return null;
   }
   // CONNECT (Heptabase ergonomic): the 4 edge-midpoint "nubs" just OUTSIDE an element — hover an element → nubs appear →
@@ -2140,13 +2141,17 @@ class CanvasView {
   // CONNECT (forgiving end-bind): the CLOSEST connectable element whose bbox is within `radiusPx` (screen px) of a world
   // point — so dragging a connection TOWARD a card snaps to it even if you release a bit short, not only when you land
   // exactly inside it. Used as the fallback after the precise _bindableAt (which still wins when you're truly over a target).
-  _nearestBindable(wx, wy, radiusPx, excludeId) {
-    const r = (radiusPx || 30) / this.camera.zoom; let best = null, bestD = Infinity;
+  _nearestBindable(wx, wy, radiusPx, excludeId, excludeId2) {
+    const r = (radiusPx || 30) / this.camera.zoom; let best = null, bestD = Infinity, bestA = Infinity;
     for (const el of this._gridTopFirst(wx - r, wy - r, r * 2, r * 2)) {
-      if (el.isDeleted || el.id === excludeId || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue;
+      if (el.isDeleted || el.id === excludeId || el.id === excludeId2 || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue;
       const x0 = Math.min(el.x, el.x + (el.width || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), y1 = Math.max(el.y, el.y + (el.height || 0));
       const dx = Math.max(x0 - wx, 0, wx - x1), dy = Math.max(y0 - wy, 0, wy - y1), d = Math.hypot(dx, dy);
-      if (d <= r && d < bestD) { bestD = d; best = el; }
+      if (d > r) continue;
+      const area = Math.max(1, (x1 - x0) * (y1 - y0));
+      // B2: strictly-closer edge wins; on a near-tie (both bboxes CONTAIN the point → d≈0) the SMALLER element wins — so a
+      // card beats a giant ellipse/image whose bbox swallows the release point (which used to snap the end back to the source).
+      if (d < bestD - 0.5 || (Math.abs(d - bestD) <= 0.5 && area < bestA)) { bestD = d; bestA = area; best = el; }
     }
     return best;
   }
@@ -2450,7 +2455,7 @@ class CanvasView {
         freedrawBBox(created); this.dirty = true; return;
       }
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
-      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const bh = this._bindableAt(w.x, w.y, created.id) || this._nearestBindable(w.x, w.y, 44, created.id); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
+      if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const startElId = created.startBinding && created.startBinding.elementId; const bh = this._bindableAt(w.x, w.y, created.id, startElId) || this._nearestBindable(w.x, w.y, 44, created.id, startElId); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target), EXCLUDING the source (B2). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; }
       if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
@@ -2471,9 +2476,10 @@ class CanvasView {
         const dx = created.points[1][0] - created.points[0][0], dy = created.points[1][1] - created.points[0][1];
         if (Math.hypot(dx, dy) < 4) created.isDeleted = true;
         else {
-          const lp = created.points[created.points.length - 1];
-          const s1 = this._bindableAt(lp[0], lp[1], created.id) || this._nearestBindable(lp[0], lp[1], 44, created.id); // forgiving end-bind: snap to a nearby target if not released exactly on it (Image #30: end floated below the card)
-          if (mode !== 'connect') { const s0p = created.points[0]; const s0 = this._bindableAt(s0p[0], s0p[1], created.id); if (s0) created.startBinding = this._bindingFor(s0, s0p[0], s0p[1]); } // connect mode: startBinding is the source element (the nub sits OUTSIDE it, so don't recompute s0). Phase 4: _bindingFor attaches the targeted body LINE / image REGION
+          const lp = created.points[created.points.length - 1], sp0 = created.points[0];
+          let startElId = created.startBinding && created.startBinding.elementId; // 'connect' nub-drag: set in onDown
+          if (mode !== 'connect') { const s0 = this._bindableAt(sp0[0], sp0[1], created.id); if (s0) { created.startBinding = this._bindingFor(s0, sp0[0], sp0[1]); startElId = s0.id; } } // tool-drawn arrow: bind the START first so we can EXCLUDE it from the end-snap. Phase 4: _bindingFor attaches the targeted LINE / image REGION
+          const s1 = this._bindableAt(lp[0], lp[1], created.id, startElId) || this._nearestBindable(lp[0], lp[1], 44, created.id, startElId); // forgiving end-bind, EXCLUDING the source (B2: a big source's bbox no longer snaps the end back onto itself → no collapse)
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
           this._updateBindings();
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
@@ -2666,10 +2672,18 @@ class CanvasView {
     let prevFlat = ta.value; // CANVAS-SEG: baseline for mapping each flat edit back onto el.runs
     this._refPrevFlat = () => prevFlat; this._refSetPrevFlat = (v) => { prevFlat = v; }; // _applyRefChip updates the baseline after an inline splice
     const place = () => {
-      const z = this.camera.zoom, s = this.camera.worldToScreen(el.x, el.y);
-      ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
+      const z = this.camera.zoom;
       const dk = !!(this.plugin._settings && this.plugin._settings.darkMode) || this._themeDark(); // S7/UX-6: typed text must read on a dark canvas
       ta.style.fontSize = ((el.fontSize || 24) * z) + 'px'; ta.style.color = adaptInk(el.strokeColor || '#1e1e1e', dk); ta.style.fontFamily = (el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT;
+      if (el.midBinding) { // B4: a connection LABEL stays CENTERED on the connection midpoint as it grows (was anchored top-left → drifted off the line while typing)
+        const a = this._byId(el.midBinding.arrowId), m = (a && (a.type === 'arrow' || a.type === 'line')) ? pxcPolyMidpoint(routedPoints(a)) : { x: el.x + (Math.abs(el.width) || 0) / 2, y: el.y + (Math.abs(el.height) || 0) / 2 };
+        const s = this.camera.worldToScreen(m.x, m.y);
+        ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px'; ta.style.transform = 'translate(-50%,-50%)'; ta.style.textAlign = 'center';
+        ta.style.whiteSpace = 'pre'; ta.style.width = ''; ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px';
+        return;
+      }
+      const s = this.camera.worldToScreen(el.x, el.y);
+      ta.style.left = s.x + 'px'; ta.style.top = s.y + 'px';
       if (el.wrapW > 0) { ta.style.whiteSpace = 'pre-wrap'; ta.style.width = (el.wrapW * z) + 'px'; ta.style.minWidth = ''; } // TEXT WRAP: the editor wraps to match the rendered box
       else { ta.style.whiteSpace = 'pre'; ta.style.width = ''; ta.style.minWidth = Math.max(20, (el.width || 40) * z) + 'px'; }
     };
@@ -3101,7 +3115,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = sk.color || el.strokeColor || '#7c5cff'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || (dark ? '#1b1d24' : '#ffffff');
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? '#1b1d24' : '#ffffff'); // B1: the DEFAULT white follows the theme (dark surface on a dark canvas); an explicitly-chosen non-white bg is still respected
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
     ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -3761,7 +3775,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = el.strokeColor || '#0ea5e9'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || (dark ? '#1b1d24' : '#ffffff');
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? '#1b1d24' : '#ffffff'); // B1: the DEFAULT white follows the theme (dark surface on a dark canvas); an explicitly-chosen non-white bg is still respected
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -5670,21 +5684,30 @@ class Plugin extends AppPlugin {
   }
   _scanRefBadges() {
     let idx; try { idx = this._loadBackref(); } catch (_e) { return; }
-    let any = false; for (const k in idx) { any = true; break; } if (!any) return;
+    let any = false; for (const k in idx) { any = true; break; }
+    // B3: when the index is empty BUT stale badges are still on the page (every connection to them was deleted), we must
+    // still run to REMOVE them. Only skip when there's nothing to add AND nothing stale to clean.
+    if (!any && !document.querySelector('.plexus-backref-badge, .plexus-canvas-refs')) return;
     // LINE targets → ↗ on the cited note line (`.listitem[data-guid]`). idx[g] is an ARRAY (all refs); badge shows the
-    // count + opens a picker when >1. Filter to line-kind (a guid is single-kind, but stay defensive).
+    // count + opens a picker when >1. Filter to line-kind (a guid is single-kind, but stay defensive). RECONCILE: a line no
+    // longer cited (its connection was deleted) drops its stale ↗.
     for (const li of document.querySelectorAll('.listitem[data-guid]')) {
-      const g = li.getAttribute('data-guid'); const all = idx[g]; if (!all || !all.length) continue;
-      const entries = all.filter((e) => e.kind !== 'record'); if (!entries.length) continue;
-      if (li.querySelector(':scope .plexus-backref-badge:not(.plexus-backref-rec)')) continue; // don't let a record-page badge inside a title listitem shadow a line badge
+      const g = li.getAttribute('data-guid'); const entries = (idx[g] || []).filter((e) => e.kind !== 'record');
+      const existing = li.querySelector(':scope .plexus-backref-badge:not(.plexus-backref-rec)'); // (a record-page badge inside a title listitem must not shadow a line badge)
+      if (!entries.length) { if (existing) existing.remove(); continue; } // B3: index dropped this line → remove the stale badge
+      if (existing) continue; // already badged
       const host = li.querySelector('.lineitem-text') || li.querySelector('.line-div') || li;
       host.appendChild(this._mkBackrefBadge(entries));
     }
     // RECORD targets → a "Canvas References" SECTION in the native Backreferences footer (request 3); inline ↗ badge only
-    // as a fallback when that footer isn't rendered.
+    // as a fallback when that footer isn't rendered. RECONCILE: a record no longer cited drops the section + the fallback badge.
     for (const root of document.querySelectorAll('.listview-items[data-guid]')) {
-      const g = root.getAttribute('data-guid'); const all = idx[g]; if (!all || !all.length) continue;
-      const entries = all.filter((e) => e.kind === 'record'); if (!entries.length) continue;
+      const g = root.getAttribute('data-guid'); const entries = (idx[g] || []).filter((e) => e.kind === 'record');
+      if (!entries.length) { // B3: index dropped this record → remove the stale section + fallback inline badge
+        try { const panel = root.closest && root.closest('.editor-panel'); const body = panel && panel.querySelector('.tlr-body'); const sec = body && body.querySelector(':scope > .plexus-canvas-refs'); if (sec) sec.remove(); } catch (_e) {}
+        const rb = root.querySelector(':scope > .plexus-backref-rec'); if (rb) rb.remove();
+        continue;
+      }
       let sectioned = false; try { sectioned = this._injectCanvasRefSection(root, entries); } catch (_e) {}
       if (sectioned) { try { const stale = root.querySelector(':scope > .plexus-backref-rec'); if (stale) stale.remove(); } catch (_e) {} continue; }
       // FALLBACK: no Backreferences footer (collapsed/absent) → inline ↗ badge on the record root.
