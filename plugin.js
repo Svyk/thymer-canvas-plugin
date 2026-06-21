@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.69.0';
+const PLEXUS_VERSION = '1.70.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1775,7 +1775,7 @@ class CanvasView {
   }
   // The pseudo-shape bindPoint should route an endpoint to: a specific body line, an inline ref run, a marked image region, else the whole element.
   _bindTargetShape(binding, el) {
-    if (binding && binding.group && binding.group.ids && binding.group.ids.length) { const gb = this._groupBBoxWorld(binding.group.ids); if (gb) return { x: gb.x, y: gb.y, width: gb.w, height: gb.h }; } // round-5 B: a GROUP target → the live union bbox (el is irrelevant/absent for a group binding)
+    if (binding && binding.group) { const gb = this._groupUnionWorld(binding.group); if (gb) return { x: gb.x, y: gb.y, width: gb.w, height: gb.h }; } // round-5 B: a GROUP target → the live union bbox of members + image regions (el is irrelevant/absent for a group binding)
     if (binding && binding.lineGuid && el && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
     if (binding && binding.refGuidTarget && el && el.type === 'text') { const rr = this._refRunRectWorld(el, binding.refGuidTarget); if (rr) return { x: rr.x, y: rr.y, width: rr.w, height: rr.h }; } // round-5 A: route to a SPECIFIC inline ref run of a text note
     if (binding && binding.frac && el && (el.type === 'image' || isRoughShape(el.type))) { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; } // F2: a region of an image OR a rough shape
@@ -1831,7 +1831,7 @@ class CanvasView {
   // C2 (round 3): describe one connection endpoint for the on-canvas info card (mirrors _reindexBackrefs' descEnd).
   _connEndpointDesc(b) {
     if (!b) return { name: 'point' };
-    if (b.group && b.group.ids) { let n = 0, img = null; for (const id of b.group.ids) { const ge = this._byId(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } return { name: 'group of ' + n, img }; } // round-5 B
+    if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { const ge = this._byId(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } return { name: 'group of ' + n, img }; } // round-5 B
     if (!b.elementId) return { name: 'point' };
     const e = this._byId(b.elementId); if (!e || e.isDeleted) return { name: 'gone' };
     const rc = this._recCache;
@@ -1993,11 +1993,15 @@ class CanvasView {
   // ── CONNECTIONS round-5 B: GROUP / REGION connections (an arrow endpoint bound to a SET of elements) ──
   // The live union bbox (world) of a group's members — rotated footprints included, deleted/missing members skipped.
   // The endpoint routes here, so the group target tracks as any member moves/resizes. Null when no member resolves.
-  _groupBBoxWorld(ids, lookup) {
-    if (!ids || !ids.length) return null;
-    const get = lookup || ((id) => this._byId(id)); // PERF: callers inside the per-frame _updateBindings fixpoint pass the O(1) idMap lookup; _byId is an O(n) scan, so a 50-member group would be O(50n)/frame without this
+  _groupBBoxWorld(ids, lookup) { return this._groupUnionWorld({ ids }, lookup); }
+  // Like _groupBBoxWorld but for a full group object — whole-element MEMBERS (ids) PLUS image sub-REGIONS ({elId,frac}).
+  _groupUnionWorld(group, lookup) {
+    if (!group) return null;
+    const get = lookup || ((id) => this._byId(id)); // PERF: the per-frame _updateBindings fixpoint passes the O(1) idMap; _byId is an O(n) scan
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const id of ids) { const el = get(id); if (!el || el.isDeleted) continue; let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue; if (el.angle) bb = rotatedAABB(bb, el.angle); x0 = Math.min(x0, bb.x); y0 = Math.min(y0, bb.y); x1 = Math.max(x1, bb.x + bb.w); y1 = Math.max(y1, bb.y + bb.h); }
+    const acc = (bx, by, bw, bh) => { x0 = Math.min(x0, bx); y0 = Math.min(y0, by); x1 = Math.max(x1, bx + bw); y1 = Math.max(y1, by + bh); };
+    for (const id of (group.ids || [])) { const el = get(id); if (!el || el.isDeleted) continue; let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue; if (el.angle) bb = rotatedAABB(bb, el.angle); acc(bb.x, bb.y, bb.w, bb.h); }
+    for (const rg of (group.regions || [])) { const el = get(rg.elId); if (!el || el.isDeleted) continue; const rw = this._imgRegionWorld(el, rg.frac); if (!rw || !isFinite(rw.x)) continue; acc(rw.x, rw.y, rw.w, rw.h); }
     return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
   }
   // The element ids enclosed by a lasso polygon — PURE (returns ids, no selection/region side effects). Used by the
@@ -2040,7 +2044,7 @@ class CanvasView {
   _connFlashExtras(arrow) {
     const out = [];
     for (const b of [arrow.startBinding, arrow.endBinding]) {
-      if (b && b.group && b.group.ids) { for (const id of b.group.ids) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; const gb = this._elBBox(ge); if (gb && isFinite(gb.x)) out.push({ bbox: gb }); } continue; } // round-5 B: frame EVERY group member so flyback shows the whole region
+      if (b && b.group) { for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; const gb = this._elBBox(ge); if (gb && isFinite(gb.x)) out.push({ bbox: gb }); } for (const rg of (b.group.regions || [])) { const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const rw = this._imgRegionWorld(ge, rg.frac); if (rw && isFinite(rw.x)) out.push({ inImage: true, elId: ge.id, frac: rg.frac, fracPoly: rg.fracPoly, bbox: rw }); } continue; } // round-5 B: frame EVERY group member + image region so flyback shows the whole group
       if (!b || !b.elementId) continue; const t = this._byId(b.elementId); if (!t || t.isDeleted) continue;
       if (b.lineGuid && t.type === 'record') { const lr = this._lineRectWorld(t, b.lineGuid); if (lr) { out.push({ bbox: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } }); continue; } }
       if (b.refGuidTarget && t.type === 'text') { const rr = this._refRunRectWorld(t, b.refGuidTarget); if (rr) { out.push({ bbox: { x: rr.x, y: rr.y, w: rr.w, h: rr.h } }); continue; } } // round-5 A: frame the targeted inline ref run
@@ -2171,7 +2175,7 @@ class CanvasView {
   _dragMovers() {
     const ids = new Set(this.selected);
     for (const id of ids) { const e = this._byId(id); if (e && e.type === 'frame') return null; }
-    const moverHit = (b) => b && (ids.has(b.elementId) || (b.group && b.group.ids && b.group.ids.some((g) => ids.has(g)))); // round-5 B: a GROUP binding has no elementId — also pull the arrow into the live drag set when a moving element is a group MEMBER (else the arrow renders frozen on the static layer until pointer-up)
+    const moverHit = (b) => b && (ids.has(b.elementId) || (b.group && b.group.ids && b.group.ids.some((g) => ids.has(g))) || (b.group && b.group.regions && b.group.regions.some((r) => ids.has(r.elId)))); // round-5 B: a GROUP binding has no elementId — pull the arrow into the live drag set when a moving element is a group MEMBER or a region's IMAGE (else the arrow renders frozen on the static layer until pointer-up)
     for (const el of this.scene.elements) { if (el.isDeleted || ids.has(el.id)) continue; if ((el.type === 'arrow' || el.type === 'line') && (moverHit(el.startBinding) || moverHit(el.endBinding))) ids.add(el.id); }
     const out = []; for (const id of ids) { const e = this._byId(id); if (e && !e.isDeleted) out.push(e); }
     return out;
@@ -2409,7 +2413,7 @@ class CanvasView {
     // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
     const lineT = new Map(), regionT = new Map(), refT = new Map(), groupT = [], byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5); refT: textId → Set(refGuidTarget) for the round-5 A inline-ref flag; groupT: [{ids}] for the round-5 B group-member highlight
     for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
-      if (b && b.group && b.group.ids && b.group.ids.length) { groupT.push({ ids: b.group.ids }); for (const id of b.group.ids) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } continue; } // round-5 B: a group target has no single elementId — index each MEMBER for the select→highlight + outline the members
+      if (b && b.group && ((b.group.ids && b.group.ids.length) || (b.group.regions && b.group.regions.length))) { groupT.push(b.group); for (const id of (b.group.ids || [])) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } for (const rg of (b.group.regions || [])) { let s = byEl.get(rg.elId); if (!s) byEl.set(rg.elId, s = new Set()); s.add(a.id); } continue; } // round-5 B: a group target has no single elementId — index each MEMBER + region-image for the select→highlight + outline
       if (!b || !b.elementId) continue;
       { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
@@ -2420,7 +2424,7 @@ class CanvasView {
     if (!arrows.length && !labels.length) return; // nothing bound → zero work
     // Resolve a binding to the pseudo-shape its endpoint should route to: a GROUP's live union bbox (round-5 B, no single
     // element), else the bound element's line-band / inline-ref / image-region / whole-element shape. Null → free the binding.
-    const tgt = (b) => { if (b.group && b.group.ids && b.group.ids.length) { const gb = this._groupBBoxWorld(b.group.ids, lookup); return gb ? { x: gb.x, y: gb.y, width: gb.w, height: gb.h } : null; } const s = lookup(b.elementId); return s ? this._bindTargetShape(b, s) : null; };
+    const tgt = (b) => { if (b.group && ((b.group.ids && b.group.ids.length) || (b.group.regions && b.group.regions.length))) { const gb = this._groupUnionWorld(b.group, lookup); return gb ? { x: gb.x, y: gb.y, width: gb.w, height: gb.h } : null; } const s = lookup(b.elementId); return s ? this._bindTargetShape(b, s) : null; };
     const updArrow = (el) => {
       let changed = false;
       if (el.startBinding) { const t = tgt(el.startBinding); if (t) { const o = el.points[el.points.length - 1]; const p = bindPoint(t, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; } // route to a bound GROUP / LINE band / inline ref / image REGION when the binding carries one, else the whole element
@@ -2796,7 +2800,20 @@ class CanvasView {
         if (arrow && !arrow.isDeleted && poly.length >= 3) {
           const otherB = arrow[pgl.key === 'endBinding' ? 'startBinding' : 'endBinding'], exId = otherB && otherB.elementId; // self-loop guard: the OTHER endpoint's element must not become a member of THIS endpoint's group (parity with the nub-drag guard)
           let ids = this._idsInLoop(poly, arrow.id); if (exId) ids = ids.filter((id) => id !== exId);
-          if (ids.length) { arrow[pgl.key] = { group: { ids } }; this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Connected to a group of ' + ids.length + '.', dismissible: true }); } catch (_e) {} }
+          // round-5 B: "part of the image" — if the lasso covers a SUB-AREA of a large top image, capture it as a REGION
+          // (frac/fracPoly) instead of the whole image (parity with Cite + avoids a giant union bbox). Same test as _selectFromLoop.
+          const regions = [];
+          let lx0 = Infinity, ly0 = Infinity, lx1 = -Infinity, ly1 = -Infinity;
+          for (const p of poly) { lx0 = Math.min(lx0, p[0]); ly0 = Math.min(ly0, p[1]); lx1 = Math.max(lx1, p[0]); ly1 = Math.max(ly1, p[1]); }
+          const lrect = { x: lx0, y: ly0, w: lx1 - lx0, h: ly1 - ly0 };
+          if (lrect.w > 4 && lrect.h > 4) { const img = this._topImageIn(lrect), ib = img ? this._elBBox(img) : null;
+            if (img && ib && img.id !== exId && (lrect.w * lrect.h) < (ib.w * ib.h) * 0.92) {
+              const frac = this._imgRegionFrac(img, lrect);
+              if (frac) { const b = this._elBBox(img), fracPoly = resamplePoly(poly, 16).map(([px, py]) => ({ fx: Math.max(0, Math.min(1, (px - b.x) / b.w)), fy: Math.max(0, Math.min(1, (py - b.y) / b.h)) }));
+                ids = ids.filter((id) => id !== img.id); regions.push({ elId: img.id, frac, fracPoly }); }
+            }
+          }
+          if (ids.length || regions.length) { const group = { ids }; if (regions.length) group.regions = regions; arrow[pgl.key] = { group }; this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); const n = ids.length + regions.length; try { this.plugin.ui.addToaster({ title: 'Connected to a group of ' + n + (regions.length ? ' (incl. ' + regions.length + ' image region' + (regions.length > 1 ? 's' : '') + ')' : '') + '.', dismissible: true }); } catch (_e) {} }
           else try { this.plugin.ui.addToaster({ title: 'No elements in the lasso — the connection end is unchanged.', dismissible: true }); } catch (_e) {}
         }
         this.tool = 'select'; this._syncToolbar(); this.dirty = true;
@@ -4348,7 +4365,7 @@ class CanvasView {
     const clip = (s) => { s = (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim(); return s.length > 40 ? s.slice(0, 39) + '…' : s; };
     const descEnd = (b) => {
       if (!b) return null;
-      if (b.group && b.group.ids) { let n = 0, img = null; for (const id of b.group.ids) { const ge = byId.get(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } return { name: 'group of ' + n, img }; } // round-5 B: a group endpoint reads as "group of N" + the first image member's thumbnail
+      if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = byId.get(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { const ge = byId.get(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } return { name: 'group of ' + n, img }; } // round-5 B: "group of N" (members + image regions) + a thumbnail (a region gives a cropped one)
       if (!b.elementId) return null; const e = byId.get(b.elementId); if (!e) return null;
       const rc = this._recCache;
       if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: clip((ln && ln.text)) || 'line' }; } return { name: clip(rec && rec.title) || 'note' }; }
@@ -5394,10 +5411,12 @@ class CanvasView {
     // tracks the card/image live; the note's source line independently gets the ↗ via _reindexBackrefs (keyed by lineGuid).
     if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size) || (this._connRefTargets && this._connRefTargets.size) || (this._connGroupTargets && this._connGroupTargets.length)) {
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
-      if (this._connGroupTargets) for (const grp of this._connGroupTargets) { // round-5 B: dashed cyan outline on every member of a group connection target + a faint hull
-        let hx0 = Infinity, hy0 = Infinity, hx1 = -Infinity, hy1 = -Infinity; // resolve members ONCE; union the SAME bboxes for the hull (no second _groupBBoxWorld scan)
+      if (this._connGroupTargets) for (const grp of this._connGroupTargets) { // round-5 B: dashed cyan outline on every member + image region of a group connection target + a faint hull
+        let hx0 = Infinity, hy0 = Infinity, hx1 = -Infinity, hy1 = -Infinity; // resolve members ONCE; union the SAME bboxes for the hull
+        const acc = (bx, by, bw, bh) => { hx0 = Math.min(hx0, bx); hy0 = Math.min(hy0, by); hx1 = Math.max(hx1, bx + bw); hy1 = Math.max(hy1, by + bh); };
         ictx.setLineDash([6 / z, 4 / z]); ictx.strokeStyle = '#06b6d4'; ictx.lineWidth = 1.4 / z;
-        for (const id of (grp.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; let bb = this._elBBox(ge); if (!bb || !isFinite(bb.x)) continue; if (ge.angle) bb = rotatedAABB(bb, ge.angle); ictx.strokeRect(bb.x - 2 / z, bb.y - 2 / z, bb.w + 4 / z, bb.h + 4 / z); hx0 = Math.min(hx0, bb.x); hy0 = Math.min(hy0, bb.y); hx1 = Math.max(hx1, bb.x + bb.w); hy1 = Math.max(hy1, bb.y + bb.h); }
+        for (const id of (grp.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; let bb = this._elBBox(ge); if (!bb || !isFinite(bb.x)) continue; if (ge.angle) bb = rotatedAABB(bb, ge.angle); ictx.strokeRect(bb.x - 2 / z, bb.y - 2 / z, bb.w + 4 / z, bb.h + 4 / z); acc(bb.x, bb.y, bb.w, bb.h); }
+        for (const rg of (grp.regions || [])) { const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const q = this._regionShapeWorld(ge, rg.frac, rg.fracPoly); if (!q || !q.length) continue; ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.stroke(); const rw = this._imgRegionWorld(ge, rg.frac); if (rw) acc(rw.x, rw.y, rw.w, rw.h); }
         if (isFinite(hx0)) { ictx.setLineDash([2 / z, 5 / z]); ictx.strokeStyle = 'rgba(6,182,212,0.5)'; ictx.lineWidth = 1.2 / z; ictx.strokeRect(hx0 - 6 / z, hy0 - 6 / z, (hx1 - hx0) + 12 / z, (hy1 - hy0) + 12 / z); }
         ictx.setLineDash([]);
       }
@@ -6612,7 +6631,7 @@ class Plugin extends AppPlugin {
         const els = v.scene.elements.filter((e) => !e.isDeleted);
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
-        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead, relType: e.relType || null, lineStyle: e.lineStyle || 'solid' }; });
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length, regions: (b.group.regions || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead, relType: e.relType || null, lineStyle: e.lineStyle || 'solid' }; });
         // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
         const thumbTest = [];
         for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }

@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.70.0 — round-5 B follow-up: "part of the image" — image REGIONS inside a group connection (2026-06-21)
+- A group connection target can now mix **whole elements + image sub-REGIONS**: `b.group = { ids:[...], regions:[{elId,
+  frac, fracPoly}] }`. The **drop-then-lasso** flow now mirrors Cite — when the lasso covers a sub-area of a large top image
+  (< 92% of it), that image is captured as a **region** (frac/fracPoly), not the whole image (keeps the union bbox tight and
+  matches the user's "connect to *this is a test* AND **part of** the image" intent).
+- New `_groupUnionWorld(group, lookup)` unions member bboxes + region world-rects; `_groupBBoxWorld` delegates to it. Routed
+  through `_updateBindings` (tgt + byEl indexes the region image), `_bindTargetShape`, `_connFlashExtras` (frames regions as
+  `inImage`), the persistent overlay (outlines region polygons + the hull), and `descEnd`/`_connEndpointDesc` ("group of N"
+  counts members + regions; the thumbnail prefers a **cropped** region). `_reindexBackrefs` ignores regions (images aren't
+  records). `test.dump` reports `regions`. Node test 6/6 (tight region union, region-only group, cropped thumbnail, self-loop).
+
 ## ✅ v1.69.0 — FIX: lasso (Cite + group-connect) silently dropped elements (esp. text) (2026-06-21)
 - **Bug (user-reported):** lassoing "this is a test" (white canvas text) captured **nothing** — both the **Cite** tool and the
   round-5 **group-connect** lasso. Not a Phase B regression and **not** a colour issue — the root cause is shared:
