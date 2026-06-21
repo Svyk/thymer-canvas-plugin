@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.76.0';
+const PLEXUS_VERSION = '1.77.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -252,6 +252,7 @@ const TOOLS = [
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
   { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
   { id: 'card', icon: 'ti-id', title: 'New record card — click to drop a new note/record (edit its properties on the right)' },
+  { id: 'datacore', icon: 'ti-table', title: 'Datacore card — click to drop a live query (dc: …); select it for the interactive view' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -2791,6 +2792,8 @@ class CanvasView {
         this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
       } else if (this.tool === 'card') {
         this.tool = 'select'; this._syncToolbar(); this._newRecordCardAt(down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-2: click to drop a new record card (default Notes/Captures); the property panel opens on its selection
+      } else if (this.tool === 'datacore') {
+        this.tool = 'select'; this._syncToolbar(); this._insertQueryNode('dc: @task', down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-4: drop a Datacore query node; selecting it mounts the live interactive view
       } else if (this.tool === 'arrow' || this.tool === 'line') {
         mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'crop') {
@@ -3549,6 +3552,33 @@ class CanvasView {
     } catch (_e) {}
   }
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
+  // ── EDIT-4c: a LIVE interactive Datacore view mounted over a selected dc: query node (via window.__plexusDatacore.mountView) ──
+  _closeDcOverlay() { if (this._dcMounted) { try { this._dcMounted.destroy && this._dcMounted.destroy(); } catch (_e) {} this._dcMounted = null; } if (this._dcOverlayEl) { try { this._dcOverlayEl.remove(); } catch (_e) {} this._dcOverlayEl = null; } this._dcOverlayId = null; }
+  _syncDcOverlay() {
+    let node = null;
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && !this._present && this.selected.size === 1) {
+      const a = this._byId(this.selected.values().next().value); if (a && !a.isDeleted && a.type === 'query' && /^dc:\s*/i.test(a.query || '')) node = a;
+    }
+    const dc = window.__plexusDatacore;
+    if (!node || !dc || !dc.mountView) { this._closeDcOverlay(); return; }
+    if (this._dcOverlayId !== node.id) { this._closeDcOverlay(); this._dcOverlayId = node.id; this._buildDcOverlay(node); }
+    if (!this._dcOverlayEl) return;
+    const tl = this.camera.worldToScreen(Math.min(node.x, node.x + node.width), Math.min(node.y, node.y + node.height));
+    const w = Math.abs(node.width) * this.camera.zoom, h = Math.abs(node.height) * this.camera.zoom;
+    this._dcOverlayEl.style.left = tl.x + 'px'; this._dcOverlayEl.style.top = tl.y + 'px'; this._dcOverlayEl.style.width = Math.max(240, w) + 'px'; this._dcOverlayEl.style.height = Math.max(150, h) + 'px';
+  }
+  _buildDcOverlay(node) {
+    const dc = window.__plexusDatacore; if (!dc || !dc.mountView) return;
+    this._closeDcOverlay(); this._dcOverlayId = node.id;
+    const box = document.createElement('div'); box.className = 'pxc-dcoverlay'; this._dcOverlayEl = box;
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    const inp = document.createElement('input'); inp.className = 'pxc-dc-q'; inp.value = node.query || 'dc: @task'; inp.title = 'Datacore query (dc: …)';
+    inp.addEventListener('change', () => { node.query = inp.value; this._invalidateQueries(); this.dirty = true; this.scheduleSave(); try { if (this._dcMounted && this._dcMounted.setQuery) this._dcMounted.setQuery(inp.value.replace(/^dc:\s*/i, '')); } catch (_e) {} });
+    box.appendChild(inp);
+    const host = document.createElement('div'); host.className = 'pxc-dc-host'; box.appendChild(host);
+    this.wrap.appendChild(box);
+    try { this._dcMounted = dc.mountView(host, { query: (node.query || '').replace(/^dc:\s*/i, ''), format: 'table' }); } catch (_e) { host.textContent = 'Datacore view error.'; }
+  }
   // Shown when exactly one RECORD card is selected (and no draw/connection state is armed). Rebuilt only when the selected
   // card changes; positioned beside the card each frame. DOM overlay (like _editCardBody) — the card itself stays a raster.
   _syncRecPanel() {
@@ -3559,9 +3589,13 @@ class CanvasView {
     if (!card) { this._closeRecPanel(); return; }
     if (this._recPanelId !== card.id) { this._closeRecPanel(); this._recPanelId = card.id; this._buildRecPanel(card); } // async build; _recPanelId guards stale attach
     if (!this._recPanelEl) return;
-    const s = this.camera.worldToScreen(card.x + Math.abs(card.width), card.y), ww = this.wrap.clientWidth || 800, bw = this._recPanelEl.offsetWidth || 240;
-    let left = s.x + 12; if (left + bw > ww - 6) left = Math.max(6, this.camera.worldToScreen(card.x, card.y).x - bw - 12); // flip to the card's left if it would overflow
-    this._recPanelEl.style.left = Math.max(6, left) + 'px'; this._recPanelEl.style.top = Math.max(8, s.y) + 'px';
+    // 2026-06-21: the panel SITS ON the card (Heptabase-style) — anchored to the card's top-left, matching its on-screen width
+    // (min 220 so the form controls fit). It overlays the card raster while selected; the body spills below when taller.
+    const tl = this.camera.worldToScreen(Math.min(card.x, card.x + card.width), Math.min(card.y, card.y + card.height));
+    const cardW = Math.abs(card.width) * this.camera.zoom, ww = this.wrap.clientWidth || 800;
+    const w = Math.max(220, Math.min(cardW, 360)); // match the card; clamp so a huge card doesn't make a giant form
+    let left = tl.x; if (left + w > ww - 6) left = Math.max(6, ww - w - 6);
+    this._recPanelEl.style.left = Math.max(6, left) + 'px'; this._recPanelEl.style.top = Math.max(8, tl.y) + 'px'; this._recPanelEl.style.width = w + 'px';
   }
   async _buildRecPanel(card) {
     const guid = card.recordGuid; let rec = null;
@@ -3580,6 +3614,7 @@ class CanvasView {
     const mkb = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'pxc-rp-btn'; b.textContent = txt; b.title = title; b.addEventListener('click', (e) => { e.preventDefault(); fn(); }); btns.appendChild(b); return b; };
     mkb('Open', 'Open the record in a panel', () => this._openRecord(guid));
     mkb('Move…', 'Move this record to another collection (keeps its links)', async () => { const col = await this._pickCollection('Move this record to collection:'); if (col) { try { rec.moveToCollection(col.getGuid()); this._invalidateRec(guid); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Moved to “' + (col.getName && col.getName()) + '”.', dismissible: true }); } catch (_e) {} } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not move the record.', dismissible: true }); } catch (_e2) {} } } });
+    mkb('Template', 'Apply a Templater template to this record', () => this._applyTemplate(rec, guid)); // EDIT-3
     head.appendChild(btns); box.appendChild(head);
     // property rows
     const list = document.createElement('div'); list.className = 'pxc-rp-list';
@@ -3601,7 +3636,80 @@ class CanvasView {
       row.appendChild(ctrl); list.appendChild(row);
     }
     box.appendChild(list);
+    // EDIT-4a: a Datacore query field on the panel — type a dc: query → live result rows (guarded if Datacore isn't installed).
+    const dcw = document.createElement('div'); dcw.className = 'pxc-rp-dc';
+    const dcl = document.createElement('div'); dcl.className = 'pxc-rp-dclab'; dcl.textContent = '⛁ Datacore'; dcw.appendChild(dcl);
+    const dci = document.createElement('input'); dci.className = 'pxc-rp-inp'; dci.placeholder = 'dc: @task @overdue   ↵'; dcw.appendChild(dci);
+    const dco = document.createElement('div'); dco.className = 'pxc-rp-dcout'; dcw.appendChild(dco);
+    dci.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return; e.preventDefault();
+      const q = dci.value.trim().replace(/^dc:\s*/i, ''); if (!q) { dco.innerHTML = ''; return; }
+      const dc = window.__plexusDatacore; if (!dc || !dc.queryTable) { dco.textContent = 'Datacore isn’t installed.'; return; }
+      dco.textContent = '…';
+      try { const t = await dc.queryTable(q, [{ field: '$name', label: 'Name' }]); const rows = (t && t.rows) || []; dco.innerHTML = '';
+        const head = document.createElement('div'); head.className = 'pxc-rp-dcn'; head.textContent = rows.length + ' result' + (rows.length === 1 ? '' : 's'); dco.appendChild(head);
+        for (const r of rows.slice(0, 40)) { const rr = document.createElement('div'); rr.className = 'pxc-rp-dcrow'; rr.textContent = r.name || r.guid; rr.title = 'Open'; rr.addEventListener('click', () => this._openRecord(r.guid)); dco.appendChild(rr); }
+        if (rows.length > 40) { const more = document.createElement('div'); more.className = 'pxc-rp-dcrow'; more.style.opacity = '.55'; more.textContent = '+ ' + (rows.length - 40) + ' more'; dco.appendChild(more); }
+      } catch (_e) { dco.textContent = 'Query error.'; }
+    });
+    box.appendChild(dcw);
     this.wrap.appendChild(box);
+  }
+  // ── EDIT-3: apply a Templater template to the selected record (re-implements the renderer — Templater has no callable seam) ──
+  // A generic modal list picker (reuses the .pxc-modal/.pxc-collist chrome from _pickCollection) → returns the chosen item value.
+  _pickFromList(label, items) {
+    return new Promise((resolve) => {
+      const ov = document.createElement('div'); ov.className = 'pxc-modal';
+      const done = (val) => { try { ov.remove(); } catch (_e) {} resolve(val); };
+      ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { e.stopPropagation(); done(null); } });
+      const box = document.createElement('div'); box.className = 'pxc-modal-box'; box.addEventListener('pointerdown', (e) => e.stopPropagation());
+      const lab = document.createElement('div'); lab.className = 'pxc-modal-label'; lab.textContent = label || 'Pick one:';
+      const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'pxc-modal-input'; inp.placeholder = 'Filter…';
+      const list = document.createElement('div'); list.className = 'pxc-collist'; let idx = 0, shown = items;
+      const render = () => { const f = inp.value.trim().toLowerCase(); shown = items.filter((m) => !f || (m.name || '').toLowerCase().includes(f)); if (idx >= shown.length) idx = Math.max(0, shown.length - 1); list.innerHTML = ''; shown.forEach((m, i) => { const r = document.createElement('div'); r.className = 'pxc-colrow' + (i === idx ? ' active' : ''); r.textContent = m.name; r.addEventListener('mousedown', (ev) => { ev.preventDefault(); done(m.value); }); list.appendChild(r); }); };
+      inp.addEventListener('input', () => { idx = 0; render(); });
+      inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx + 1, shown.length - 1); render(); } else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx - 1, 0); render(); } else if (e.key === 'Enter') { e.preventDefault(); if (shown[idx]) done(shown[idx].value); } else if (e.key === 'Escape') { e.preventDefault(); done(null); } });
+      box.appendChild(lab); box.appendChild(inp); box.appendChild(list); ov.appendChild(box); this.wrap.appendChild(ov); render(); setTimeout(() => inp.focus(), 0);
+    });
+  }
+  _fmtTemplateDate(d, fmt) {
+    if (!fmt) { const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()], mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()]; return `${dow} ${mon} ${d.getDate()}`; }
+    const pad = (n, w) => String(n).padStart(w, '0');
+    return fmt.replace(/YYYY/g, d.getFullYear()).replace(/MM/g, pad(d.getMonth() + 1, 2)).replace(/DD/g, pad(d.getDate(), 2)).replace(/HH/g, pad(d.getHours(), 2)).replace(/mm/g, pad(d.getMinutes(), 2)).replace(/ss/g, pad(d.getSeconds(), 2));
+  }
+  // Mirror Templater's renderTemplate (minus the <%* %> JS sandbox, intentionally stripped on the canvas): substitute
+  // {{prompt:LABEL}}, {{date[:fmt]}}, {{record.PropName}}, {{var.NAME}}.
+  _renderTemplateStr(content, ctx) {
+    content = content.replace(/\{\{prompt:([^}]+?)\}\}/g, (_m, body) => (ctx.prompts && ctx.prompts[body.split(/\s*\?\?\s*/)[0].trim()]) || '');
+    content = content.replace(/\{\{date(?::([^}]+))?\}\}/g, (_m, fmt) => this._fmtTemplateDate(new Date(), fmt));
+    content = content.replace(/\{\{record\.([^}]+?)\}\}/g, (_m, prop) => { if (!ctx.rec || !ctx.rec.prop) return ''; try { const p = ctx.rec.prop(prop.trim()); if (!p) return ''; if (p.choiceLabel) { const cl = p.choiceLabel(); if (cl) return cl; } const v = (p.text && p.text()); return v == null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v)); } catch (_e) { return ''; } });
+    content = content.replace(/\{\{var\.([^}]+?)\}\}/g, (_m, name) => { const v = ctx.vars && ctx.vars[name.trim()]; return v == null ? '' : String(v); });
+    content = content.replace(/<%\*[\s\S]*?%>/g, ''); // JS blocks not supported on the canvas
+    return content;
+  }
+  async _applyTemplate(rec, guid) {
+    let tmplColl = null;
+    try { const cols = await this.plugin.data.getAllCollections(); tmplColl = (cols || []).find((c) => { try { return c.getName() === 'Recurring Templates'; } catch (_e) { return false; } }); } catch (_e) {}
+    if (!tmplColl) { try { this.plugin.ui.addToaster({ title: 'No “Recurring Templates” collection found (install Templater first).', dismissible: true }); } catch (_e) {} return; }
+    let templates = []; try { templates = (await tmplColl.getAllRecords()) || []; } catch (_e) {}
+    if (!templates.length) { try { this.plugin.ui.addToaster({ title: 'No templates yet.', dismissible: true }); } catch (_e) {} return; }
+    const nameOf = (r) => { try { return (r.text && r.text('name')) || (r.getName && r.getName()) || 'template'; } catch (_e) { return 'template'; } };
+    const tpl = await this._pickFromList('Apply a template to this record:', templates.map((r) => ({ name: nameOf(r), value: r })));
+    if (!tpl) return;
+    let content = ''; try { content = (tpl.text && tpl.text('content')) || ''; } catch (_e) {}
+    if (!content) { try { this.plugin.ui.addToaster({ title: 'That template has no content.', dismissible: true }); } catch (_e) {} return; }
+    try { const ext = (tpl.text && tpl.text('extends')) || ''; if (ext.trim()) { const parent = templates.find((r) => { try { return nameOf(r) === ext.trim() || r.guid === ext.trim(); } catch (_e) { return false; } }); if (parent) content = ((parent.text && parent.text('content')) || '') + '\n' + content; } } catch (_e) {} // extends → prepend parent
+    let defaults = {}; try { const raw = (tpl.text && tpl.text('variables')) || ''; if (raw.trim()) { const v = JSON.parse(raw); defaults = v.defaults || {}; } } catch (_e) {}
+    // collect prompts (strip JS blocks first so {{}} inside them isn't collected)
+    const labels = [], seen = new Set();
+    content.replace(/<%\*[\s\S]*?%>/g, '').replace(/\{\{prompt:([^}]+?)\}\}/g, (_m, body) => { const parts = body.split(/\s*\?\?\s*/), label = parts[0].trim(); if (!seen.has(label)) { seen.add(label); labels.push({ label, def: (parts[1] || defaults[label] || '').trim() }); } return ''; });
+    const prompts = {};
+    for (const pl of labels) { const v = await this._promptText('Template — ' + pl.label + ':', pl.def); if (v === null) return; prompts[pl.label] = v || pl.def; }
+    const rendered = this._renderTemplateStr(content, { rec, prompts, vars: defaults });
+    try { await rec.insertFromMarkdown(rendered); }
+    catch (_e) { try { for (const ln of rendered.split('\n')) { if (ln.trim()) await rec.createLineItem(null, null, 'ulist', [{ type: 'text', text: ln }], null); } } catch (_e2) {} } // fallback: line-by-line
+    this._invalidateRec(guid); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Applied template “' + nameOf(tpl) + '”.', dismissible: true }); } catch (_e) {}
   }
   // BULK PROPERTY BRUSH: set ONE typed property to the same value across all selected record cards in one gesture —
   // spreadsheet fill-down on REAL records (a choice prop uses setChoice; date→DateTime; number→set(Number); else text).
@@ -3769,6 +3877,13 @@ class CanvasView {
     const entry = { ready: false, items: [], count: 0 }; this._queryCache.set(q, entry);
     (async () => {
       try {
+        // EDIT-4b: a "dc:" query runs through the Datacore engine (if installed); everything else uses Thymer search.
+        const dc = window.__plexusDatacore;
+        if (/^dc:\s*/i.test(q) && dc && dc.queryTable) {
+          const t = await dc.queryTable(q.replace(/^dc:\s*/i, ''), [{ field: '$name', label: 'Name' }]); const rows = (t && t.rows) || [];
+          entry.items = rows.slice(0, 24).map((r) => ({ guid: r.guid, title: r.name || r.guid, kind: 'record' })); entry.count = rows.length; entry.ready = true; this.dirty = true; return;
+        }
+        if (/^dc:\s*/i.test(q)) { entry.items = []; entry.count = 0; entry.title = '(Datacore not installed)'; entry.ready = true; this.dirty = true; return; }
         const res = await this.plugin.data.searchByQuery(q, 30);
         const recs = (res && res.records) || [], lines = (res && res.lines) || [];
         const recItems = recs.slice(0, 20).map((r) => ({ guid: r.guid, title: (r.getName && r.getName()) || 'Untitled', kind: 'record' }));
@@ -5689,6 +5804,7 @@ class CanvasView {
     try { this._syncConnInfo(); } catch (_e) {} // C2 (round 3): the on-canvas connection info card (source / direction / thumbnail) on hover or single-select
     try { this._syncConnStyle(); } catch (_e) {} // round-5 C: the connection-style popover (typed relationship presets + line style + arrowheads + colour) on single-select
     try { this._syncRecPanel(); } catch (_e) {} // EDIT-1: the editable record-card property panel (view/edit typed properties · Move…) on single-select of a record card
+    try { this._syncDcOverlay(); } catch (_e) {} // EDIT-4: the live interactive Datacore view over a selected dc: query node
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -5923,7 +6039,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -6030,6 +6146,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Bulk set property (selected cards)', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._bulkBrush(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Quick-capture (new record card)', icon: 'ti-plus', onSelected: () => { const v = this._activeView(); if (v) v._quickCapture(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New record card (here)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._newRecordCardAt(c.x, c.y); } } }); // EDIT-2
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New Datacore card (here)', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._insertQueryNode('dc: @task', c.x, c.y); } } }); // EDIT-4
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
@@ -7707,6 +7824,16 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-lab { font-size: 11px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-inp, .pxc-host .pxc-root .pxc-recpanel .pxc-rp-sel { width: 100%; padding: 4px 6px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 5px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); font: 12px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-rel { padding: 4px 6px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dc { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding-top: 7px; border-top: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dclab { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; opacity: .55; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dcout { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dcn { font-size: 10px; opacity: .6; padding: 2px 0; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dcrow { padding: 3px 6px; border-radius: 5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-dcrow:hover { background: var(--sidebar-bg-hover, rgba(127,127,127,.18)); }
+/* EDIT-4: live Datacore view overlay over a selected dc: query node */
+.pxc-host .pxc-root .pxc-dcoverlay { position: absolute; z-index: 8; display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--color-text-600, #0ea5e9); border-radius: 9px; box-shadow: 0 10px 30px rgba(0,0,0,.42); overflow: hidden; }
+.pxc-host .pxc-root .pxc-dcoverlay .pxc-dc-q { width: 100%; padding: 4px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 5px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); font: 12px/1.2 ui-monospace, monospace; flex: 0 0 auto; }
+.pxc-host .pxc-root .pxc-dcoverlay .pxc-dc-host { flex: 1 1 auto; overflow: auto; min-height: 0; }
 .pxc-host .pxc-root .pxc-connstyle { position: absolute; z-index: 7; display: flex; flex-direction: column; gap: 6px; padding: 7px; max-width: 250px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.4); font: 12px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
 .pxc-host .pxc-root .pxc-connstyle .pxc-cs-row { display: flex; align-items: center; gap: 5px; }
 .pxc-host .pxc-root .pxc-connstyle .pxc-cs-rels, .pxc-host .pxc-root .pxc-connstyle .pxc-cs-colors { flex-wrap: wrap; }

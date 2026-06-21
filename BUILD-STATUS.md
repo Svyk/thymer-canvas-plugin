@@ -1,5 +1,32 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.77.0 — record cards: apply a template + Datacore (live card + panel query) (EDIT-3/EDIT-4) (2026-06-21)
+- **EDIT-3 — apply a template (minimal Templater re-impl, no seam exists):** the record panel's **Template** button →
+  `_applyTemplate` finds the **"Recurring Templates"** collection, lists its records in a `.pxc-modal` picker (`_pickFromList`),
+  reads the chosen template's `content`/`variables`/`extends`, collects `{{prompt:LABEL ?? def}}` prompts (`_promptText`), renders
+  the substitutions (`_renderTemplateStr`: `{{prompt}}`, `{{date[:fmt]}}`, `{{record.Prop}}`, `{{var.Name}}` — all FUNCTION
+  replacers so `$`-patterns in values are literal; `<%* %>` JS blocks are STRIPPED, not executed in v1), then
+  `rec.insertFromMarkdown(rendered)` (fallback: line-by-line `createLineItem`). `extends` does a single non-recursive prepend
+  (no cycle/self-extend loop). Mirrors the real Templater renderer.
+- **EDIT-4 — Datacore (both surfaces the user asked for):**
+  - **Live Datacore card:** a `datacore` toolbar tool (`ti-table`) + command "Plexus: New Datacore card" drops a `query` node
+    seeded `dc: @task`. Selecting any `dc:` query node mounts a **live, interactive** Datacore view over it via
+    `window.__plexusDatacore.mountView(host, {query, format:'table'})` (`_syncDcOverlay`/`_buildDcOverlay`/`_closeDcOverlay`,
+    tracked per-frame by `worldToScreen`). Editing the overlay's query input calls `mounted.setQuery(...)` (keeps focus, no
+    rebuild) and re-rasters. Single-instance (build closes the prior overlay first); `destroy()` on unmount + teardown — no leak.
+  - **Panel Datacore field:** the record panel gets a `dc:` query row → results listed beneath via `__plexusDatacore.queryTable`.
+  - **`_queryFor` routing:** a canvas `query` node starting `dc:` now runs through the Datacore engine (`queryTable`); non-dc
+    queries are byte-for-byte unchanged. Every `window.__plexusDatacore` access is **guarded** — Datacore absent degrades
+    gracefully (never throws); the dc-not-installed path still readies the node (no stuck "Searching…").
+- **Panel-sits-on-card (user request, mid-build):** the property panel now positions ON the card's top-left in screen space and
+  caps its width to the card's on-screen width (220–360px) instead of floating beside it.
+- **Adversarial review (code-reviewer, all 6 sections): CLEAN — no bugs or regressions.** Confirmed: no stale-record write if the
+  selection changes while the picker/prompts are open (`rec` captured in the panel closure); `_dcMounted` never double-destroyed;
+  record-panel (`type==='record'`) and DC overlay (`type==='query'`) are mutually exclusive. One pre-existing cosmetic note (the
+  `(Datacore not installed)` title isn't rendered by `_drawQueryNode` — same dead-title pattern as the pre-existing `(query
+  error)`) left as-is; doesn't affect this workspace (Datacore is installed). Node tests: `pxc_p34` 9/9 + all regression suites
+  green.
+
 ## ✅ v1.76.0 — editable record-card property panel + a "new card" toolbar tool (EDIT-1/EDIT-2) (2026-06-21)
 - **EDIT-1 — editable transclusion:** selecting ONE record card now shows a DOM **property panel** beside it (`_syncRecPanel`/
   `_buildRecPanel`, synced each frame, built async, positioned via `worldToScreen` with overflow flip). It lists the record's
