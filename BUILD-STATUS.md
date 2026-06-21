@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.63.0 — `test.dump()` diagnostic hook (round 4) (2026-06-20)
+- The CanvasView is not reachable from outside (no DOM expando), so debugging "the blub shape's selection still shows a
+  rectangle" / "the connection has no thumbnail" was blind guessing. Added `window.__plexusCanvas.test.dump()` → returns the
+  active drawing's `{version, n, types histogram, selected[{type,w,h,angle,fill,fillStyle}], connections[{start,end,arrowheads}], imgFiles}`.
+  Read-only, via `_activeView()`. Lets a maintainer read the live scene (e.g. the exact type of a shape whose selection looks wrong).
+- NEXT (pending a live dump): finish the shape-hug for whatever type the blub actually is (v1.61 covers ellipse/diamond/tri/
+  parallelogram/hexagon/cloud; cylinder/roundrect still fall to the bbox rect); diagnose the missing connection thumbnail;
+  wire the @ref preview (record banner / image) into the note-side hover popover.
+
 ## ✅ v1.62.0 — note-side rich hover popover for canvas references (round 4) (2026-06-20)
 - User: the note-side canvas references + line blue-flags should show the source ("Legendary brand"), direction, and an image
   preview — like the canvas info card — on hover, for records AND lines. Confirmed: all refs, hover popover.

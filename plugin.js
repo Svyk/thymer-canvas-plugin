@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.62.0';
+const PLEXUS_VERSION = '1.63.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6333,6 +6333,16 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      // DIAGNOSTIC (round-4): read the active drawing's state — element-type histogram, the selected element(s), and every
+      // connection's endpoints — so a maintainer can inspect the live scene without reaching the encapsulated CanvasView.
+      dump: () => {
+        const v = this._activeView() || [...this._views].pop(); if (!v) return { error: 'no active view' };
+        const els = v.scene.elements.filter((e) => !e.isDeleted);
+        const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
+        const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid } : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
+        return { version: PLEXUS_VERSION, n: els.length, types, selected: sel, connections: conns, imgFiles: Object.keys(v.scene.files || {}).length };
+      },
       // PERF BASELINE (architecture audit): seed N synthetic elements into the active drawing, then time the hot
       // paths so the spatial-index / delta-persistence phases are authorised by a real flamegraph, not a code-read.
       // Console: `window.__plexusCanvas.test.bench(5000)` (then 20000, 50000). `benchReset()` clears the scene.
