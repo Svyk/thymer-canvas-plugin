@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.66.0';
+const PLEXUS_VERSION = '1.67.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1523,7 +1523,7 @@ class CanvasView {
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
     this._lineRects = new Map(); // CONNECTIONS Phase 4: cardId → [{lineGuid, dy, h}] body-line bands (relative to card top, captured each raster) — line-level connection targeting
-    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connRefTargets = new Map(); this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / textId → Set(refGuidTarget) / elId → Set(arrowId) — CURRENT connection targets (blue flag + region/ref highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
+    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connRefTargets = new Map(); this._connGroupTargets = []; this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / textId → Set(refGuidTarget) / elId → Set(arrowId) — CURRENT connection targets (blue flag + region/ref highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
     this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
   }
   mount() {
@@ -1759,9 +1759,10 @@ class CanvasView {
   }
   // The pseudo-shape bindPoint should route an endpoint to: a specific body line, an inline ref run, a marked image region, else the whole element.
   _bindTargetShape(binding, el) {
-    if (binding && binding.lineGuid && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
-    if (binding && binding.refGuidTarget && el.type === 'text') { const rr = this._refRunRectWorld(el, binding.refGuidTarget); if (rr) return { x: rr.x, y: rr.y, width: rr.w, height: rr.h }; } // round-5 A: route to a SPECIFIC inline ref run of a text note
-    if (binding && binding.frac && (el.type === 'image' || isRoughShape(el.type))) { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; } // F2: a region of an image OR a rough shape
+    if (binding && binding.group && binding.group.ids && binding.group.ids.length) { const gb = this._groupBBoxWorld(binding.group.ids); if (gb) return { x: gb.x, y: gb.y, width: gb.w, height: gb.h }; } // round-5 B: a GROUP target → the live union bbox (el is irrelevant/absent for a group binding)
+    if (binding && binding.lineGuid && el && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
+    if (binding && binding.refGuidTarget && el && el.type === 'text') { const rr = this._refRunRectWorld(el, binding.refGuidTarget); if (rr) return { x: rr.x, y: rr.y, width: rr.w, height: rr.h }; } // round-5 A: route to a SPECIFIC inline ref run of a text note
+    if (binding && binding.frac && el && (el.type === 'image' || isRoughShape(el.type))) { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; } // F2: a region of an image OR a rough shape
     return el;
   }
   // The currently-marked region on THIS image (crop/lasso → _pendingImgRegion), to attach as a connection sub-target.
@@ -1813,7 +1814,9 @@ class CanvasView {
   }
   // C2 (round 3): describe one connection endpoint for the on-canvas info card (mirrors _reindexBackrefs' descEnd).
   _connEndpointDesc(b) {
-    if (!b || !b.elementId) return { name: 'point' };
+    if (!b) return { name: 'point' };
+    if (b.group && b.group.ids) { let n = 0, img = null; for (const id of b.group.ids) { const ge = this._byId(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } return { name: 'group of ' + n, img }; } // round-5 B
+    if (!b.elementId) return { name: 'point' };
     const e = this._byId(b.elementId); if (!e || e.isDeleted) return { name: 'gone' };
     const rc = this._recCache;
     if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: (ln && ln.text) || 'line' }; } return { name: (rec && rec.title) || 'note' }; }
@@ -1900,6 +1903,32 @@ class CanvasView {
     }
     this.dirty = true;
   }
+  // ── CONNECTIONS round-5 B: GROUP / REGION connections (an arrow endpoint bound to a SET of elements) ──
+  // The live union bbox (world) of a group's members — rotated footprints included, deleted/missing members skipped.
+  // The endpoint routes here, so the group target tracks as any member moves/resizes. Null when no member resolves.
+  _groupBBoxWorld(ids, lookup) {
+    if (!ids || !ids.length) return null;
+    const get = lookup || ((id) => this._byId(id)); // PERF: callers inside the per-frame _updateBindings fixpoint pass the O(1) idMap lookup; _byId is an O(n) scan, so a 50-member group would be O(50n)/frame without this
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const id of ids) { const el = get(id); if (!el || el.isDeleted) continue; let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue; if (el.angle) bb = rotatedAABB(bb, el.angle); x0 = Math.min(x0, bb.x); y0 = Math.min(y0, bb.y); x1 = Math.max(x1, bb.x + bb.w); y1 = Math.max(y1, bb.y + bb.h); }
+    return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+  }
+  // The element ids enclosed by a lasso polygon — like _selectFromLoop but PURE (returns ids, no selection/region side
+  // effects). Skips connectors/frames + an excluded id. Used by the drop-then-lasso group-link flow.
+  _idsInLoop(poly, excludeId) {
+    const ids = []; if (!poly || poly.length < 3) return ids;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    this._ensureGrid();
+    for (const el of this._grid.query(x0, y0, x1 - x0, y1 - y0)) { if (el.isDeleted || el.type === 'frame' || el.type === 'arrow' || el.type === 'line' || el.id === excludeId) continue; const bb = this._elBBox(el); if (!bb) continue; if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) ids.push(el.id); }
+    return ids;
+  }
+  // The union bbox of the CURRENT multi-selection (≥2 content elements) — drives the group-connect nubs. Null otherwise.
+  _groupSelBBox() {
+    if (this.selected.size < 2) return null;
+    const ids = [...this.selected].filter((id) => { const e = this._byId(id); return e && !e.isDeleted && e.type !== 'arrow' && e.type !== 'line'; });
+    return ids.length >= 2 ? { ids, bb: this._groupBBoxWorld(ids) } : null;
+  }
   // Center the target if it isn't already comfortably on screen (gentle zoom cap), then mark dirty.
   _revealBounds(b) {
     if (!b || !isFinite(b.x)) return;
@@ -1931,6 +1960,7 @@ class CanvasView {
   _connFlashExtras(arrow) {
     const out = [];
     for (const b of [arrow.startBinding, arrow.endBinding]) {
+      if (b && b.group && b.group.ids) { for (const id of b.group.ids) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; const gb = this._elBBox(ge); if (gb && isFinite(gb.x)) out.push({ bbox: gb }); } continue; } // round-5 B: frame EVERY group member so flyback shows the whole region
       if (!b || !b.elementId) continue; const t = this._byId(b.elementId); if (!t || t.isDeleted) continue;
       if (b.lineGuid && t.type === 'record') { const lr = this._lineRectWorld(t, b.lineGuid); if (lr) { out.push({ bbox: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } }); continue; } }
       if (b.refGuidTarget && t.type === 'text') { const rr = this._refRunRectWorld(t, b.refGuidTarget); if (rr) { out.push({ bbox: { x: rr.x, y: rr.y, w: rr.w, h: rr.h } }); continue; } } // round-5 A: frame the targeted inline ref run
@@ -2061,7 +2091,8 @@ class CanvasView {
   _dragMovers() {
     const ids = new Set(this.selected);
     for (const id of ids) { const e = this._byId(id); if (e && e.type === 'frame') return null; }
-    for (const el of this.scene.elements) { if (el.isDeleted || ids.has(el.id)) continue; if ((el.type === 'arrow' || el.type === 'line') && ((el.startBinding && ids.has(el.startBinding.elementId)) || (el.endBinding && ids.has(el.endBinding.elementId)))) ids.add(el.id); }
+    const moverHit = (b) => b && (ids.has(b.elementId) || (b.group && b.group.ids && b.group.ids.some((g) => ids.has(g)))); // round-5 B: a GROUP binding has no elementId — also pull the arrow into the live drag set when a moving element is a group MEMBER (else the arrow renders frozen on the static layer until pointer-up)
+    for (const el of this.scene.elements) { if (el.isDeleted || ids.has(el.id)) continue; if ((el.type === 'arrow' || el.type === 'line') && (moverHit(el.startBinding) || moverHit(el.endBinding))) ids.add(el.id); }
     const out = []; for (const id of ids) { const e = this._byId(id); if (e && !e.isDeleted) out.push(e); }
     return out;
   }
@@ -2262,6 +2293,8 @@ class CanvasView {
     return nubs;
   }
   _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
+  // round-5 B: a press on a multi-selection's group-connect nub (drawn last frame) → the nub world point + the member ids.
+  _groupNubAt(sp) { if (!this._groupNubs || !this._groupNubIds) return null; for (const n of this._groupNubs) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 12) return { x: n.x, y: n.y, ids: this._groupNubIds }; } return null; }
   // CONNECT (forgiving end-bind): the CLOSEST connectable element whose bbox is within `radiusPx` (screen px) of a world
   // point — so dragging a connection TOWARD a card snaps to it even if you release a bit short, not only when you land
   // exactly inside it. Used as the fallback after the precise _bindableAt (which still wins when you're truly over a target).
@@ -2294,20 +2327,24 @@ class CanvasView {
     }
     // CONNECTIONS Phase 4: which lines/regions are CURRENT connection sub-targets (drives the blue flag + region highlight).
     // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
-    const lineT = new Map(), regionT = new Map(), refT = new Map(), byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5); refT: textId → Set(refGuidTarget) for the round-5 inline-ref flag
+    const lineT = new Map(), regionT = new Map(), refT = new Map(), groupT = [], byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5); refT: textId → Set(refGuidTarget) for the round-5 A inline-ref flag; groupT: [{ids}] for the round-5 B group-member highlight
     for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
+      if (b && b.group && b.group.ids && b.group.ids.length) { groupT.push({ ids: b.group.ids }); for (const id of b.group.ids) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } continue; } // round-5 B: a group target has no single elementId — index each MEMBER for the select→highlight + outline the members
       if (!b || !b.elementId) continue;
       { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
       else if (b.refGuidTarget) { let s = refT.get(b.elementId); if (!s) refT.set(b.elementId, s = new Set()); s.add(b.refGuidTarget); } // round-5 A: a connection targeting a specific inline ref → flag that run
       else if (b.frac) { let r = regionT.get(b.elementId); if (!r) regionT.set(b.elementId, r = []); r.push({ frac: b.frac, fracPoly: b.fracPoly }); }
     }
-    this._connLineTargets = lineT; this._connRegionTargets = regionT; this._connRefTargets = refT; this._connByEl = byEl;
+    this._connLineTargets = lineT; this._connRegionTargets = regionT; this._connRefTargets = refT; this._connGroupTargets = groupT; this._connByEl = byEl;
     if (!arrows.length && !labels.length) return; // nothing bound → zero work
+    // Resolve a binding to the pseudo-shape its endpoint should route to: a GROUP's live union bbox (round-5 B, no single
+    // element), else the bound element's line-band / inline-ref / image-region / whole-element shape. Null → free the binding.
+    const tgt = (b) => { if (b.group && b.group.ids && b.group.ids.length) { const gb = this._groupBBoxWorld(b.group.ids, lookup); return gb ? { x: gb.x, y: gb.y, width: gb.w, height: gb.h } : null; } const s = lookup(b.elementId); return s ? this._bindTargetShape(b, s) : null; };
     const updArrow = (el) => {
       let changed = false;
-      if (el.startBinding) { const s = lookup(el.startBinding.elementId); if (s) { const o = el.points[el.points.length - 1]; const p = bindPoint(this._bindTargetShape(el.startBinding, s), o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; } // route to a bound LINE band / image REGION when the binding carries one (Phase 4), else the whole element
-      if (el.endBinding) { const s = lookup(el.endBinding.elementId); if (s) { const o = el.points[0]; const p = bindPoint(this._bindTargetShape(el.endBinding, s), o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
+      if (el.startBinding) { const t = tgt(el.startBinding); if (t) { const o = el.points[el.points.length - 1]; const p = bindPoint(t, o[0], o[1]); el.points[0] = [p.x, p.y]; changed = true; } else el.startBinding = null; } // route to a bound GROUP / LINE band / inline ref / image REGION when the binding carries one, else the whole element
+      if (el.endBinding) { const t = tgt(el.endBinding); if (t) { const o = el.points[0]; const p = bindPoint(t, o[0], o[1]); el.points[el.points.length - 1] = [p.x, p.y]; changed = true; } else el.endBinding = null; }
       if (changed) linearBBox(el);
     };
     const updLabel = (el) => { if (!el.midBinding) return; const a = lookup(el.midBinding.arrowId); if (!a || a.isDeleted || (a.type !== 'arrow' && a.type !== 'line')) { el.midBinding = null; return; } const m = pxcPolyMidpoint(routedPoints(a)); if (m) { el.x = m.x - (Math.abs(el.width) || 0) / 2; el.y = m.y - (Math.abs(el.height) || 0) / 2; } }; // guard: a label freed in an earlier fixpoint pass must not crash a later pass
@@ -2508,6 +2545,9 @@ class CanvasView {
         if (!prl.refOnly && rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { this._closeRegionChoice(); mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } // refOnly (round-5 A text-ref chooser) has no region-mark drag → any press just dismisses it
         this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true;
       }
+      // round-5 B (drop-then-lasso): a pending group-link is armed → this press-drag is the group lasso (any tool). A press
+      // that doesn't drag (a click) cancels in onUp; a drag selects the enclosed elements as the arrow's group target.
+      if (this._pendingGroupLink) { const arr = this._byId(this._pendingGroupLink.arrowId); if (!arr || arr.isDeleted) { this._pendingGroupLink = null; } else { mode = 'grouplasso'; this._lasso = [[down.x, down.y]]; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true; return; } }
       if (this.tool === 'select') {
         const sel = this._singleSel();
         if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'table' || sel.type === 'board' || sel.type === 'frame')) {
@@ -2516,6 +2556,10 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
+        // round-5 B (select-then-connect): pressing a GROUP nub on a ≥2 multi-selection draws an arrow BOUND to the whole group.
+        // BEFORE the single-nub check so it wins on a multi-selection. Keep the selection (the group target) — don't clear it.
+        const gnub = this._groupNubAt(sp);
+        if (gnub) { mode = 'connect'; created = makeLinear(gnub.x, gnub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { group: { ids: gnub.ids.slice() } }; this.scene.elements.push(created); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         // CONNECT: pressing a hover-nub draws a BOUND connection FROM the hovered element (no tool switch). AFTER the handle
         // block so rotate/resize handles win where the top nub overlaps the rotate handle.
         const nub = this._nubAt(sp);
@@ -2599,7 +2643,7 @@ class CanvasView {
       if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const startElId = created.startBinding && created.startBinding.elementId; const bh = this._bindableAt(w.x, w.y, created.id, startElId) || this._nearestBindable(w.x, w.y, 44, created.id, startElId); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target), EXCLUDING the source (B2). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop' || mode === 'regionmark') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee
-      if (mode === 'lasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; }
+      if (mode === 'lasso' || mode === 'grouplasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; } // round-5 B: grouplasso reuses the lasso poly capture
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
@@ -2622,6 +2666,8 @@ class CanvasView {
           if (mode !== 'connect') { const s0 = this._bindableAt(sp0[0], sp0[1], created.id); if (s0) { created.startBinding = this._bindingFor(s0, sp0[0], sp0[1]); startElId = s0.id; } } // tool-drawn arrow: bind the START first so we can EXCLUDE it from the end-snap. Phase 4: _bindingFor attaches the targeted LINE / image REGION
           const s1 = this._bindableAt(lp[0], lp[1], created.id, startElId) || this._nearestBindable(lp[0], lp[1], 44, created.id, startElId); // forgiving end-bind, EXCLUDING the source (B2: a big source's bbox no longer snaps the end back onto itself → no collapse)
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
+          // round-5 B: a group-nub arrow (start = a group) must not snap its END back onto a group MEMBER (self-loop). Drop such an end-bind → free endpoint.
+          if (created.endBinding && created.startBinding && created.startBinding.group && created.startBinding.group.ids && created.startBinding.group.ids.indexOf(created.endBinding.elementId) >= 0) created.endBinding = null;
           this._updateBindings();
           // F2 drop-to-mark + C3: dropped on an image/shape with NO region → offer WHOLE vs a region via a two-button prompt.
           if (s1 && (s1.type === 'image' || isRoughShape(s1.type)) && created.endBinding && !created.endBinding.frac && !created.endBinding.lineGuid) {
@@ -2634,6 +2680,13 @@ class CanvasView {
             this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding', refOnly: true };
             const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
             this._showRefChoice(created, s1, 'endBinding', sp2.x, sp2.y);
+          }
+          // round-5 B (drop-then-lasso): released on EMPTY canvas while the START is anchored to something → arm "lasso a group
+          // to connect to". The next press-drag (any tool) draws a selection loop; on release the enclosed elements become the
+          // arrow's group target (anything → group). A press on a single element instead cancels (keeps the dangling end).
+          else if (!s1 && (created.startBinding)) {
+            this._pendingGroupLink = { arrowId: created.id, key: 'endBinding' };
+            try { this.plugin.ui.addToaster({ title: 'Lasso a group of elements to connect to (or press elsewhere to cancel).', dismissible: true }); } catch (_e) {}
           }
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
@@ -2656,6 +2709,17 @@ class CanvasView {
         const poly = this._lasso || []; this._lasso = null;
         if (poly.length >= 3) this._selectFromLoop(poly);
         this.tool = 'select'; this._syncToolbar();
+      }
+      else if (mode === 'grouplasso') { // round-5 B: the lasso enclosed a group → bind the pending arrow's end to it (anything → group)
+        const poly = this._lasso || []; this._lasso = null; const pgl = this._pendingGroupLink; this._pendingGroupLink = null;
+        const arrow = pgl && this._byId(pgl.arrowId);
+        if (arrow && !arrow.isDeleted && poly.length >= 3) {
+          const otherB = arrow[pgl.key === 'endBinding' ? 'startBinding' : 'endBinding'], exId = otherB && otherB.elementId; // self-loop guard: the OTHER endpoint's element must not become a member of THIS endpoint's group (parity with the nub-drag guard)
+          let ids = this._idsInLoop(poly, arrow.id); if (exId) ids = ids.filter((id) => id !== exId);
+          if (ids.length) { arrow[pgl.key] = { group: { ids } }; this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Connected to a group of ' + ids.length + '.', dismissible: true }); } catch (_e) {} }
+          else try { this.plugin.ui.addToaster({ title: 'No elements in the lasso — the connection end is unchanged.', dismissible: true }); } catch (_e) {}
+        }
+        this.tool = 'select'; this._syncToolbar(); this.dirty = true;
       }
       else if (mode === 'move' && moveEls) {
         if (moved) { this.scheduleSave(); this._timelineRedateMoved(moveEls); } // TIMELINE: dragging a timeline card re-dates it
@@ -2716,8 +2780,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3: Esc keeps the whole-element link
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / pending group-link
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B: Esc keeps the whole-element link + disarms a pending group-lasso
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -2738,7 +2802,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze, crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + any pending group-lasso (round-5 B), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4177,7 +4241,9 @@ class CanvasView {
     // F1/F3: describe a connection's OTHER endpoint for the note-side breadcrumb — a card title / line snippet / text / shape / image (+ its region ref for a thumbnail). Names clipped; safe on missing cache.
     const clip = (s) => { s = (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim(); return s.length > 40 ? s.slice(0, 39) + '…' : s; };
     const descEnd = (b) => {
-      if (!b || !b.elementId) return null; const e = byId.get(b.elementId); if (!e) return null;
+      if (!b) return null;
+      if (b.group && b.group.ids) { let n = 0, img = null; for (const id of b.group.ids) { const ge = byId.get(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } return { name: 'group of ' + n, img }; } // round-5 B: a group endpoint reads as "group of N" + the first image member's thumbnail
+      if (!b.elementId) return null; const e = byId.get(b.elementId); if (!e) return null;
       const rc = this._recCache;
       if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: clip((ln && ln.text)) || 'line' }; } return { name: clip(rec && rec.title) || 'note' }; }
       if (e.type === 'linecard') { const rec = rc && rc.get(e.recordGuid); return { name: clip(rec && rec.title) || 'line' }; }
@@ -4210,12 +4276,15 @@ class CanvasView {
         }
         const lbl = connName ? ('connection: ' + connName) : 'connection';
         for (const b of [el.startBinding, el.endBinding]) {
-          if (!b || !b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
+          if (!b) continue;
           // F1/F3: the OTHER endpoint (source/context) + the arrow direction relative to THIS note, for the dialog breadcrumb.
+          // Hoisted ABOVE the elementId guard so a GROUP binding (no elementId) also carries the breadcrumb (round-5 B).
           const ob = (b === el.startBinding) ? el.endBinding : el.startBinding, other = descEnd(ob), isStart = (b === el.startBinding);
           const headHere = isStart ? el.startArrowhead : el.endArrowhead, headThere = isStart ? el.endArrowhead : el.startArrowhead;
           const dir = (headHere && headThere) ? 'both' : headHere ? 'in' : headThere ? 'out' : 'none'; // 'in' = arrow points AT this note (from → here); 'out' = away; 'both' = ↔; 'none' = plain line
           const extra = { from: other && other.name, dir, img: other && other.img };
+          if (b.group && b.group.ids) { for (const mid of b.group.ids) { const me = byId.get(mid); if (!me || me.isDeleted) continue; if (me.type === 'record' && me.recordGuid) put(me.recordGuid, el.id, lbl, 'record', extra); else if (me.type === 'linecard' && me.lineGuid) put(me.lineGuid, el.id, lbl, 'line', extra); } continue; } // round-5 B: record/line MEMBERS of a group target get the ↗ (a group of plain images/shapes keys nothing — canvas-only)
+          if (!b.elementId) continue; const t = byId.get(b.elementId); if (!t) continue;
           if (t.type === 'record' && t.recordGuid) { if (b.lineGuid) put(b.lineGuid, el.id, lbl, 'line', extra); else put(t.recordGuid, el.id, lbl, 'record', extra); } // Phase 4: bound to a SPECIFIC body line → key the backref by lineGuid so the note's SOURCE LINE gets the ↗ (not the whole record)
           else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line', extra);
           else if (t.type === 'text' && b.refGuidTarget) put(b.refGuidTarget, el.id, lbl, b.refKindTarget || 'record', extra); // round-5 A: bound to a SPECIFIC inline ref → key the backref by that ref's target record/line (the LINKED record gets the ↗)
@@ -5095,7 +5164,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region state stale (F2/C3)
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group state stale (F2/C3/round-5 B)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
@@ -5217,8 +5286,15 @@ class CanvasView {
     // CONNECTIONS Phase 4: persistent overlay for line/region connection targets — a little blue flag on every targeted body
     // line + a cyan outline on every bound image region. CANVAS-OVERLAY ONLY (zero source-note mutation), world-space so it
     // tracks the card/image live; the note's source line independently gets the ↗ via _reindexBackrefs (keyed by lineGuid).
-    if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size) || (this._connRefTargets && this._connRefTargets.size)) {
+    if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size) || (this._connRefTargets && this._connRefTargets.size) || (this._connGroupTargets && this._connGroupTargets.length)) {
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      if (this._connGroupTargets) for (const grp of this._connGroupTargets) { // round-5 B: dashed cyan outline on every member of a group connection target + a faint hull
+        let hx0 = Infinity, hy0 = Infinity, hx1 = -Infinity, hy1 = -Infinity; // resolve members ONCE; union the SAME bboxes for the hull (no second _groupBBoxWorld scan)
+        ictx.setLineDash([6 / z, 4 / z]); ictx.strokeStyle = '#06b6d4'; ictx.lineWidth = 1.4 / z;
+        for (const id of (grp.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; let bb = this._elBBox(ge); if (!bb || !isFinite(bb.x)) continue; if (ge.angle) bb = rotatedAABB(bb, ge.angle); ictx.strokeRect(bb.x - 2 / z, bb.y - 2 / z, bb.w + 4 / z, bb.h + 4 / z); hx0 = Math.min(hx0, bb.x); hy0 = Math.min(hy0, bb.y); hx1 = Math.max(hx1, bb.x + bb.w); hy1 = Math.max(hy1, bb.y + bb.h); }
+        if (isFinite(hx0)) { ictx.setLineDash([2 / z, 5 / z]); ictx.strokeStyle = 'rgba(6,182,212,0.5)'; ictx.lineWidth = 1.2 / z; ictx.strokeRect(hx0 - 6 / z, hy0 - 6 / z, (hx1 - hx0) + 12 / z, (hy1 - hy0) + 12 / z); }
+        ictx.setLineDash([]);
+      }
       if (this._connRefTargets) for (const [textId, set] of this._connRefTargets) { // round-5 A: cyan flag + underline tint on every targeted inline ref run of a text note
         const el = this._byId(textId); if (!el || el.isDeleted || el.type !== 'text') continue;
         for (const g of set) {
@@ -5354,6 +5430,7 @@ class CanvasView {
         this.dirty = true;
       }
     }
+    this._groupNubs = null; this._groupNubIds = null; // round-5 B: recomputed below only for a ≥2 multi-selection
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
@@ -5383,6 +5460,15 @@ class CanvasView {
       ictx.setLineDash([6 / z, 4 / z]); const pad = 4 / z;
       for (const id of this.selected) { if (id === this.editingId) continue; const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); } // #6: don't double the textarea outline while editing
       ictx.setLineDash([]);
+      // round-5 B (select-then-connect): a ≥2 multi-selection shows a faint hull + connect nubs — drag a nub → an arrow BOUND
+      // to the whole group (group → anything). Reuses _connNubsFor on the selection's union bbox; nubs stored for onDown hit-test.
+      const gsel = this._groupSelBBox();
+      if (gsel && gsel.bb) { const bb = gsel.bb; ictx.setLineDash([2 / z, 5 / z]); ictx.strokeStyle = 'rgba(124,92,255,0.55)'; ictx.lineWidth = 1.2 / z; ictx.strokeRect(bb.x - 8 / z, bb.y - 8 / z, bb.w + 16 / z, bb.h + 16 / z); ictx.setLineDash([]);
+        const nubs = this._connNubsFor({ x: bb.x, y: bb.y, width: bb.w, height: bb.h }); this._groupNubs = nubs; this._groupNubIds = gsel.ids;
+        ictx.setTransform(1, 0, 0, 1, 0, 0); const rr = 5 * d;
+        for (const n of nubs) { const s = this.camera.worldToScreen(n.x, n.y); ictx.beginPath(); ictx.arc(s.x * d, s.y * d, rr, 0, 7); ictx.fillStyle = '#7c5cff'; ictx.fill(); ictx.lineWidth = 1.5 * d; ictx.strokeStyle = '#fff'; ictx.stroke(); }
+        ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      }
     }
     this._renderMinimap(ictx, d); // MINIMAP: radar overlay (auto-hidden when everything fits the viewport)
   }
@@ -6419,7 +6505,7 @@ class Plugin extends AppPlugin {
         const els = v.scene.elements.filter((e) => !e.isDeleted);
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
-        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null } : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
         // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
         const thumbTest = [];
         for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }

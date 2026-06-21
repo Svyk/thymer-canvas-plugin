@@ -1,5 +1,32 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.67.0 — round-5 Phase B: arrow → a GROUP / REGION of the canvas (bidirectional) (2026-06-20)
+- A connection endpoint can now bind to a **set of elements** — new binding shape `b.group = { ids: [...] }` (no single
+  `elementId`). The endpoint routes to the **live union bbox** of the members (`_groupBBoxWorld`), so the group target tracks
+  as any member moves/resizes; an all-deleted group frees the binding.
+- **Two creation interactions (both directions):**
+  - *select-then-connect* (group → anything): a ≥2 multi-selection shows a faint hull + **connect nubs** on its union bbox
+    (`_groupSelBBox`/`_groupNubAt`); drag a nub → an arrow bound to the whole group. (group-nub arrow keeps the selection;
+    a self-loop guard drops an end that snaps back onto a member.)
+  - *drop-then-lasso* (anything → group): drop an arrow end on **empty canvas** → `_pendingGroupLink` armed → the next
+    press-drag is a **`grouplasso`** (any tool) → `_idsInLoop(poly)` → `endBinding.group`. A click (no drag) cancels.
+- **Surfacing (bidirectional):** `_reindexBackrefs` registers the NOTE/record endpoint with `from: "group of N"` + the first
+  image member's **thumbnail**; a group endpoint keys no bogus record backref. `descEnd`/`_connEndpointDesc` read "group of N".
+  `_connFlashExtras` frames **every member** on flyback; the persistent overlay outlines each member + a faint hull (cyan).
+- Routing: `_bindTargetShape` group branch first (null-safe `el`); `_updateBindings` `tgt()` helper resolves group→union
+  (no element lookup) and builds `_connGroupTargets`. `test.dump()` reports `{group:N}` endpoints. Pure-logic node test 10/10.
+  **Zero source-note mutation** preserved. Reviewed by a 4-dimension adversarial Workflow (binding-regression / interactions /
+  backref-flash / perf-render) with per-finding verification — **14 findings → 5 distinct bugs, all fixed before ship:**
+  - **A (HIGH):** `_dragMovers` omitted group-bound arrows (no `elementId`) → the arrow rendered **frozen on the static layer**
+    while a member was dragged, snapping only on pointer-up. Now `_dragMovers` also matches a dragged id against `b.group.ids`.
+  - **E (MED, perf):** `_groupBBoxWorld` resolved members via O(n) `_byId` every frame → O(members×n). Now takes the
+    `_updateBindings` O(1) `lookup`; the render overlay resolves members once and unions those bboxes for the hull.
+  - **B (MED):** a group whose **members are record/line cards** keyed no ↗. Now each record/line member gets the backref
+    (the `extra` breadcrumb hoisted above the `elementId` guard); a group of plain images stays canvas-only by design.
+  - **C (LOW):** drop-then-lasso could enclose the arrow's own start-bound element → self-loop. Now excluded (parity w/ nub-drag).
+  - **D (LOW):** `_pendingGroupLink` could strand (Escape / tool-switch / undo / pointercancel) and hijack the next gesture.
+    Now cleared in all four. Fix node-test 8/8.
+
 ## ✅ v1.66.0 — round-5 Phase A: arrow → a SPECIFIC inline ref of a text note (→ the linked record) (2026-06-20)
 - A connection dropped on a text note that carries inline `@`/`@@` refs now offers a **drop chooser** — "Whole box" + one
   button per inline ref (e.g. the screenshot's *Pastabilites* / *pasta*). Picking a ref binds the endpoint to that ref's
