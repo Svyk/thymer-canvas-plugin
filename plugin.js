@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.73.0';
+const PLEXUS_VERSION = '1.74.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2170,7 +2170,11 @@ class CanvasView {
     // connection → fly straight to the union (arrow+ends), no image-style establish-then-zoom-into-region
     const estB = isConn ? null : ((opts && opts.establishImage && el0) ? this._elBBox(el0) : (items.length === 1 && !items[0].inImage && el0 ? this._elBBox(el0) : null));
     const dur = items.some((i) => i.inImage) ? 1200 : 1000;
-    this._revealThenFlash(union, () => { this._flash = { items, start: now(), dur }; this.dirty = true; }, estB);
+    // 2026-06-21 FIX ("badge lands far away"): a CITE frames the PRIMARY cited target (the region/first item) — NOT the union with
+    // far-apart extras (e.g. a text box across the canvas), which zoomed way out so the region landed tiny in a corner. The extras
+    // still pulse (they're in `items`); only the CAMERA lands on the primary. A connection still frames the whole union (arrow+ends).
+    const target = (!isConn && main && main.bbox && isFinite(main.bbox.x)) ? main.bbox : union;
+    this._revealThenFlash(target, () => { this._flash = { items, start: now(), dur }; this.dirty = true; }, estB);
   }
   _now() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
   // True if b is already comfortably framed on-screen (don't bother animating).
@@ -5324,17 +5328,14 @@ class CanvasView {
     const extra = targets.slice(1).map((tg) => tg.kind === 'region'
       ? { el: tg.imgId, inImage: true, frac: tg.frac, fracPoly: tg.fracPoly, region: tg.region }
       : (tg.tx ? { el: tg.el, region: tg.region, text: tg.tx } : { el: tg.el, region: tg.region }));
-    // round-5 E: every cited TEXT target's content → editable caption line(s) beneath the pasted image (deduped, capped). The
-    // caption is a real persisted note line (created at paste), so it needs no filename round-trip — it survives cross-device on its own.
-    const captions = []; const seenCap = new Set();
-    for (const tg of targets) { if (!tg.tx || seenCap.has(tg.tx)) continue; seenCap.add(tg.tx); captions.push(tg.tx.length > 280 ? tg.tx.slice(0, 279) + '…' : tg.tx); }
+    // round-5 E (reverted): the cited TEXT shows IN the combined snapshot image (the union render includes it), not as a separate
+    // editable caption line — the user found the caption messy/redundant. `tg.tx` still rides along in extra[] (harmless metadata).
     this.plugin._imgRefClip = {
       png, sourceRecordGuid: this.recordGuid, label, region,
       elementId: prim.kind === 'region' ? prim.imgId : prim.el,
       crop: (prim.kind === 'el' && prim.isImage) ? ((this._byId(prim.el) || {}).crop || null) : null,
       inImage: prim.kind === 'region' ? true : undefined, frac: prim.frac, fracPoly: prim.fracPoly,
       extra: extra.length ? extra : undefined,
-      captions: captions.length ? captions : undefined,
       w: Math.round((region && region.w) || 0), h: Math.round((region && region.h) || 0),
     };
     this._pendingImgRegion = null; this.dirty = true;
@@ -6116,9 +6117,6 @@ class Plugin extends AppPlugin {
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
     if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra }); } catch (_e) {} }
-    // round-5 E: editable caption line(s) for every cited TEXT target, placed right AFTER the image (sibling) — real, readable
-    // Thymer text (searchable/copyable), quoted. The single ↗ on the image still flies back to ALL targets (via extra[]).
-    if (imgLine && clip.captions && clip.captions.length) { let after = imgLine; for (const cap of clip.captions) { try { const capLine = await rec.createLineItem(parentLine, after, 'ulist', [{ type: 'text', text: '“' + cap + '”' }], null); if (capLine) after = capLine; } catch (_e) {} } }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
     return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };

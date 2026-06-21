@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.74.0 — cite ref polish: drop the caption, flyback lands on the region (2026-06-21)
+- **Removed the editable text caption** (v1.73 Phase A) — the user found it messy/redundant. The cited text now lives only IN
+  the combined union snapshot image (the multi-target `_renderRegionPng` already renders the region + the text together), not as
+  a separate note line. `_copyImageRefToClip` no longer builds `clip.captions`; `_pasteImageRef` no longer creates caption lines.
+- **FIX: the ↗ flyback landed "far away."** `_flashAnchor` flew to the UNION of all flash items — so a region cited together with
+  a far-apart text box zoomed way out, leaving the region tiny in a corner. Now a CITE frames the **PRIMARY** cited target (the
+  region / first item) and the extras only pulse; a CONNECTION still frames the whole union (arrow + both ends). One-line, scoped
+  by `!isConn && main.bbox`.
+
 ## ✅ v1.73.0 — granular cite caption (cited text now shows) + start a connection FROM a region (2026-06-21)
 - **Phase A — the cited text now shows in the note.** A composite Cite (image region + a text box) pasted only the image; the
   text content was dropped (only el-id + bbox kept; the ↗ flyback worked but nothing rendered the words). Now `_copyImageRefToClip`
