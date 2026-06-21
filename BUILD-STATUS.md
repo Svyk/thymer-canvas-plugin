@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.60.0 — canvas connection UX: ref-bar while editing · info card on hover/select · two-button region choice (round 3, C) (2026-06-20)
+Round-3 C (design choices confirmed with the user). All node-tested + adversarially reviewed. Canvas-overlay DOM + scene reads only — zero source-note mutation.
+- **C1 clickable ↗ ref-bar:** inline links were hard to click in the flat edit textarea. Editing a text box that carries inline
+  refs now shows a `.pxc-refbar` beside the editor — one `↗ <label>` chip per ref; click navigates (`_openCard`) without
+  leaving edit mode. Rebuilt on edit (ref added/dissolved), repositioned with the editor, torn down on commit/re-entry.
+- **C2 connection info card (direction always + source/thumbnail on hover/select):** arrowheads already encode direction;
+  now hovering a connection OR single-selecting it shows a `.pxc-conninfo` card at its midpoint — `<start> <dir glyph> <end>`
+  (→ ← ↔ — from the arrowheads) + a cropped thumbnail for an image-region endpoint (`_connEndpointDesc` + `_regionThumb`).
+  Managed in the render overlay: built on arrow-change, repositioned each frame, hidden when not hovering/selecting a connection.
+- **C3 two-button whole-vs-region prompt:** dropping a connection on an image/shape now shows a `.pxc-region-choice` with
+  "Whole <x>" (disarms the region link) and "Pick a region" (arms the marquee), replacing the ambiguous toaster. Cleared on
+  every path (buttons, region-mark start/cancel, Esc, tool-switch, undo).
+- Connection round-3 (A–D, C1–C3) COMPLETE.
+
 ## ✅ v1.59.0 — blub-drag: connect-nub viewport-clamp (round 3, D) (2026-06-20)
 - "Dragging a connection FROM the blub (a screen-filling ellipse) doesn't work." Root cause: `_connNubsFor` places the 4
   edge-drag nubs at the bbox edge-midpoints; for a huge element those are far off-screen → `_nubAt` (11px screen hit) never

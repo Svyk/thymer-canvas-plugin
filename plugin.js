@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.59.0';
+const PLEXUS_VERSION = '1.60.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1763,6 +1763,61 @@ class CanvasView {
     return b;
   }
   _ptInBBox(el, x, y) { const b = this._elBBox(el); return !!(b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); } // F2: is a world point inside an element's bbox (region-mark target test)
+  // C3 (round 3): the two-button WHOLE-vs-REGION prompt shown at the drop point. "Whole" disarms the pending region-link
+  // (the whole-element binding stays); "Pick a region" keeps it armed so the next drag on the element marks the sub-region.
+  _showRegionChoice(what, sx, sy) {
+    this._closeRegionChoice();
+    const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
+    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Link to…'; box.appendChild(lab);
+    const mk = (txt, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
+    mk('Whole ' + what, () => { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; });
+    mk('Pick a region', () => { this._closeRegionChoice(); try { this.plugin.ui.addToaster({ title: 'Drag a box on the ' + what + ' to mark the region.', dismissible: true }); } catch (_e) {} this.dirty = true; }); // _pendingRegionLink stays armed → next drag on the element marks
+    this.wrap.appendChild(box);
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 150, bh = box.offsetHeight || 78;
+    box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
+    box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
+  }
+  _closeRegionChoice() { if (this._regionChoiceEl) { try { this._regionChoiceEl.remove(); } catch (_e) {} this._regionChoiceEl = null; } }
+  // C2 (round 3): describe one connection endpoint for the on-canvas info card (mirrors _reindexBackrefs' descEnd).
+  _connEndpointDesc(b) {
+    if (!b || !b.elementId) return { name: 'point' };
+    const e = this._byId(b.elementId); if (!e || e.isDeleted) return { name: 'gone' };
+    const rc = this._recCache;
+    if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: (ln && ln.text) || 'line' }; } return { name: (rec && rec.title) || 'note' }; }
+    if (e.type === 'linecard') { const rec = rc && rc.get(e.recordGuid); return { name: (rec && rec.title) || 'line' }; }
+    if (e.type === 'text') return { name: (e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' };
+    if (e.type === 'image') return { name: 'image', img: { fileId: e.fileId, frac: b.frac || null, fracPoly: b.fracPoly || null } };
+    return { name: e.type || 'shape' };
+  }
+  // C2: the active connection for the info card = a hovered connection, else a single-selected one. Build/position a DOM card
+  // near its midpoint: <start> <dir glyph> <end> (+ a thumbnail for an image-region endpoint). Direction from the arrowheads.
+  _syncConnInfo() {
+    let arrow = null;
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && !this._present) {
+      if (this._connInfoHover) { const a = this._byId(this._connInfoHover); if (a && !a.isDeleted && (a.type === 'arrow' || a.type === 'line')) arrow = a; }
+      if (!arrow && this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && !a.isDeleted && (a.type === 'arrow' || a.type === 'line')) arrow = a; }
+    }
+    if (!arrow) { if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } this._connInfoId = null; return; }
+    if (this._connInfoId !== arrow.id || !this._connInfoEl) { this._buildConnInfo(arrow); this._connInfoId = arrow.id; }
+    if (!this._connInfoEl) return;
+    const mid = pxcPolyMidpoint(routedPoints(arrow)); if (!mid) return;
+    const s = this.camera.worldToScreen(mid.x, mid.y);
+    this._connInfoEl.style.left = s.x + 'px'; this._connInfoEl.style.top = (s.y + 16) + 'px';
+  }
+  _buildConnInfo(arrow) {
+    if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; }
+    const clip = (s) => { s = (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim(); return s.length > 40 ? s.slice(0, 39) + '…' : (s || ' '); };
+    const start = this._connEndpointDesc(arrow.startBinding), end = this._connEndpointDesc(arrow.endBinding);
+    const sa = arrow.startArrowhead, ea = arrow.endArrowhead, glyph = (sa && ea) ? '↔' : ea ? '→' : sa ? '←' : '—';
+    const card = document.createElement('div'); card.className = 'pxc-conninfo'; this._connInfoEl = card;
+    const thumb = (d) => { if (!d || !d.img) return; let u = null; try { u = this.plugin._regionThumb(d.img); } catch (_e) {} if (u) { const im = document.createElement('img'); im.className = 'pxc-ci-thumb'; im.src = u; card.appendChild(im); } };
+    thumb(start);
+    const f = document.createElement('span'); f.className = 'pxc-ci-from'; f.textContent = clip(start.name); card.appendChild(f);
+    const dg = document.createElement('span'); dg.className = 'pxc-ci-dir'; dg.textContent = glyph; card.appendChild(dg);
+    const t = document.createElement('span'); t.className = 'pxc-ci-to'; t.textContent = clip(end.name); card.appendChild(t);
+    thumb(end);
+    this.wrap.appendChild(card);
+  }
   _polyBBox(pts) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); } return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
@@ -2400,8 +2455,8 @@ class CanvasView {
       // a press OFF it cancels (keeps the whole-element link). Works regardless of the current tool.
       if (this._pendingRegionLink) {
         const prl = this._pendingRegionLink, rel = this._byId(prl.elId);
-        if (rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
-        this._pendingRegionLink = null; this.dirty = true;
+        if (rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { this._closeRegionChoice(); mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+        this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true;
       }
       if (this.tool === 'select') {
         const sel = this._singleSel();
@@ -2463,12 +2518,14 @@ class CanvasView {
           // CONNECT: show edge nubs on the hovered connectable element (drag a nub → a bound connection, no tool switch)
           const ch = (hit && hit.type !== 'arrow' && hit.type !== 'line' && hit.type !== 'frame') ? hit : null;
           if ((ch && ch.id) !== (this._connHover && this._connHover.id)) { this._connHover = ch; this.dirty = true; }
+          const connId = (hit && (hit.type === 'arrow' || hit.type === 'line')) ? hit.id : null; // C2: hovering a connection → the info card
+          if (connId !== this._connInfoHover) { this._connInfoHover = connId; this.dirty = true; }
           const rct = this.wrap.getBoundingClientRect(); const onNub = !!this._nubAt({ x: e.clientX - rct.left, y: e.clientY - rct.top });
           const cur = onNub ? 'crosshair' : (over ? 'pointer' : ''); if (this.wrap.style.cursor !== cur) this.wrap.style.cursor = cur;
-        } else if (this._connHover) { this._connHover = null; this.dirty = true; }
+        } else { if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._connInfoHover) { this._connInfoHover = null; this.dirty = true; } }
         return;
       }
-      moved = true; clearLP(); this._connHover = null; // S10: any drag cancels a pending long-press open; also hide the connect-nubs during a drag
+      moved = true; clearLP(); this._connHover = null; this._connInfoHover = null; // S10: any drag cancels a pending long-press open; also hide the connect-nubs + hover info card during a drag
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._panMode = true; this._lastCamChange = this._now(); this.dirty = true; return; } // _panMode → render() translates the oversized layer via CSS transform (compositor pan), no raster
       const w = this._worldAt(e);
@@ -2509,11 +2566,11 @@ class CanvasView {
           const s1 = this._bindableAt(lp[0], lp[1], created.id, startElId) || this._nearestBindable(lp[0], lp[1], 44, created.id, startElId); // forgiving end-bind, EXCLUDING the source (B2: a big source's bbox no longer snaps the end back onto itself → no collapse)
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
           this._updateBindings();
-          // F2 drop-to-mark: dropped on an image/shape with NO region yet → offer to draw the exact sub-region with the next drag.
+          // F2 drop-to-mark + C3: dropped on an image/shape with NO region → offer WHOLE vs a region via a two-button prompt.
           if (s1 && (s1.type === 'image' || isRoughShape(s1.type)) && created.endBinding && !created.endBinding.frac && !created.endBinding.lineGuid) {
             this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding' };
-            const what = s1.type === 'image' ? 'image' : 'shape';
-            try { this.plugin.ui.addToaster({ title: 'Drag on the ' + what + ' to mark the exact region — or press Esc / click away to link the whole ' + what + '.', dismissible: true }); } catch (_e) {}
+            const what = s1.type === 'image' ? 'image' : 'shape', sp2 = this.camera.worldToScreen(lp[0], lp[1]);
+            this._showRegionChoice(what, sp2.x, sp2.y);
           }
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
@@ -2596,8 +2653,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2: Esc keeps the whole-element link
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3: Esc keeps the whole-element link
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -2706,6 +2763,7 @@ class CanvasView {
   _editText(el) {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
+    if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } // C1: clear a leftover ref bar
     this.editingId = el.id; this._connHover = null; // entering edit → drop any connect-hover (no phantom nubs around the textarea; review 2b)
     this.dirty = true; try { this.render(); } catch (_e) {} // clear the element off the canvas NOW (same paint the textarea appears in) → no one-frame "double" overlap on entering edit
     const ta = document.createElement('textarea'); ta.className = 'pxc-textedit' + (el.midBinding ? ' pxc-connlabel' : ''); this._ta = ta;
@@ -2731,8 +2789,19 @@ class CanvasView {
     };
     place(); this.wrap.appendChild(ta);
     const grow = () => { ta.style.height = '0px'; ta.style.height = ta.scrollHeight + 'px'; };
-    this._refRefresh = () => { try { place(); grow(); } catch (_e) {} }; // CANVAS-SEG: _applyRefChip resizes the textarea after an inline splice
-    setTimeout(() => { ta.focus(); ta.select(); grow(); }, 0);
+    // C1 (round 3): inline links are hard to click in the flat textarea → surface each ref as a clickable ↗ chip beside the
+    // editor that navigates without leaving edit mode. Rebuilt when the runs change; repositioned with the editor.
+    const positionRefBar = () => { if (!this._refBarEl) return; try { const taR = ta.getBoundingClientRect(), wR = this.wrap.getBoundingClientRect(); this._refBarEl.style.left = Math.max(2, taR.left - wR.left) + 'px'; this._refBarEl.style.top = Math.max(2, (taR.top - wR.top) - (this._refBarEl.offsetHeight || 28) - 5) + 'px'; } catch (_e) {} };
+    const buildRefBar = () => {
+      if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; }
+      const refs = (el.runs || []).filter((r) => r && r.t === 'ref'); if (!refs.length) return;
+      const bar = document.createElement('div'); bar.className = 'pxc-refbar'; this._refBarEl = bar;
+      for (const r of refs) { const rr = r; const chip = document.createElement('span'); chip.className = 'pxc-refchip'; const ic = document.createElement('span'); ic.textContent = '↗'; chip.appendChild(ic); const tx = document.createElement('span'); tx.className = 'pxc-rc-txt'; tx.textContent = rr.alias || rr.label || 'ref'; chip.appendChild(tx); chip.title = 'Open this link'; chip.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); this._openCard({ refKind: rr.kind, refGuid: rr.guid, refLineGuid: rr.lineGuid }); }); bar.appendChild(chip); }
+      this.wrap.appendChild(bar); positionRefBar();
+    };
+    this._refRebuildBar = buildRefBar; buildRefBar();
+    this._refRefresh = () => { try { place(); grow(); positionRefBar(); } catch (_e) {} }; // CANVAS-SEG: _applyRefChip resizes the textarea after an inline splice
+    setTimeout(() => { ta.focus(); ta.select(); grow(); positionRefBar(); }, 0); // C1: reposition the ref bar once the editor has its final height
     this._refPick = { open: false, mode: null, query: '', triggerStart: 0, rows: [], idx: 0, seq: 0, alias: '', dom: null, timer: null }; // A2 picker state
     try { this._injectRefPickerCss(); } catch (_e) {}
     const syncRuns = () => { // map the latest flat edit onto el.runs (dissolving any edited-over ref); fall back to plain
@@ -2743,12 +2812,13 @@ class CanvasView {
       prevFlat = ta.value; el.text = ta.value;
       if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
     };
-    const onInput = () => { syncRuns(); place(); grow(); this.dirty = true; this._refDetect(ta, el); };
+    const onInput = () => { syncRuns(); place(); grow(); buildRefBar(); this.dirty = true; this._refDetect(ta, el); }; // C1: rebuild the ref bar when runs change (a ref added/dissolved)
     const commit = () => {
       this._closeRefPicker(); syncRuns();
       if (!String(el.text).trim()) el.isDeleted = true;
       else if (el.midBinding) this._updateBindings(); // CONNECTION LABEL: re-center on the connector midpoint now that it has a measured size
-      this.editingId = null; this._ta = null; this._refPrevFlat = null; this._refSetPrevFlat = null; this._refRefresh = null; try { ta.remove(); } catch (_e) {}
+      this.editingId = null; this._ta = null; this._refPrevFlat = null; this._refSetPrevFlat = null; this._refRefresh = null; this._refRebuildBar = null; try { ta.remove(); } catch (_e) {}
+      if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } // C1: tear down the ref bar
       this.dirty = true; this.scheduleSave();
     };
     this._refCommit = commit; // _applyRefChip uses this to finalize a caret-only chip
@@ -4961,7 +5031,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; // undo/redo replaced the scene → cache + index + pending region state stale (F2)
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region state stale (F2/C3)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
@@ -5118,6 +5188,7 @@ class CanvasView {
         if (bb) { const sp = this.camera.worldToScreen(bb.x + bb.w, bb.y), txt = '⇄ ' + arrowIds.size; ictx.font = '600 ' + (11 * d) + 'px system-ui, sans-serif'; const pad = 5 * d, ch = 17 * d, cw = ictx.measureText(txt).width + pad * 2, rx = sp.x * d - cw + 3 * d, ry = sp.y * d - ch - 3 * d; ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(rx, ry, cw, ch, 8 * d); else ictx.rect(rx, ry, cw, ch); ictx.fillStyle = '#7c5cff'; ictx.fill(); ictx.fillStyle = '#fff'; ictx.textAlign = 'left'; ictx.textBaseline = 'middle'; ictx.fillText(txt, rx + pad, ry + ch / 2 + 0.5 * d); ictx.textBaseline = 'alphabetic'; }
       }
     }
+    try { this._syncConnInfo(); } catch (_e) {} // C2 (round 3): the on-canvas connection info card (source / direction / thumbnail) on hover or single-select
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -5312,7 +5383,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} /* round-3 C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -7016,6 +7087,21 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-textedit.pxc-connlabel { padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,0.94); box-shadow: 0 0 0 1.5px #7c5cff, 0 2px 8px rgba(0,0,0,.18); }
 .pxc-host .pxc-root.pxc-dark .pxc-textedit.pxc-connlabel { background: rgba(28,31,40,0.95); color: #e6e7ea; }
 .pxc-host .pxc-root .pxc-textedit.pxc-connlabel::placeholder { color: rgba(124,92,255,0.7); }
+/* C3 round 3: whole-image vs region choice on drop */
+.pxc-host .pxc-root .pxc-region-choice { position: absolute; z-index: 6; display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 9px; box-shadow: 0 8px 26px rgba(0,0,0,.35); font: 12px/1.3 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-region-choice .pxc-rc-label { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; opacity: .55; padding: 1px 2px 2px; }
+.pxc-host .pxc-root .pxc-rc-btn { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1.2 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-rc-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+/* C2 round 3: connection info card (source / direction / thumbnail) on hover or select */
+.pxc-host .pxc-root .pxc-conninfo { position: absolute; z-index: 6; display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 5px 8px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.32); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); pointer-events: none; transform: translate(-50%, 0); }
+.pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+.pxc-host .pxc-root .pxc-conninfo .pxc-ci-dir { opacity: .8; font-weight: 700; flex: 0 0 auto; }
+.pxc-host .pxc-root .pxc-conninfo .pxc-ci-thumb { width: 42px; height: 30px; object-fit: cover; border-radius: 3px; border: 1px solid rgba(127,127,127,.4); flex: 0 0 auto; }
+/* C1 round 3: clickable ref chips beside the text editor */
+.pxc-host .pxc-root .pxc-refbar { position: absolute; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px; max-width: 320px; padding: 4px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+.pxc-host .pxc-root .pxc-refchip { display: inline-flex; align-items: center; gap: 4px; max-width: 200px; padding: 3px 8px; border-radius: 6px; background: rgba(124,92,255,.16); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1.2 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-refchip:hover { background: #7c5cff; color: #fff; }
+.pxc-host .pxc-root .pxc-refchip .pxc-rc-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pxc-host .pxc-root .pxc-hint { position: absolute; left: 10px; bottom: 8px; z-index: 3; pointer-events: none; font-size: 11px; opacity: .42; color: var(--color-text-400); }
 /* UX-6: dark-mode chrome — toolbar/props/search go dark to match the dark canvas (theme tokens would stay light). */
 .pxc-host .pxc-root.pxc-dark .pxc-toolbar, .pxc-host .pxc-root.pxc-dark .pxc-props, .pxc-host .pxc-root.pxc-dark .pxc-search { background: #1c1f26; border-color: #2e323b; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
