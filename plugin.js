@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.71.0';
+const PLEXUS_VERSION = '1.72.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1581,7 +1581,7 @@ class CanvasView {
         const btn = document.createElement('button'); btn.className = 'pxc-tool'; btn.title = 'More shapes — triangle, cylinder (database), hexagon, cloud…'; btn.innerHTML = '<span class="ti ti-box"></span>';
         const fly = document.createElement('div'); fly.className = 'pxc-shape-flyout'; fly.style.display = 'none';
         const mkPrev = (sid) => { const cv = document.createElement('canvas'); cv.width = 30; cv.height = 30; cv.style.cssText = 'width:20px;height:20px;display:block'; try { SHAPE_DRAW[sid](cv.getContext('2d'), 4, 5, 22, 20, { stroke: '#cdd3df', strokeWidth: 1.6, roughness: 1 }, 7); } catch (_e) {} return cv; };
-        for (const sp of SHAPE_PICKER) { const sb = document.createElement('button'); sb.className = 'pxc-tool'; sb.title = sp.title; sb.appendChild(mkPrev(sp.id)); sb.addEventListener('click', (e) => { e.stopPropagation(); this.tool = sp.id; this._syncToolbar(); fly.style.display = 'none'; this.iCv.focus(); }); fly.appendChild(sb); }
+        for (const sp of SHAPE_PICKER) { const sb = document.createElement('button'); sb.className = 'pxc-tool'; sb.title = sp.title; sb.appendChild(mkPrev(sp.id)); sb.addEventListener('click', (e) => { e.stopPropagation(); this._userToolSwitch(sp.id); fly.style.display = 'none'; this.iCv.focus(); }); fly.appendChild(sb); }
         btn.addEventListener('click', (e) => { e.stopPropagation(); fly.style.display = fly.style.display === 'none' ? 'flex' : 'none'; });
         const closeFly = (ev) => { if (fly.style.display !== 'none' && !wrap.contains(ev.target)) fly.style.display = 'none'; };
         document.addEventListener('pointerdown', closeFly); this._toolbarDisposers.push(() => document.removeEventListener('pointerdown', closeFly));
@@ -1608,7 +1608,7 @@ class CanvasView {
       if (cfg.hidden[id]) continue;
       const t = TOOLS.find((x) => x.id === id);
       let node = null;
-      if (t) { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = t.title; b.innerHTML = '<span class="ti ' + t.icon + '"></span>'; b.addEventListener('click', () => { this.tool = t.id; this._syncToolbar(); this.iCv.focus(); }); this._toolBtns[t.id] = b; node = b; }
+      if (t) { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = t.title; b.innerHTML = '<span class="ti ' + t.icon + '"></span>'; b.addEventListener('click', () => { this._userToolSwitch(t.id); this.iCv.focus(); }); this._toolBtns[t.id] = b; node = b; }
       else if (builders[id]) node = builders[id]();
       if (node) bar.appendChild(node);
     }
@@ -1633,6 +1633,10 @@ class CanvasView {
     if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
     if (panel) { try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); } }
   }
+  // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
+  // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
+  // region-draw never self-cancels.
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); }
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -1808,6 +1812,52 @@ class CanvasView {
     box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
   }
   _closeRegionChoice() { if (this._regionChoiceEl) { try { this._regionChoiceEl.remove(); } catch (_e) {} this._regionChoiceEl = null; } }
+  // round-5 D: an arrow dropped in the VOID → choose how to link its end. Pen/Lasso draw a precise REGION (over an image →
+  // tracks it; empty space → a fixed world area); the third button keeps the existing element-group lasso. Clone of _showRegionChoice.
+  _showRegionLinkChoice(arrow, key, sx, sy) {
+    this._closeRegionChoice();
+    const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
+    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Link this end to…'; box.appendChild(lab);
+    const mk = (txt, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
+    mk('✎ Pen a region', () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'pen'); });
+    mk('▢ Box a region', () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'lasso'); });
+    mk('⬚ Lasso elements (group)', () => { this._closeRegionChoice(); const a = this._byId(arrow.id); if (a && !a.isDeleted) { this._pendingGroupLink = { arrowId: a.id, key }; try { this.plugin.ui.addToaster({ title: 'Lasso a group of elements to connect to.', dismissible: true }); } catch (_e) {} } });
+    this.wrap.appendChild(box);
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 170, bh = box.offsetHeight || 96;
+    box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
+    box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
+  }
+  _armRegionDraw(arrow, key, mode) {
+    const a = this._byId(arrow.id); if (!a || a.isDeleted) return;
+    this._pendingRegionDraw = { arrowId: a.id, key, mode };
+    this.tool = (mode === 'pen') ? 'pen' : 'lasso'; this._syncToolbar();
+    try { this.plugin.ui.addToaster({ title: mode === 'pen' ? 'Draw a region with the pen — over an image to pin it there, anywhere else for a free area.' : 'Drag a loop to mark a region to link to.', dismissible: true }); } catch (_e) {}
+    this.dirty = true;
+  }
+  // round-5 D: finish a drawn region (pen stroke / lasso loop) → bind the pending arrow's endpoint to it as a one-region group.
+  _finishRegionDraw(poly) {
+    const prd = this._pendingRegionDraw; this._pendingRegionDraw = null;
+    this.tool = 'select'; this._syncToolbar();
+    if (!prd) return;
+    const arrow = this._byId(prd.arrowId); if (!arrow || arrow.isDeleted) return;
+    if (!poly || poly.length < 3) { try { this.plugin.ui.addToaster({ title: 'Region too small — the connection end is unchanged.', dismissible: true }); } catch (_e) {} return; }
+    const region = this._regionTargetFromPoly(poly, arrow.id, prd.key);
+    if (!region) { try { this.plugin.ui.addToaster({ title: 'Could not capture the region.', dismissible: true }); } catch (_e) {} return; }
+    arrow[prd.key] = { group: { ids: [], regions: [region] } };
+    this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: region.worldPoly ? 'Connected to a free region.' : 'Connected to an image region.', dismissible: true }); } catch (_e) {}
+  }
+  // A drawn poly → a region target: image-anchored {elId,frac,fracPoly} when mostly over an image (tracks it), else a fixed
+  // absolute {worldPoly}. Self-loop guard: never anchor to the OTHER endpoint's bound element.
+  _regionTargetFromPoly(poly, arrowId, key) {
+    const arrow = this._byId(arrowId), otherB = arrow && arrow[key === 'endBinding' ? 'startBinding' : 'endBinding'], exImg = otherB && otherB.elementId;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    const lb = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    const reg = this._imageRegionFromLasso(poly, lb, exImg);
+    if (reg) return { elId: reg.img.id, frac: reg.frac, fracPoly: reg.fracPoly };
+    return { worldPoly: resamplePoly(poly, 24) }; // free-space: a fixed absolute polygon
+  }
   // round-5 A: the WHOLE-box-vs-specific-INLINE-REF prompt at the drop point. Lists "Whole box" + one button per inline ref of
   // the targeted text note (deduped by target guid). Picking a ref writes refGuidTarget/refKindTarget into the connection's
   // binding (→ that LINKED record gets the ↗); "Whole box" clears it. Dismiss = a press anywhere else (handled in onDown via
@@ -1832,7 +1882,7 @@ class CanvasView {
   // C2 (round 3): describe one connection endpoint for the on-canvas info card (mirrors _reindexBackrefs' descEnd).
   _connEndpointDesc(b) {
     if (!b) return { name: 'point' };
-    if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { const ge = this._byId(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } return { name: 'group of ' + n, img }; } // round-5 B
+    if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { if (rg.worldPoly) { n++; continue; } const ge = this._byId(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } const single = !(b.group.ids || []).length && (b.group.regions || []).length === 1; return { name: single ? 'region' : 'group of ' + n, img }; } // round-5 B/D
     if (!b.elementId) return { name: 'point' };
     const e = this._byId(b.elementId); if (!e || e.isDeleted) return { name: 'gone' };
     const rc = this._recCache;
@@ -2020,9 +2070,14 @@ class CanvasView {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     const acc = (bx, by, bw, bh) => { x0 = Math.min(x0, bx); y0 = Math.min(y0, by); x1 = Math.max(x1, bx + bw); y1 = Math.max(y1, by + bh); };
     for (const id of (group.ids || [])) { const el = get(id); if (!el || el.isDeleted) continue; let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue; if (el.angle) bb = rotatedAABB(bb, el.angle); acc(bb.x, bb.y, bb.w, bb.h); }
-    for (const rg of (group.regions || [])) { const el = get(rg.elId); if (!el || el.isDeleted) continue; const rw = this._imgRegionWorld(el, rg.frac); if (!rw || !isFinite(rw.x)) continue; acc(rw.x, rw.y, rw.w, rw.h); }
+    for (const rg of (group.regions || [])) {
+      if (rg.worldPoly && rg.worldPoly.length) { for (const p of rg.worldPoly) { if (isFinite(p[0])) acc(p[0], p[1], 0, 0); } continue; } // round-5 D: a free-space region → bbox straight from its absolute world points
+      const el = get(rg.elId); if (!el || el.isDeleted) continue; const rw = this._imgRegionWorld(el, rg.frac); if (!rw || !isFinite(rw.x)) continue; acc(rw.x, rw.y, rw.w, rw.h);
+    }
     return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
   }
+  // World bbox of an absolute polygon [[x,y]…] (round-5 D free-space regions).
+  _polyBBox(poly) { if (!poly || !poly.length) return null; let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of poly) { if (!isFinite(p[0])) continue; x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); } return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null; }
   // The element ids enclosed by a lasso polygon — PURE (returns ids, no selection/region side effects). Used by the
   // drop-then-lasso group-link flow. Shares the robust full-scene _elsInLoop so it captures the SAME elements as Cite.
   _idsInLoop(poly, excludeId) { return this._elsInLoop(poly, excludeId, true).map((e) => e.id); } // group-lasso skips connectors
@@ -2063,7 +2118,7 @@ class CanvasView {
   _connFlashExtras(arrow) {
     const out = [];
     for (const b of [arrow.startBinding, arrow.endBinding]) {
-      if (b && b.group) { for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; const gb = this._elBBox(ge); if (gb && isFinite(gb.x)) out.push({ bbox: gb }); } for (const rg of (b.group.regions || [])) { const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const rw = this._imgRegionWorld(ge, rg.frac); if (rw && isFinite(rw.x)) out.push({ inImage: true, elId: ge.id, frac: rg.frac, fracPoly: rg.fracPoly, bbox: rw }); } continue; } // round-5 B: frame EVERY group member + image region so flyback shows the whole group
+      if (b && b.group) { for (const id of (b.group.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; const gb = this._elBBox(ge); if (gb && isFinite(gb.x)) out.push({ bbox: gb }); } for (const rg of (b.group.regions || [])) { if (rg.worldPoly && rg.worldPoly.length) { const wb = this._polyBBox(rg.worldPoly); if (wb) out.push({ worldPoly: rg.worldPoly, bbox: wb }); continue; } const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const rw = this._imgRegionWorld(ge, rg.frac); if (rw && isFinite(rw.x)) out.push({ inImage: true, elId: ge.id, frac: rg.frac, fracPoly: rg.fracPoly, bbox: rw }); } continue; } // round-5 B/D: frame EVERY group member + image region + free-space region so flyback shows the whole group
       if (!b || !b.elementId) continue; const t = this._byId(b.elementId); if (!t || t.isDeleted) continue;
       if (b.lineGuid && t.type === 'record') { const lr = this._lineRectWorld(t, b.lineGuid); if (lr) { out.push({ bbox: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } }); continue; } }
       if (b.refGuidTarget && t.type === 'text') { const rr = this._refRunRectWorld(t, b.refGuidTarget); if (rr) { out.push({ bbox: { x: rr.x, y: rr.y, w: rr.w, h: rr.h } }); continue; } } // round-5 A: frame the targeted inline ref run
@@ -2432,7 +2487,7 @@ class CanvasView {
     // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
     const lineT = new Map(), regionT = new Map(), refT = new Map(), groupT = [], byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5); refT: textId → Set(refGuidTarget) for the round-5 A inline-ref flag; groupT: [{ids}] for the round-5 B group-member highlight
     for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
-      if (b && b.group && ((b.group.ids && b.group.ids.length) || (b.group.regions && b.group.regions.length))) { groupT.push(b.group); for (const id of (b.group.ids || [])) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } for (const rg of (b.group.regions || [])) { let s = byEl.get(rg.elId); if (!s) byEl.set(rg.elId, s = new Set()); s.add(a.id); } continue; } // round-5 B: a group target has no single elementId — index each MEMBER + region-image for the select→highlight + outline
+      if (b && b.group && ((b.group.ids && b.group.ids.length) || (b.group.regions && b.group.regions.length))) { groupT.push(b.group); for (const id of (b.group.ids || [])) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } for (const rg of (b.group.regions || [])) { if (!rg.elId) continue; let s = byEl.get(rg.elId); if (!s) byEl.set(rg.elId, s = new Set()); s.add(a.id); } continue; } // round-5 B/D: a group target has no single elementId — index each MEMBER + region-image (free-space regions have no elId) for the select→highlight + outline
       if (!b || !b.elementId) continue;
       { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
@@ -2651,6 +2706,7 @@ class CanvasView {
       // round-5 B (drop-then-lasso): a pending group-link is armed → this press-drag is the group lasso (any tool). A press
       // that doesn't drag (a click) cancels in onUp; a drag selects the enclosed elements as the arrow's group target.
       if (this._pendingGroupLink) { const arr = this._byId(this._pendingGroupLink.arrowId); if (!arr || arr.isDeleted) { this._pendingGroupLink = null; } else { mode = 'grouplasso'; this._lasso = [[down.x, down.y]]; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true; return; } }
+      if (this._regionChoiceEl) { this._closeRegionChoice(); this.dirty = true; } // round-5 D: an outside press dismisses the void-drop link menu (its buttons stopPropagation, so a press reaching here is outside)
       if (this.tool === 'select') {
         const sel = this._singleSel();
         if (sel && (isRoughShape(sel.type) || sel.type === 'icon' || sel.type === 'record' || sel.type === 'linecard' || sel.type === 'image' || sel.type === 'query' || sel.type === 'rollup' || sel.type === 'table' || sel.type === 'board' || sel.type === 'frame')) {
@@ -2784,17 +2840,16 @@ class CanvasView {
             const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
             this._showRefChoice(created, s1, 'endBinding', sp2.x, sp2.y);
           }
-          // round-5 B (drop-then-lasso): released on EMPTY canvas while the START is anchored to something → arm "lasso a group
-          // to connect to". The next press-drag (any tool) draws a selection loop; on release the enclosed elements become the
-          // arrow's group target (anything → group). A press on a single element instead cancels (keeps the dangling end).
+          // round-5 D (drop-in-void): released on EMPTY canvas while the START is anchored → a menu to link the end: Pen / Box a
+          // REGION (drawn target), or Lasso elements (group). Replaces the old auto-arm of the element-group lasso.
           else if (!s1 && (created.startBinding)) {
-            this._pendingGroupLink = { arrowId: created.id, key: 'endBinding' };
-            try { this.plugin.ui.addToaster({ title: 'Lasso a group of elements to connect to (or press elsewhere to cancel).', dismissible: true }); } catch (_e) {}
+            const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
+            this._showRegionLinkChoice(created, 'endBinding', sp2.x, sp2.y);
           }
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
         created = null;
-      } else if (mode === 'pen' && created) { freedrawBBox(created); this.scheduleSave(); this._lastFreedraw = created; created = null; }
+      } else if (mode === 'pen' && created) { freedrawBBox(created); if (this._pendingRegionDraw && this._pendingRegionDraw.mode === 'pen') { const pts = created.points.slice(); created.isDeleted = true; created = null; this._finishRegionDraw(pts); this.scheduleSave(); } else { this.scheduleSave(); this._lastFreedraw = created; created = null; } } // round-5 D: a region-draw pen stroke binds the arrow + discards the stroke (it's a gesture, not a kept shape)
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
         if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
@@ -2810,8 +2865,8 @@ class CanvasView {
       }
       else if (mode === 'lasso') {
         const poly = this._lasso || []; this._lasso = null;
-        if (poly.length >= 3) this._selectFromLoop(poly);
-        this.tool = 'select'; this._syncToolbar();
+        if (this._pendingRegionDraw && this._pendingRegionDraw.mode === 'lasso') { this._finishRegionDraw(poly); } // round-5 D: a region-draw lasso binds the arrow instead of selecting
+        else { if (poly.length >= 3) this._selectFromLoop(poly); this.tool = 'select'; this._syncToolbar(); }
       }
       else if (mode === 'grouplasso') { // round-5 B: the lasso enclosed a group → bind the pending arrow's end to it (anything → group)
         const poly = this._lasso || []; this._lasso = null; const pgl = this._pendingGroupLink; this._pendingGroupLink = null;
@@ -2892,8 +2947,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / pending group-link
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B: Esc keeps the whole-element link + disarms a pending group-lasso
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / pending group-link / pending region-draw
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -2914,7 +2969,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + any pending group-lasso (round-5 B), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + any pending group-lasso (round-5 B), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4380,7 +4435,7 @@ class CanvasView {
     const clip = (s) => { s = (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim(); return s.length > 40 ? s.slice(0, 39) + '…' : s; };
     const descEnd = (b) => {
       if (!b) return null;
-      if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = byId.get(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { const ge = byId.get(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } return { name: 'group of ' + n, img }; } // round-5 B: "group of N" (members + image regions) + a thumbnail (a region gives a cropped one)
+      if (b.group) { let n = 0, img = null; for (const id of (b.group.ids || [])) { const ge = byId.get(id); if (ge && !ge.isDeleted) { n++; if (!img && ge.type === 'image' && ge.fileId) img = { fileId: ge.fileId, frac: null }; } } for (const rg of (b.group.regions || [])) { if (rg.worldPoly) { n++; continue; } const ge = byId.get(rg.elId); if (ge && !ge.isDeleted) { n++; if (ge.fileId) img = { fileId: ge.fileId, frac: rg.frac || null }; } } const single = !(b.group.ids || []).length && (b.group.regions || []).length === 1; return { name: single ? 'region' : 'group of ' + n, img }; } // round-5 B/D: "group of N" (members + image + free regions) + a thumbnail (an image region gives a cropped one)
       if (!b.elementId) return null; const e = byId.get(b.elementId); if (!e) return null;
       const rc = this._recCache;
       if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: clip((ln && ln.text)) || 'line' }; } return { name: clip(rec && rec.title) || 'note' }; }
@@ -5302,7 +5357,7 @@ class CanvasView {
   _snapshot() { return JSON.stringify(this.scene); }
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
-    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group state stale (F2/C3/round-5 B)
+    this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group/draw state stale (F2/C3/round-5 B/D)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
   }
@@ -5431,7 +5486,10 @@ class CanvasView {
         const acc = (bx, by, bw, bh) => { hx0 = Math.min(hx0, bx); hy0 = Math.min(hy0, by); hx1 = Math.max(hx1, bx + bw); hy1 = Math.max(hy1, by + bh); };
         ictx.setLineDash([6 / z, 4 / z]); ictx.strokeStyle = '#06b6d4'; ictx.lineWidth = 1.4 / z;
         for (const id of (grp.ids || [])) { const ge = this._byId(id); if (!ge || ge.isDeleted) continue; let bb = this._elBBox(ge); if (!bb || !isFinite(bb.x)) continue; if (ge.angle) bb = rotatedAABB(bb, ge.angle); ictx.strokeRect(bb.x - 2 / z, bb.y - 2 / z, bb.w + 4 / z, bb.h + 4 / z); acc(bb.x, bb.y, bb.w, bb.h); }
-        for (const rg of (grp.regions || [])) { const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const q = this._regionShapeWorld(ge, rg.frac, rg.fracPoly); if (!q || !q.length) continue; ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.stroke(); const rw = this._imgRegionWorld(ge, rg.frac); if (rw) acc(rw.x, rw.y, rw.w, rw.h); }
+        for (const rg of (grp.regions || [])) {
+          if (rg.worldPoly && rg.worldPoly.length >= 3) { ictx.beginPath(); ictx.moveTo(rg.worldPoly[0][0], rg.worldPoly[0][1]); for (let i = 1; i < rg.worldPoly.length; i++) ictx.lineTo(rg.worldPoly[i][0], rg.worldPoly[i][1]); ictx.closePath(); ictx.stroke(); const wb = this._polyBBox(rg.worldPoly); if (wb) acc(wb.x, wb.y, wb.w, wb.h); continue; } // round-5 D: free-space region polygon
+          const ge = this._byId(rg.elId); if (!ge || ge.isDeleted) continue; const q = this._regionShapeWorld(ge, rg.frac, rg.fracPoly); if (!q || !q.length) continue; ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.stroke(); const rw = this._imgRegionWorld(ge, rg.frac); if (rw) acc(rw.x, rw.y, rw.w, rw.h);
+        }
         if (isFinite(hx0)) { ictx.setLineDash([2 / z, 5 / z]); ictx.strokeStyle = 'rgba(6,182,212,0.5)'; ictx.lineWidth = 1.2 / z; ictx.strokeRect(hx0 - 6 / z, hy0 - 6 / z, (hx1 - hx0) + 12 / z, (hy1 - hy0) + 12 / z); }
         ictx.setLineDash([]);
       }
@@ -5552,6 +5610,7 @@ class CanvasView {
         const shapes = [];
         for (const it of items) {
           if (it.inImage && it.elId) { const fEl = this._byId(it.elId); const sh = (fEl && it.frac) ? this._regionShapeWorld(fEl, it.frac, it.fracPoly) : null; if (sh && sh.length) { shapes.push({ poly: sh.map((pt) => { const s = this.camera.worldToScreen(pt.x, pt.y); return { x: s.x * d, y: s.y * d }; }) }); continue; } }
+          if (it.worldPoly && it.worldPoly.length >= 3) { shapes.push({ poly: it.worldPoly.map((p) => { const s = this.camera.worldToScreen(p[0], p[1]); return { x: s.x * d, y: s.y * d }; }) }); continue; } // round-5 D: a free-space region → spotlight its absolute polygon
           const bb = it.bbox; if (!bb) continue;
           const tl = this.camera.worldToScreen(bb.x, bb.y), br = this.camera.worldToScreen(bb.x + bb.w, bb.y + bb.h), base = 7 * d;
           shapes.push({ rect: { x: tl.x * d - base, y: tl.y * d - base, w: (br.x - tl.x) * d + base * 2, h: (br.y - tl.y) * d + base * 2 } });
@@ -6660,7 +6719,7 @@ class Plugin extends AppPlugin {
         const els = v.scene.elements.filter((e) => !e.isDeleted);
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
-        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length, regions: (b.group.regions || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead, relType: e.relType || null, lineStyle: e.lineStyle || 'solid' }; });
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length, regions: (b.group.regions || []).length, freeRegions: (b.group.regions || []).filter((r) => r && r.worldPoly).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead, relType: e.relType || null, lineStyle: e.lineStyle || 'solid' }; });
         // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
         const thumbTest = [];
         for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }

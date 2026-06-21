@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.72.0 — round-5 D: Pen/Lasso "draw a region to link to" (link an arrow to ANY area) (2026-06-21)
+- Dropping an arrow's end in the **void** (empty canvas) now opens a 3-button menu (`_showRegionLinkChoice`): **✎ Pen a region**,
+  **▢ Box a region**, **⬚ Lasso elements (group)** (the existing element-group flow). Pen/Box arm `_pendingRegionDraw` + force the
+  pen/lasso tool; the next stroke/loop is captured (not kept) and binds the arrow's endpoint to the drawn region.
+- **Auto-anchor:** `_regionTargetFromPoly` → drawn mostly over an image → image-relative `{elId, frac, fracPoly}` (tracks the
+  image — "edge of image"); drawn in empty space → an absolute `{worldPoly:[[x,y]…]}` (a fixed world area). Self-loop guard:
+  never anchors to the other endpoint's image.
+- A region is a one-region **group** (`{ids:[], regions:[…]}`) so it reuses all group machinery. New free-space `worldPoly`
+  branches added across `_groupUnionWorld` (+ `_polyBBox`), `_connFlashExtras` + the flash shape resolver (spotlight the
+  polygon on flyback), the `_connGroupTargets` overlay (stroke the polygon), `descEnd`/`_connEndpointDesc` (a single region reads
+  "region"), `_updateBindings` byEl (skip — no elId), and `test.dump` (`freeRegions` count).
+- Pending clears on Esc / **toolbar+keyboard tool-switch** / undo / pointercancel + the void-drop menu dismisses on an outside
+  press. Adversarial review caught 1 bug — `_pendingRegionDraw`/`_pendingGroupLink` leaked on a *toolbar* tool-button click (only
+  the keyboard path was guarded) → a later stroke could be hijacked; fixed via a shared `_userToolSwitch` (NOT `_syncToolbar`,
+  which `_armRegionDraw` calls). Node test 8/8 (image-vs-free decision, worldPoly union, polyBBox, naming, self-loop fallback).
+  All prior suites green; every `.regions` consumer traced — none assumes `elId`.
+
 ## ✅ v1.71.0 — FIX: lasso region capture (text + image-edge) + a DOM-discoverable view handle (2026-06-21)
 - **Bug (user-reported):** lassoing "this is a test" + an image edge captured the text but **not the image region**. Root cause
   (both Cite `_selectFromLoop` and the group-lasso): the region heuristic compared the lasso's **full bounding box** to the
