@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.61.0 — shape-hugging selection outline (round 4) (2026-06-20)
+- User: a non-rectangular shape's selection box is a rectangle with empty "black" corners around the visual. Confirmed choice:
+  the selection OUTLINE should hug the shape; resize handles stay on the bounding box.
+- `render()` single-select outline (`:5289`) now draws the shape's own outline: an `ctx.ellipse` for ellipse; the rotated
+  `shapePolygon(el)` for diamond/triangle/parallelogram/hexagon/cloud; the bbox rect kept for rectangle/roundrect/cylinder +
+  all non-rough types (record/image/etc. — their visual IS the box). Rotation-aware. The 8 resize handles + rotate handle stay
+  on the bbox `_handles(el)`. node-tested (diamond/triangle vertices, 90° rotation, the rotate-line anchor coincidence).
+
 ## ✅ v1.60.0 — canvas connection UX: ref-bar while editing · info card on hover/select · two-button region choice (round 3, C) (2026-06-20)
 Round-3 C (design choices confirmed with the user). All node-tested + adversarially reviewed. Canvas-overlay DOM + scene reads only — zero source-note mutation.
 - **C1 clickable ↗ ref-bar:** inline links were hard to click in the flat edit textarea. Editing a text box that carries inline

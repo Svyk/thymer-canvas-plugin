@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.60.0';
+const PLEXUS_VERSION = '1.61.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5286,7 +5286,16 @@ class CanvasView {
     if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'rollup' || single.type === 'table' || single.type === 'board')) {
       const H = this._handles(single);
       ictx.setLineDash([]);
-      ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke();
+      // round-4: the selection OUTLINE hugs the actual shape (ellipse/diamond/triangle/…), not the bounding rectangle — so a
+      // non-rectangular shape has no empty-corner "box". Resize/rotate HANDLES still sit on the bbox (H) for dragging.
+      const _st = single.type, _cx = single.x + single.width / 2, _cy = single.y + single.height / 2, _a = single.angle || 0;
+      if (_st === 'ellipse') { ictx.beginPath(); ictx.ellipse(_cx, _cy, Math.abs(single.width) / 2, Math.abs(single.height) / 2, _a, 0, Math.PI * 2); ictx.stroke(); }
+      else if (_st === 'diamond' || _st === 'triangle' || _st === 'parallelogram' || _st === 'hexagon' || _st === 'cloud') {
+        const poly = shapePolygon(single), _c = Math.cos(_a), _s = Math.sin(_a); ictx.beginPath();
+        for (let i = 0; i < poly.length; i++) { const dx = poly[i][0] - _cx, dy = poly[i][1] - _cy, px = _cx + dx * _c - dy * _s, py = _cy + dx * _s + dy * _c; if (i === 0) ictx.moveTo(px, py); else ictx.lineTo(px, py); }
+        ictx.closePath(); ictx.stroke();
+      }
+      else { ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke(); } // rectangle / roundrect / cylinder / record / image / … keep the bbox outline (their visual IS the box)
       ictx.beginPath(); ictx.moveTo(H.n.x, H.n.y); ictx.lineTo(H.rot.x, H.rot.y); ictx.stroke();
       const hs = 8 / z;
       for (const k of HANDLE_KEYS) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
