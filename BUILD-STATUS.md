@@ -1,5 +1,11 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.77.1 — record panel back BESIDE the card (sit-on-card covered it / blocked typing) (2026-06-21)
+- The v1.77.0 sit-on-card positioning overlaid the panel opaquely on top of the record card → the card was unreadable and you
+  couldn't type into the body. Per the user's fallback ("if you can have it be inside then just have it on the side again"),
+  `_syncRecPanel` now anchors the panel **beside** the card: fixed 300px, default to the RIGHT, flip to the LEFT on overflow,
+  clamp into the viewport; top tracks the card's top. The card raster stays fully visible. Syntax-checked; positioning-only.
+
 ## ✅ v1.77.0 — record cards: apply a template + Datacore (live card + panel query) (EDIT-3/EDIT-4) (2026-06-21)
 - **EDIT-3 — apply a template (minimal Templater re-impl, no seam exists):** the record panel's **Template** button →
   `_applyTemplate` finds the **"Recurring Templates"** collection, lists its records in a `.pxc-modal` picker (`_pickFromList`),

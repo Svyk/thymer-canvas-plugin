@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.77.0';
+const PLEXUS_VERSION = '1.77.1';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3589,13 +3589,16 @@ class CanvasView {
     if (!card) { this._closeRecPanel(); return; }
     if (this._recPanelId !== card.id) { this._closeRecPanel(); this._recPanelId = card.id; this._buildRecPanel(card); } // async build; _recPanelId guards stale attach
     if (!this._recPanelEl) return;
-    // 2026-06-21: the panel SITS ON the card (Heptabase-style) — anchored to the card's top-left, matching its on-screen width
-    // (min 220 so the form controls fit). It overlays the card raster while selected; the body spills below when taller.
-    const tl = this.camera.worldToScreen(Math.min(card.x, card.x + card.width), Math.min(card.y, card.y + card.height));
-    const cardW = Math.abs(card.width) * this.camera.zoom, ww = this.wrap.clientWidth || 800;
-    const w = Math.max(220, Math.min(cardW, 360)); // match the card; clamp so a huge card doesn't make a giant form
-    let left = tl.x; if (left + w > ww - 6) left = Math.max(6, ww - w - 6);
-    this._recPanelEl.style.left = Math.max(6, left) + 'px'; this._recPanelEl.style.top = Math.max(8, tl.y) + 'px'; this._recPanelEl.style.width = w + 'px';
+    // 2026-06-21: the panel sits BESIDE the card (not over it) so the card stays readable and you can edit freely.
+    // Default to the right of the card; flip to the left if it would overflow the canvas; clamp to the viewport.
+    const x0 = Math.min(card.x, card.x + card.width), x1 = Math.max(card.x, card.x + card.width);
+    const tl = this.camera.worldToScreen(x0, Math.min(card.y, card.y + card.height));
+    const tr = this.camera.worldToScreen(x1, Math.min(card.y, card.y + card.height));
+    const ww = this.wrap.clientWidth || 800, gap = 10, w = 300;
+    let left = tr.x + gap;                                   // right of the card
+    if (left + w > ww - 6) left = tl.x - w - gap;            // overflow → flip to the left
+    left = Math.max(6, Math.min(left, ww - w - 6));          // clamp into view
+    this._recPanelEl.style.left = left + 'px'; this._recPanelEl.style.top = Math.max(8, tl.y) + 'px'; this._recPanelEl.style.width = w + 'px';
   }
   async _buildRecPanel(card) {
     const guid = card.recordGuid; let rec = null;
