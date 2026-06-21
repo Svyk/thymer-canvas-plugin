@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.64.0 — shape selection: drop the empty-corner handles (round 4) (2026-06-20)
+- LIVE DUMP confirmed the "blub" is an ELLIPSE (758×464 hachure) and the v1.61 outline DID hug it (Image #50) — the remaining
+  "box with empty space" was the **4 bbox CORNER handles** sitting in the empty corners. Fix: for shapes whose outline hugs the
+  visual (ellipse/diamond/triangle/parallelogram/hexagon/cloud) draw only the 4 EDGE handles (on the shape) + rotate; corner
+  resize still works (hit-test keeps all 8), only the empty-corner dots are hidden. Rect/roundrect/cylinder/cards/images keep all 8.
+- `test.dump()` extended with a `thumbTest`: per image-bound connection endpoint, reports whether `_imgFor` resolves a loaded
+  image + whether `_regionThumb` produces a data URL — to diagnose the "connection has no thumbnail" report (live dump shows a
+  real text→image-region connection with frac, so the thumbnail SHOULD render).
+- NEXT (pending the thumbTest dump): fix the connection thumbnail if `_regionThumb` returns NULL; wire the @ref preview.
+
 ## ✅ v1.63.0 — `test.dump()` diagnostic hook (round 4) (2026-06-20)
 - The CanvasView is not reachable from outside (no DOM expando), so debugging "the blub shape's selection still shows a
   rectangle" / "the connection has no thumbnail" was blind guessing. Added `window.__plexusCanvas.test.dump()` → returns the

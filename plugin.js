@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.63.0';
+const PLEXUS_VERSION = '1.64.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5298,7 +5298,11 @@ class CanvasView {
       else { ictx.beginPath(); ictx.moveTo(H.nw.x, H.nw.y); ictx.lineTo(H.ne.x, H.ne.y); ictx.lineTo(H.se.x, H.se.y); ictx.lineTo(H.sw.x, H.sw.y); ictx.closePath(); ictx.stroke(); } // rectangle / roundrect / cylinder / record / image / … keep the bbox outline (their visual IS the box)
       ictx.beginPath(); ictx.moveTo(H.n.x, H.n.y); ictx.lineTo(H.rot.x, H.rot.y); ictx.stroke();
       const hs = 8 / z;
-      for (const k of HANDLE_KEYS) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
+      // round-4: for shapes whose OUTLINE hugs the visual (ellipse/diamond/…), drop the 4 CORNER handles — they sit out in the
+      // empty corners and re-create the "box with empty space" the outline removed. Keep the 4 EDGE handles (which sit ON the
+      // shape) + the rotate handle. Corner RESIZE still works (the hit-test keeps all 8); only the empty-corner dots are hidden.
+      const _edgeOnly = (_st === 'ellipse' || _st === 'diamond' || _st === 'triangle' || _st === 'parallelogram' || _st === 'hexagon' || _st === 'cloud');
+      for (const k of (_edgeOnly ? ['n', 'e', 's', 'w'] : HANDLE_KEYS)) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
       ictx.beginPath(); ictx.arc(H.rot.x, H.rot.y, hs / 1.5, 0, 7); ictx.fill(); ictx.stroke();
     } else {
       ictx.setLineDash([6 / z, 4 / z]); const pad = 4 / z;
@@ -6341,7 +6345,10 @@ class Plugin extends AppPlugin {
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
         const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid } : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
-        return { version: PLEXUS_VERSION, n: els.length, types, selected: sel, connections: conns, imgFiles: Object.keys(v.scene.files || {}).length };
+        // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
+        const thumbTest = [];
+        for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }
+        return { version: PLEXUS_VERSION, n: els.length, types, selected: sel, connections: conns, imgFiles: Object.keys(v.scene.files || {}).length, thumbTest };
       },
       // PERF BASELINE (architecture audit): seed N synthetic elements into the active drawing, then time the hot
       // paths so the spatial-index / delta-persistence phases are authorised by a real flamegraph, not a code-read.
