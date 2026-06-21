@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.68.0 — round-5 Phase C: typed relationship presets + manual connection styling (Heptabase-style) (2026-06-20)
+- Selecting a single connection now shows a **style popover** above it with:
+  - **6 typed relationship presets** (`PXC_REL_PRESETS`): relates-to (gray), supports (green), contradicts (red, dashed),
+    causes (amber), part-of (blue), example-of (violet, dotted). Applying one sets `el.relType` + the connection **color** +
+    **line style** + **arrowheads** + a default **midpoint label** (so the note-side breadcrumb reads e.g. "connection: supports").
+  - **line style** — solid / dashed / dotted (`el.lineStyle`); **arrowheads** — none `—` / single `→` / double `↔`;
+    a manual **colour strip** (overrides the preset, clears `el.relType`).
+- `drawLinear` gained dash support: dashed/dotted render a **clean poly-line** (`setLineDash`) instead of the rough double-pass
+  (rough + dash = messy); solid is unchanged. Arrowheads always solid (dash reset before them).
+- `_setConnLabelText` reuses the existing midpoint-label mechanism (`midBinding`); `relType`/`lineStyle` are plain JSON-safe
+  scalars that round-trip. The popover rebuilds only on selected-connection change (`_connStyleId`); `pointerdown`
+  stopPropagation so clicks don't deselect. `test.dump()` reports `relType`/`lineStyle`. Pure-logic node test 9/9.
+
 ## ✅ v1.67.0 — round-5 Phase B: arrow → a GROUP / REGION of the canvas (bidirectional) (2026-06-20)
 - A connection endpoint can now bind to a **set of elements** — new binding shape `b.group = { ids: [...] }` (no single
   `elementId`). The endpoint routes to the **live union bbox** of the members (`_groupBBoxWorld`), so the group target tracks

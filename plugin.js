@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.67.0';
+const PLEXUS_VERSION = '1.68.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -220,6 +220,16 @@ const TEST_HOOKS = true;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const PALETTE = ['#1e1e1e', '#64748b', '#7c5cff', '#6366f1', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#92400e', '#ffffff'];
+// round-5 C: typed relationship presets (Heptabase-style). relType → connection color + a default midpoint label + line style
+// + arrowheads. Applied to an arrow/line; the label drives the note-side breadcrumb (reindex reads the midpoint label).
+const PXC_REL_PRESETS = [
+  { key: 'relates-to', label: 'relates to', color: '#64748b', lineStyle: 'solid', heads: 'single' },
+  { key: 'supports', label: 'supports', color: '#10b981', lineStyle: 'solid', heads: 'single' },
+  { key: 'contradicts', label: 'contradicts', color: '#ef4444', lineStyle: 'dashed', heads: 'single' },
+  { key: 'causes', label: 'causes', color: '#f59e0b', lineStyle: 'solid', heads: 'single' },
+  { key: 'part-of', label: 'part of', color: '#0ea5e9', lineStyle: 'solid', heads: 'single' },
+  { key: 'example-of', label: 'example of', color: '#a855f7', lineStyle: 'dotted', heads: 'single' },
+];
 const FILLS = {
   '#1e1e1e': 'transparent', '#64748b': '#f1f5f9', '#7c5cff': '#efeaff', '#6366f1': '#e0e7ff',
   '#0ea5e9': '#e0f2fe', '#06b6d4': '#cffafe', '#14b8a6': '#ccfbf1', '#10b981': '#dcfce7',
@@ -822,10 +832,16 @@ function pxcPolyMidpoint(pts) {
 }
 function drawLinear(ctx, el) {
   const pts = routedPoints(el); if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
-  const rng = mulberry32((el.seed | 0) || 1);
   ctx.save(); applyStroke(ctx, { stroke: el.strokeColor, strokeWidth: el.strokeWidth, opacity: el.opacity });
-  const rgh = (el.roughness == null ? 1 : el.roughness) * 1.1;
-  for (let i = 0; i < pts.length - 1; i++) roughSeg(ctx, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rng, rgh);
+  const ls = el.lineStyle; // round-5 C: dashed/dotted draw a CLEAN poly-line (rough + dash = messy); solid keeps the rough double-pass
+  if (ls === 'dashed' || ls === 'dotted') {
+    const sw = el.strokeWidth || 2; ctx.setLineDash(ls === 'dotted' ? [Math.max(0.5, sw * 0.2), sw * 2 + 3] : [sw * 4 + 6, sw * 3 + 4]);
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
+    ctx.setLineDash([]); // arrowheads always solid
+  } else {
+    const rng = mulberry32((el.seed | 0) || 1), rgh = (el.roughness == null ? 1 : el.roughness) * 1.1;
+    for (let i = 0; i < pts.length - 1; i++) roughSeg(ctx, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rng, rgh);
+  }
   const ah = (el.strokeWidth || 2) * 5 + 6;
   if (el.endArrowhead) { const a = pts[pts.length - 2], b = pts[pts.length - 1]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
   if (el.startArrowhead) { const a = pts[1], b = pts[0]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
@@ -1853,6 +1869,62 @@ class CanvasView {
     const t = document.createElement('span'); t.className = 'pxc-ci-to'; t.textContent = clip(end.name); card.appendChild(t);
     thumb(end);
     this.wrap.appendChild(card);
+  }
+  // round-5 C: the connection-STYLE popover — shown when a single connection is SELECTED (not merely hovered). Typed
+  // relationship presets (color+label) + line style + arrowheads + a manual colour strip. Positioned above the midpoint so it
+  // doesn't collide with the (below-midpoint) info card. Rebuilt only when the selected connection changes (_connStyleId).
+  _closeConnStyle() { if (this._connStyleEl) { try { this._connStyleEl.remove(); } catch (_e) {} this._connStyleEl = null; } this._connStyleId = null; }
+  _syncConnStyle() {
+    let arrow = null;
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && !this._present && this.selected.size === 1) {
+      const a = this._byId(this.selected.values().next().value); if (a && !a.isDeleted && (a.type === 'arrow' || a.type === 'line')) arrow = a;
+    }
+    if (!arrow) { this._closeConnStyle(); return; }
+    if (this._connStyleId !== arrow.id || !this._connStyleEl) { this._buildConnStyle(arrow); this._connStyleId = arrow.id; }
+    if (!this._connStyleEl) return;
+    const mid = pxcPolyMidpoint(routedPoints(arrow)); if (!mid) return;
+    const s = this.camera.worldToScreen(mid.x, mid.y), bh = this._connStyleEl.offsetHeight || 92, ww = this.wrap.clientWidth || 800, bw = this._connStyleEl.offsetWidth || 230;
+    this._connStyleEl.style.left = Math.max(4, Math.min(ww - bw - 4, s.x - bw / 2)) + 'px';
+    this._connStyleEl.style.top = Math.max(4, s.y - bh - 14) + 'px'; // above the midpoint (info card sits below it)
+  }
+  _buildConnStyle(arrow) {
+    this._closeConnStyle();
+    const box = document.createElement('div'); box.className = 'pxc-connstyle'; this._connStyleEl = box;
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); // clicks inside the menu must not deselect/pan/draw
+    // Row 1: typed relationship presets (color dot + label).
+    const r1 = document.createElement('div'); r1.className = 'pxc-cs-row pxc-cs-rels';
+    for (const p of PXC_REL_PRESETS) {
+      const b = document.createElement('button'); b.className = 'pxc-cs-rel' + (arrow.relType === p.key ? ' pxc-cs-on' : ''); b.title = p.label;
+      const dot = document.createElement('span'); dot.className = 'pxc-cs-dot'; dot.style.background = p.color; b.appendChild(dot);
+      b.appendChild(document.createTextNode(p.label));
+      b.addEventListener('click', () => this._applyRelPreset(p.key)); r1.appendChild(b);
+    }
+    box.appendChild(r1);
+    // Row 2: line style + arrowheads.
+    const r2 = document.createElement('div'); r2.className = 'pxc-cs-row';
+    const seg = (cls) => { const g = document.createElement('div'); g.className = 'pxc-cs-seg ' + cls; return g; };
+    const mk = (parent, html, on, fn, title) => { const b = document.createElement('button'); b.className = 'pxc-cs-btn' + (on ? ' pxc-cs-on' : ''); b.innerHTML = html; if (title) b.title = title; b.addEventListener('click', fn); parent.appendChild(b); };
+    const curLs = arrow.lineStyle || 'solid';
+    const sg1 = seg('pxc-cs-ls');
+    mk(sg1, '<span class="pxc-cs-line solid"></span>', curLs === 'solid', () => this._setConnLineStyle('solid'), 'Solid');
+    mk(sg1, '<span class="pxc-cs-line dashed"></span>', curLs === 'dashed', () => this._setConnLineStyle('dashed'), 'Dashed');
+    mk(sg1, '<span class="pxc-cs-line dotted"></span>', curLs === 'dotted', () => this._setConnLineStyle('dotted'), 'Dotted');
+    r2.appendChild(sg1);
+    const heads = (arrow.startArrowhead && arrow.endArrowhead) ? 'double' : arrow.endArrowhead ? 'single' : (arrow.startArrowhead ? 'single' : 'none');
+    const sg2 = seg('pxc-cs-heads');
+    mk(sg2, '—', heads === 'none', () => this._setConnHeads('none'), 'No arrowhead');
+    mk(sg2, '→', heads === 'single', () => this._setConnHeads('single'), 'Single');
+    mk(sg2, '↔', heads === 'double', () => this._setConnHeads('double'), 'Double');
+    r2.appendChild(sg2);
+    box.appendChild(r2);
+    // Row 3: manual colour strip (overrides the preset colour).
+    const r3 = document.createElement('div'); r3.className = 'pxc-cs-row pxc-cs-colors';
+    for (const c of ['#1e1e1e', '#64748b', '#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#a855f7']) {
+      const b = document.createElement('button'); b.className = 'pxc-cs-color' + (arrow.strokeColor === c ? ' pxc-cs-on' : ''); b.style.background = c; b.title = c;
+      b.addEventListener('click', () => this._setConnColor(c)); r3.appendChild(b);
+    }
+    box.appendChild(r3);
+    this.wrap.appendChild(box);
   }
   // round-4 @ref PREVIEW: a hover popover previewing the record a ref chip points at — its title + first body lines (via the
   // live record cache). Uncached → "Loading…" then a short re-show once the fetch lands. pointer-events:none; never blocks.
@@ -2887,6 +2959,32 @@ class CanvasView {
     }
     this.selected.clear(); this.selected.add(label.id); this._editText(label);
   }
+  // round-5 C: find/create the midpoint label of a connection and SET its text (no editor) — used by the typed-relationship
+  // presets so the label (which drives the note-side breadcrumb in _reindexBackrefs) reflects the relationship.
+  _setConnLabelText(arrow, text) {
+    let label = this.scene.elements.find((e) => !e.isDeleted && e.type === 'text' && e.midBinding && e.midBinding.arrowId === arrow.id);
+    if (!label) {
+      if (!text) return; // nothing to label with, and none exists → leave bare
+      const m = pxcPolyMidpoint(routedPoints(arrow)) || { x: (arrow.x || 0) + (Math.abs(arrow.width) || 0) / 2, y: (arrow.y || 0) + (Math.abs(arrow.height) || 0) / 2 };
+      label = makeText(m.x, m.y, { stroke: arrow.strokeColor || this.strokeColor, fontSize: 16 }); label.midBinding = { arrowId: arrow.id };
+      this.scene.elements.push(label); this._gridDirty = true;
+    }
+    label.runs = null; label.text = text; label.strokeColor = arrow.strokeColor || label.strokeColor; measureRuns(label); // re-measure so the bbox/midpoint track
+  }
+  // round-5 C: apply a typed relationship preset to every selected connection — color + line style + arrowheads + a default
+  // label. relType is stored on the element (round-trips); the label drives the reindex breadcrumb (e.g. "connection: supports").
+  _applyRelPreset(key) {
+    const preset = PXC_REL_PRESETS.find((p) => p.key === key); if (!preset) return; let ch = false;
+    for (const id of this.selected) { const el = this._byId(id); if (!el || (el.type !== 'arrow' && el.type !== 'line')) continue;
+      el.relType = preset.key; el.strokeColor = preset.color; el.lineStyle = preset.lineStyle;
+      el.endArrowhead = (preset.heads === 'none') ? null : 'arrow'; el.startArrowhead = (preset.heads === 'double') ? 'arrow' : null;
+      this._setConnLabelText(el, preset.label); ch = true;
+    }
+    if (ch) { this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave(); this._connStyleId = null; }
+  }
+  _setConnLineStyle(style) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.lineStyle = style; ch = true; } } if (ch) { this.dirty = true; this.scheduleSave(); this._connStyleId = null; } }
+  _setConnHeads(mode) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.endArrowhead = (mode === 'none') ? null : 'arrow'; el.startArrowhead = (mode === 'double') ? 'arrow' : null; ch = true; } } if (ch) { this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // heads change → dir glyph in the breadcrumb changes
+  _setConnColor(color) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.strokeColor = color; el.relType = null; ch = true; } } if (ch) { this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // a manual color override clears the preset tag
   _editText(el) {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
     if (this._ta) { try { this._ta.remove(); } catch (_e) {} this._ta = null; }
@@ -5339,6 +5437,7 @@ class CanvasView {
       }
     }
     try { this._syncConnInfo(); } catch (_e) {} // C2 (round 3): the on-canvas connection info card (source / direction / thumbnail) on hover or single-select
+    try { this._syncConnStyle(); } catch (_e) {} // round-5 C: the connection-style popover (typed relationship presets + line style + arrowheads + colour) on single-select
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -6505,7 +6604,7 @@ class Plugin extends AppPlugin {
         const els = v.scene.elements.filter((e) => !e.isDeleted);
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
-        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? (b.group ? { group: (b.group.ids || []).length } : { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null }) : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead, relType: e.relType || null, lineStyle: e.lineStyle || 'solid' }; });
         // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
         const thumbTest = [];
         for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }
@@ -7312,6 +7411,22 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-dir { opacity: .8; font-weight: 700; flex: 0 0 auto; }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-thumb { width: 42px; height: 30px; object-fit: cover; border-radius: 3px; border: 1px solid rgba(127,127,127,.4); flex: 0 0 auto; }
+/* round-5 C: connection-style popover (typed relationship presets + line style + arrowheads + colour) */
+.pxc-host .pxc-root .pxc-connstyle { position: absolute; z-index: 7; display: flex; flex-direction: column; gap: 6px; padding: 7px; max-width: 250px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.4); font: 12px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-row { display: flex; align-items: center; gap: 5px; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-rels, .pxc-host .pxc-root .pxc-connstyle .pxc-cs-colors { flex-wrap: wrap; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-rel { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 999px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 11px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-rel:hover { border-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--input-bg-color, #232838); border-radius: 7px; border: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-btn { min-width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 13px/1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-btn:hover { background: var(--sidebar-bg-hover, rgba(127,127,127,.18)); }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-line { display: block; width: 20px; height: 0; border-top: 2px solid currentColor; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-line.dashed { border-top-style: dashed; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-line.dotted { border-top-style: dotted; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-color { width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-on { border-color: var(--button-primary-bg-color, #7c5cff) !important; box-shadow: inset 0 0 0 1px var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-connstyle .pxc-cs-color.pxc-cs-on { box-shadow: 0 0 0 2px var(--cards-bg, #1b1f2a), 0 0 0 4px var(--button-primary-bg-color, #7c5cff); }
 /* C1 round 3: clickable ref chips beside the text editor */
 .pxc-host .pxc-root .pxc-refbar { position: absolute; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px; max-width: 320px; padding: 4px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
 .pxc-host .pxc-root .pxc-refchip { display: inline-flex; align-items: center; gap: 4px; max-width: 200px; padding: 3px 8px; border-radius: 6px; background: rgba(124,92,255,.16); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1.2 system-ui, sans-serif; }
