@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.77.2 — record/line card surface matches the whiteboard theme (was a fixed navy) (2026-06-21)
+- The canvas record + line cards filled with a hardcoded `#1b1d24` navy in dark mode, which didn't match the board background.
+  `_themeDark()` (which already reads the live `--cards-bg`/`--color-bg-900`) now caches that resolved color as
+  `this._cardSurface`; `_drawRecordCard`/`_drawLineCard` use it as the default dark-mode fill so cards take the theme's own card
+  colour (dark on a dark board, light on a light board). Light mode + export stay `#ffffff` (clean export preserved); an
+  explicitly-chosen non-white `backgroundColor` is still respected. Guarded against an unresolved `var(...)` value.
+
 ## ✅ v1.77.1 — record panel back BESIDE the card (sit-on-card covered it / blocked typing) (2026-06-21)
 - The v1.77.0 sit-on-card positioning overlaid the panel opaquely on top of the record card → the card was unreadable and you
   couldn't type into the body. Per the user's fallback ("if you can have it be inside then just have it on the side again"),

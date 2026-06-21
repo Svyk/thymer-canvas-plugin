@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.77.1';
+const PLEXUS_VERSION = '1.77.2';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3805,7 +3805,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = sk.color || el.strokeColor || '#7c5cff'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? '#1b1d24' : '#ffffff'); // B1: the DEFAULT white follows the theme (dark surface on a dark canvas); an explicitly-chosen non-white bg is still respected
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? (this._cardSurface || '#1b1d24') : '#ffffff'); // B1: the DEFAULT surface follows the live theme (matches the whiteboard's card colour, dark or light); an explicitly-chosen non-white bg is still respected; export forces light → white
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
     ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -4472,7 +4472,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = el.strokeColor || '#0ea5e9'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? '#1b1d24' : '#ffffff'); // B1: the DEFAULT white follows the theme (dark surface on a dark canvas); an explicitly-chosen non-white bg is still respected
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? (this._cardSurface || '#1b1d24') : '#ffffff'); // B1: the DEFAULT surface follows the live theme (matches the whiteboard's card colour, dark or light); an explicitly-chosen non-white bg is still respected; export forces light → white
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -5649,6 +5649,8 @@ class CanvasView {
       const cs = getComputedStyle(this.host || this.wrap || document.body);
       const bg = (cs.getPropertyValue('--cards-bg') || cs.getPropertyValue('--color-bg-900') || cs.getPropertyValue('--color-bg-700') || '').trim();
       const L = _cssLum(bg); if (L != null) dark = L < 0.5;
+      // cache the live theme card-surface so the canvas record/line cards match the whiteboard (instead of a fixed navy)
+      if (bg && !/^var\(/.test(bg) && _cssLum(bg) != null) this._cardSurface = bg;
     } catch (_e) {}
     this._darkCache = dark; this._darkCacheT = t; return dark;
   }
