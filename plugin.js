@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.75.0';
+const PLEXUS_VERSION = '1.76.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -251,6 +251,7 @@ const TOOLS = [
   { id: 'frame', icon: 'ti-layout-board', title: 'Frame (F) — a named boundary; moves its contents together' },
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
   { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
+  { id: 'card', icon: 'ti-id', title: 'New record card — click to drop a new note/record (edit its properties on the right)' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const OPP = { nw: 'se', n: 's', ne: 'sw', e: 'w', se: 'nw', s: 'n', sw: 'ne', w: 'e' };
@@ -2788,6 +2789,8 @@ class CanvasView {
         const el = makeText(down.x, down.y, { stroke: this.strokeColor, fontSize: 24 });
         this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
         this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
+      } else if (this.tool === 'card') {
+        this.tool = 'select'; this._syncToolbar(); this._newRecordCardAt(down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-2: click to drop a new record card (default Notes/Captures); the property panel opens on its selection
       } else if (this.tool === 'arrow' || this.tool === 'line') {
         mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'crop') {
@@ -3509,6 +3512,97 @@ class CanvasView {
     return null;
   }
   _invalidateRec(guid) { if (this._recCache && this._recCache.has(guid)) { this._recCache.delete(guid); this.dirty = true; } }
+  // ── EDIT-1: editable record-card property panel (a DOM overlay shown beside a single-selected record card) ──
+  // Enumerate the EDITABLE typed properties of a record (skip system/Plexus-internal). Type inferred from the live shape:
+  // choices()→choice, date()→date, linkedRecords()→relation, number()→number, else text. Empty props default to text (v1).
+  _recPanelFields(rec) {
+    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text']);
+    const out = []; let props = [];
+    try { props = (rec.getAllProperties && rec.getAllProperties()) || []; } catch (_e) {}
+    for (const p of props) {
+      const name = p && p.name; if (!name || SKIP.has(name)) continue;
+      let kind = 'text', choices = null, value = '';
+      try { const ch = p.choices && p.choices(); if (ch && ch.length) { kind = 'choice'; choices = ch.map((c) => ({ id: c.id, label: c.label })); } } catch (_e) {}
+      if (kind === 'text') { try { const d = p.date && p.date(); if (d instanceof Date) kind = 'date'; } catch (_e) {} }
+      if (kind === 'text') { try { const lr = p.linkedRecords && p.linkedRecords(); if (lr && lr.length) kind = 'relation'; } catch (_e) {} }
+      if (kind === 'text') { try { const n = p.number && p.number(); if (typeof n === 'number') kind = 'number'; } catch (_e) {} }
+      try {
+        if (kind === 'choice') value = (p.choiceLabel && p.choiceLabel()) || '';
+        else if (kind === 'date') { const d = p.date(); value = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''; }
+        else if (kind === 'number') { const n = p.number && p.number(); value = (n == null ? '' : n); }
+        else if (kind === 'relation') value = ((p.linkedRecords && p.linkedRecords()) || []).map((r) => (r && r.getName && r.getName()) || '').filter(Boolean).join(', ');
+        else value = (p.text && p.text()) || '';
+      } catch (_e) {}
+      out.push({ name, kind, value, choices });
+    }
+    return out;
+  }
+  // Write one property (only when changed) + re-raster the card. choice→setChoice(label); date→DateTime; number→Number; else text.
+  _writeRecProp(rec, guid, name, kind, raw) {
+    try {
+      const p = rec.prop(name); if (!p) return;
+      if (kind === 'choice') { try { p.setChoice(raw); } catch (_e) {} }
+      else if (kind === 'date') { if (raw) { try { p.set(DateTime.parseDateTimeString(raw).value()); } catch (_e) { try { p.set(raw); } catch (_e2) {} } } else { try { p.set(''); } catch (_e) {} } }
+      else if (kind === 'number') { try { p.set(raw === '' || raw == null ? '' : Number(raw)); } catch (_e) {} }
+      else { try { p.set(raw); } catch (_e) {} }
+      this._invalidateRec(guid); this.dirty = true; this.scheduleSave();
+    } catch (_e) {}
+  }
+  _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
+  // Shown when exactly one RECORD card is selected (and no draw/connection state is armed). Rebuilt only when the selected
+  // card changes; positioned beside the card each frame. DOM overlay (like _editCardBody) — the card itself stays a raster.
+  _syncRecPanel() {
+    let card = null;
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && !this._present && this.selected.size === 1 && !this._pendingSourceRegion && !this._pendingRegionDraw && !this._pendingGroupLink && !this._pendingRegionLink) {
+      const a = this._byId(this.selected.values().next().value); if (a && !a.isDeleted && a.type === 'record' && a.recordGuid) card = a;
+    }
+    if (!card) { this._closeRecPanel(); return; }
+    if (this._recPanelId !== card.id) { this._closeRecPanel(); this._recPanelId = card.id; this._buildRecPanel(card); } // async build; _recPanelId guards stale attach
+    if (!this._recPanelEl) return;
+    const s = this.camera.worldToScreen(card.x + Math.abs(card.width), card.y), ww = this.wrap.clientWidth || 800, bw = this._recPanelEl.offsetWidth || 240;
+    let left = s.x + 12; if (left + bw > ww - 6) left = Math.max(6, this.camera.worldToScreen(card.x, card.y).x - bw - 12); // flip to the card's left if it would overflow
+    this._recPanelEl.style.left = Math.max(6, left) + 'px'; this._recPanelEl.style.top = Math.max(8, s.y) + 'px';
+  }
+  async _buildRecPanel(card) {
+    const guid = card.recordGuid; let rec = null;
+    try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
+    if (this._recPanelId !== card.id) return; // selection changed during the fetch
+    if (!rec) { this._recPanelId = null; return; } // fetch failed (record not synced yet) → clear the guard so a later frame retries (else the panel wedges null for this selection)
+    this._closeRecPanel(); this._recPanelId = card.id;
+    const box = document.createElement('div'); box.className = 'pxc-recpanel'; this._recPanelEl = box;
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    // header: title (editable) + buttons
+    const head = document.createElement('div'); head.className = 'pxc-rp-head';
+    const tin = document.createElement('input'); tin.className = 'pxc-rp-title'; tin.value = (rec.getName && rec.getName()) || ''; tin.title = 'Record title';
+    tin.addEventListener('change', () => this._writeRecProp(rec, guid, 'Title', 'text', tin.value));
+    head.appendChild(tin);
+    const btns = document.createElement('div'); btns.className = 'pxc-rp-btns';
+    const mkb = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'pxc-rp-btn'; b.textContent = txt; b.title = title; b.addEventListener('click', (e) => { e.preventDefault(); fn(); }); btns.appendChild(b); return b; };
+    mkb('Open', 'Open the record in a panel', () => this._openRecord(guid));
+    mkb('Move…', 'Move this record to another collection (keeps its links)', async () => { const col = await this._pickCollection('Move this record to collection:'); if (col) { try { rec.moveToCollection(col.getGuid()); this._invalidateRec(guid); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Moved to “' + (col.getName && col.getName()) + '”.', dismissible: true }); } catch (_e) {} } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not move the record.', dismissible: true }); } catch (_e2) {} } } });
+    head.appendChild(btns); box.appendChild(head);
+    // property rows
+    const list = document.createElement('div'); list.className = 'pxc-rp-list';
+    for (const f of this._recPanelFields(rec)) {
+      const row = document.createElement('div'); row.className = 'pxc-rp-row';
+      const lab = document.createElement('label'); lab.className = 'pxc-rp-lab'; lab.textContent = f.name; row.appendChild(lab);
+      let ctrl;
+      if (f.kind === 'choice') {
+        ctrl = document.createElement('select'); ctrl.className = 'pxc-rp-sel';
+        const blank = document.createElement('option'); blank.value = ''; blank.textContent = '—'; ctrl.appendChild(blank);
+        for (const c of (f.choices || [])) { const o = document.createElement('option'); o.value = c.label; o.textContent = c.label; if (c.label === f.value) o.selected = true; ctrl.appendChild(o); }
+        ctrl.addEventListener('change', () => this._writeRecProp(rec, guid, f.name, 'choice', ctrl.value));
+      } else if (f.kind === 'relation') {
+        ctrl = document.createElement('div'); ctrl.className = 'pxc-rp-rel'; ctrl.textContent = f.value || '—'; ctrl.title = 'Open the record to edit relations';
+      } else {
+        ctrl = document.createElement('input'); ctrl.className = 'pxc-rp-inp'; ctrl.type = f.kind === 'date' ? 'date' : (f.kind === 'number' ? 'number' : 'text'); ctrl.value = (f.value == null ? '' : f.value);
+        ctrl.addEventListener('change', () => this._writeRecProp(rec, guid, f.name, f.kind, ctrl.value));
+      }
+      row.appendChild(ctrl); list.appendChild(row);
+    }
+    box.appendChild(list);
+    this.wrap.appendChild(box);
+  }
   // BULK PROPERTY BRUSH: set ONE typed property to the same value across all selected record cards in one gesture —
   // spreadsheet fill-down on REAL records (a choice prop uses setChoice; date→DateTime; number→set(Number); else text).
   async _bulkBrush() {
@@ -3558,6 +3652,21 @@ class CanvasView {
     const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
     this._invalidateRec(guid); this._insertRecordCard(guid, c.x, c.y); // inserts + selects + saves; card pulls title/lines live
     try { this.plugin.ui.addToaster({ title: 'Captured “' + title + '” — a live record card.', dismissible: true }); } catch (_e) {}
+  }
+  // EDIT-2: the default "notes" target for a new card — Notes → Captures → Inbox → the Plexus Drawings collection.
+  async _defaultCollection() {
+    try { const cols = await this.plugin.data.getAllCollections(); const f = (re) => (cols || []).find((c) => { try { return re.test(c.getName()); } catch (_e) { return false; } }); return f(/^notes$/i) || f(/^captures$/i) || f(/^inbox$/i) || null; } catch (_e) { return null; }
+  }
+  // EDIT-2: drop a NEW record card at a world point — creates a record in the default collection (Heptabase-style); the
+  // property panel (EDIT-1) opens automatically on the resulting selection, where the user renames / sets props / Moves it.
+  async _newRecordCardAt(wx, wy) {
+    let col = await this._defaultCollection(); if (!col) { try { col = await this.plugin._drawingsCollection(); } catch (_e) {} } // _drawingsCollection lives on the Plugin, not the view (was: this._drawingsCollection → TypeError)
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no Notes/Captures collection to create the card in.', dismissible: true }); } catch (_e) {} return; }
+    let guid = null; try { guid = col.createRecord('Untitled'); } catch (_e) {}
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the record.', dismissible: true }); } catch (_e) {} return; }
+    await getRecordPoll(this.plugin, guid, 8);
+    this._invalidateRec(guid); this._insertRecordCard(guid, wx, wy); // selects the card → _syncRecPanel opens the editable panel
+    try { this.plugin.ui.addToaster({ title: 'New card in “' + ((col.getName && col.getName()) || 'notes') + '” — edit its title/properties on the right, or Move… to another collection.', dismissible: true }); } catch (_e) {}
   }
   _clipText(ctx, s, maxW) { s = String(s == null ? '' : s); if (ctx.measureText(s).width <= maxW) return s; while (s.length && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1); return s + '…'; }
   // Indent-Rainbow parity: draw ONE transcluded outline row the way the flow plugin renders it on a record — a depth-colored
@@ -5579,6 +5688,7 @@ class CanvasView {
     }
     try { this._syncConnInfo(); } catch (_e) {} // C2 (round 3): the on-canvas connection info card (source / direction / thumbnail) on hover or single-select
     try { this._syncConnStyle(); } catch (_e) {} // round-5 C: the connection-style popover (typed relationship presets + line style + arrowheads + colour) on single-select
+    try { this._syncRecPanel(); } catch (_e) {} // EDIT-1: the editable record-card property panel (view/edit typed properties · Move…) on single-select of a record card
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -5813,7 +5923,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
     return res;
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} /* round-3 C / round-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -5919,6 +6029,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle minimap', icon: 'ti-map', onSelected: () => { if (!this._settings) this._settings = {}; this._settings.minimap = this._settings.minimap === false; try { savePlexusSettings(this._settings); } catch (_e) {} for (const v of this._views) { v._miniDirty = true; v.dirty = true; } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Bulk set property (selected cards)', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._bulkBrush(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Quick-capture (new record card)', icon: 'ti-plus', onSelected: () => { const v = this._activeView(); if (v) v._quickCapture(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: New record card (here)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._newRecordCardAt(c.x, c.y); } } }); // EDIT-2
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
@@ -7584,6 +7695,18 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-dir { opacity: .8; font-weight: 700; flex: 0 0 auto; }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-thumb { width: 42px; height: 30px; object-fit: cover; border-radius: 3px; border: 1px solid rgba(127,127,127,.4); flex: 0 0 auto; }
 /* round-5 C: connection-style popover (typed relationship presets + line style + arrowheads + colour) */
+/* EDIT-1: editable record-card property panel */
+.pxc-host .pxc-root .pxc-recpanel { position: absolute; z-index: 8; display: flex; flex-direction: column; gap: 6px; padding: 9px; width: 248px; max-height: 70vh; overflow-y: auto; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 11px; box-shadow: 0 10px 30px rgba(0,0,0,.42); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn { padding: 4px 9px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 11px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-list { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 6px; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-lab { font-size: 11px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-inp, .pxc-host .pxc-root .pxc-recpanel .pxc-rp-sel { width: 100%; padding: 4px 6px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 5px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); font: 12px/1.2 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-rel { padding: 4px 6px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pxc-host .pxc-root .pxc-connstyle { position: absolute; z-index: 7; display: flex; flex-direction: column; gap: 6px; padding: 7px; max-width: 250px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.4); font: 12px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
 .pxc-host .pxc-root .pxc-connstyle .pxc-cs-row { display: flex; align-items: center; gap: 5px; }
 .pxc-host .pxc-root .pxc-connstyle .pxc-cs-rels, .pxc-host .pxc-root .pxc-connstyle .pxc-cs-colors { flex-wrap: wrap; }

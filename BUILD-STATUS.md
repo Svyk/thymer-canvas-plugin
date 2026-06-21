@@ -1,5 +1,23 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.76.0 — editable record-card property panel + a "new card" toolbar tool (EDIT-1/EDIT-2) (2026-06-21)
+- **EDIT-1 — editable transclusion:** selecting ONE record card now shows a DOM **property panel** beside it (`_syncRecPanel`/
+  `_buildRecPanel`, synced each frame, built async, positioned via `worldToScreen` with overflow flip). It lists the record's
+  editable typed properties (`_recPanelFields` — skips system Created/Modified/Banner/Icon + Plexus's Scene/Canvas Text; infers
+  kind from `p.choices()`/`p.date()`/`p.linkedRecords()`/`p.number()`). Edit a choice (dropdown), text/number/date (input), or the
+  title → writes via `p.setChoice(label)` / `p.set(...)` and re-rasters the card. Header: **Open**, **Move…** (a REAL lossless
+  move — the live probe found `rec.moveToCollection(guid)` exists, so the card re-homes in-place keeping its GUID + links). All
+  SDK calls verified live via the `__pxcView` handle. Node test 13/13.
+- **EDIT-2 — new card (Heptabase-style):** a `card` toolbar tool (`ti-id`) + command "Plexus: New record card" → click → creates a
+  record in the **default Notes/Captures** collection (`_defaultCollection`: Notes→Captures→Inbox→Drawings), drops a live card,
+  and the EDIT-1 panel opens on it (rename, set properties, Move… to any collection). Reuses `col.createRecord`/`getRecordPoll`/
+  `_insertRecordCard`. (Phases 3–4 — apply a template + Datacore card/query — are next.)
+- **Adversarial review: 3 findings → 2 fixed, 1 not-a-bug.** (1) `_newRecordCardAt` called `this._drawingsCollection()` but that
+  lives on the Plugin → `this.plugin._drawingsCollection()` (would have thrown when no Notes/Captures exists). (2) a failed initial
+  `getRecord` in `_buildRecPanel` wedged the panel null for that selection → now clears `_recPanelId` so a later frame retries.
+  (3) the Title-rename via `prop('Title').set()` was flagged as a possible no-op — **verified live** that a record's name === its
+  Title property text and `Title.set` exists, so it genuinely renames.
+
 ## ✅ v1.75.0 — cite combine: region-marking tools keep your selection (so region + text cite together) (2026-06-21)
 - **Root cause (diagnosed LIVE via the `wrap.__pxcView` handle):** the user's stored reference was a **region-ONLY cite**
   (`extraN: 0` — "this is a test" was only the chip *label*, never a target), so the snapshot had no text and the (pre-v1.74)
