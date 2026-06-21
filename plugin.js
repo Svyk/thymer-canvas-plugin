@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.68.0';
+const PLEXUS_VERSION = '1.69.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1955,20 +1955,35 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Region marked on the image — click “Cite” to reference it in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
-  // Shared loop → selection logic, used by the LASSO tool AND the pen→Cite path: select every element the loop
-  // OVERLAPS (edge-touch counts, grid-accelerated), and if the loop covers a sub-area of an image, mark that as a
-  // pending region (keeping the shape selection) so a subsequent Cite references the shape(s) AND the region together.
+  // Every content element a lasso loop OVERLAPS (edge-touch counts). Iterates the FULL SCENE — NOT the spatial grid —
+  // because the grid is rebuilt lazily and a TEXT element's bbox is measured lazily at render (measureRuns sets width/height
+  // WITHOUT flipping _gridDirty), so the grid can hold a STALE/zero bbox → the element silently drops from a grid query.
+  // 2026-06-21: "this is a test" (white text) wasn't captured by Cite OR the group-lasso for exactly this reason. A lasso is a
+  // one-shot gesture, so the O(n) scan is fine, and we measureRuns() each text first so its bbox is current.
+  _elsInLoop(poly, excludeId, skipConnectors) {
+    const out = []; if (!poly || poly.length < 3) return out;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    for (const el of this.scene.elements) {
+      if (el.isDeleted || el.type === 'frame' || el.id === excludeId) continue;
+      if (skipConnectors && (el.type === 'arrow' || el.type === 'line')) continue; // group-lasso skips connectors; the lasso SELECT tool keeps them (parity with the old grid path)
+      if (el.type === 'text') { try { measureRuns(el); } catch (_e) {} } // ensure width/height are current → correct bbox (was the bug)
+      let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
+      if (el.angle) bb = rotatedAABB(bb, el.angle);
+      if (bb.x > x1 || bb.x + bb.w < x0 || bb.y > y1 || bb.y + bb.h < y0) continue; // bbox quick-reject (cheap O(n) filter before the poly tests)
+      if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) out.push(el);
+    }
+    return out;
+  }
+  // Shared loop → selection logic, used by the LASSO tool AND the pen→Cite path: select every element the loop OVERLAPS,
+  // and if the loop covers a sub-area of an image, mark that as a pending region (keeping the shape selection) so a
+  // subsequent Cite references the shape(s) AND the region together.
   _selectFromLoop(poly, excludeId) {
     if (!poly || poly.length < 3) return;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
     const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-    this._ensureGrid();
-    for (const el of this._grid.query(rect.x, rect.y, rect.w, rect.h)) {
-      if (el.isDeleted || el.type === 'frame' || el.id === excludeId) continue;
-      const bb = this._elBBox(el); if (!bb) continue;
-      if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) this.selected.add(el.id);
-    }
+    for (const el of this._elsInLoop(poly, excludeId, false)) this.selected.add(el.id); // lasso SELECT tool keeps arrows/lines
     if (rect.w > 4 && rect.h > 4) {
       const img = this._topImageIn(rect), ib = img ? this._elBBox(img) : null;
       if (img && ib && img.id !== excludeId && (rect.w * rect.h) < (ib.w * ib.h) * 0.92) { this.selected.delete(img.id); this._setPendingImgRegion(img, rect, poly, true); }
@@ -1985,16 +2000,9 @@ class CanvasView {
     for (const id of ids) { const el = get(id); if (!el || el.isDeleted) continue; let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue; if (el.angle) bb = rotatedAABB(bb, el.angle); x0 = Math.min(x0, bb.x); y0 = Math.min(y0, bb.y); x1 = Math.max(x1, bb.x + bb.w); y1 = Math.max(y1, bb.y + bb.h); }
     return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
   }
-  // The element ids enclosed by a lasso polygon — like _selectFromLoop but PURE (returns ids, no selection/region side
-  // effects). Skips connectors/frames + an excluded id. Used by the drop-then-lasso group-link flow.
-  _idsInLoop(poly, excludeId) {
-    const ids = []; if (!poly || poly.length < 3) return ids;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
-    this._ensureGrid();
-    for (const el of this._grid.query(x0, y0, x1 - x0, y1 - y0)) { if (el.isDeleted || el.type === 'frame' || el.type === 'arrow' || el.type === 'line' || el.id === excludeId) continue; const bb = this._elBBox(el); if (!bb) continue; if (pointInPoly(bb.x + bb.w / 2, bb.y + bb.h / 2, poly) || polyHitsRect(poly, bb)) ids.push(el.id); }
-    return ids;
-  }
+  // The element ids enclosed by a lasso polygon — PURE (returns ids, no selection/region side effects). Used by the
+  // drop-then-lasso group-link flow. Shares the robust full-scene _elsInLoop so it captures the SAME elements as Cite.
+  _idsInLoop(poly, excludeId) { return this._elsInLoop(poly, excludeId, true).map((e) => e.id); } // group-lasso skips connectors
   // The union bbox of the CURRENT multi-selection (≥2 content elements) — drives the group-connect nubs. Null otherwise.
   _groupSelBBox() {
     if (this.selected.size < 2) return null;

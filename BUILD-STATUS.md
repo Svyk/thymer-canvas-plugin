@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.69.0 — FIX: lasso (Cite + group-connect) silently dropped elements (esp. text) (2026-06-21)
+- **Bug (user-reported):** lassoing "this is a test" (white canvas text) captured **nothing** — both the **Cite** tool and the
+  round-5 **group-connect** lasso. Not a Phase B regression and **not** a colour issue — the root cause is shared:
+  `_selectFromLoop`/`_idsInLoop` queried the **spatial grid**, but a text element's width/height are measured **lazily at
+  render** (`measureRuns`) and that does **not** flip `_gridDirty` → the grid holds a stale/zero bbox for the text → it drops
+  out of the grid query before the (robust) polygon test ever runs.
+- **Fix:** new shared `_elsInLoop(poly, excludeId, skipConnectors)` iterates the **full scene** (a lasso is a one-shot gesture,
+  O(n) is fine, and it's immune to a stale grid) and calls `measureRuns()` on each text first so its bbox is current; a cheap
+  bbox quick-reject keeps it fast. `_selectFromLoop` (lasso SELECT tool + Cite) and `_idsInLoop` (group-connect) both route
+  through it. `skipConnectors` preserves the lasso tool's ability to select arrows/lines while the group-lasso skips connectors.
+- Node test: the previously-dropped text is now captured (measured bbox + full-scene scan); off-screen elements still rejected;
+  arrow exclusion intact. Existing suites (A/B/B-fixes/C) all green. **Next:** "part of the image" as a region inside a group
+  (parity with Cite's image-region) — currently a group lasso captures the whole image.
+
 ## ✅ v1.68.0 — round-5 Phase C: typed relationship presets + manual connection styling (Heptabase-style) (2026-06-20)
 - Selecting a single connection now shows a **style popover** above it with:
   - **6 typed relationship presets** (`PXC_REL_PRESETS`): relates-to (gray), supports (green), contradicts (red, dashed),
