@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.65.0';
+const PLEXUS_VERSION = '1.66.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1523,7 +1523,7 @@ class CanvasView {
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
     this._lineRects = new Map(); // CONNECTIONS Phase 4: cardId → [{lineGuid, dy, h}] body-line bands (relative to card top, captured each raster) — line-level connection targeting
-    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / elId → Set(arrowId) — CURRENT connection targets (blue flag + region highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
+    this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connRefTargets = new Map(); this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / textId → Set(refGuidTarget) / elId → Set(arrowId) — CURRENT connection targets (blue flag + region/ref highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
     this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
   }
   mount() {
@@ -1747,9 +1747,20 @@ class CanvasView {
     for (const b of bands) if (wy >= el.y + b.dy && wy <= el.y + b.dy + b.h) return b.lineGuid;
     return null;
   }
-  // The pseudo-shape bindPoint should route an endpoint to: a specific body line, a marked image region, else the whole element.
+  // CONNECTIONS round-5 A: world rect of the INLINE REF run of a text box that targets `targetGuid` (a record guid or a
+  // lineGuid) — routes a connection endpoint to a SPECIFIC inline link of a text note + draws its flag. Null on a rotated
+  // text box (degrade to whole-box binding, same as _lineRectWorld), or when the ref is no longer present.
+  _refRunRectWorld(el, targetGuid) {
+    if (!el || el.type !== 'text' || !targetGuid || el.angle || !el.runs || !el.runs.length) return null;
+    let layout = _pxcRunLayout.get(el); if (!layout) layout = measureRuns(el);
+    const fs = el.fontSize || 24, lh = fs * 1.25;
+    for (const p of layout) { const r = p.run; if (r && r.t === 'ref' && (r.guid === targetGuid || r.lineGuid === targetGuid)) return { x: el.x + p.x, y: el.y + p.line * lh, w: p.w, h: lh }; }
+    return null;
+  }
+  // The pseudo-shape bindPoint should route an endpoint to: a specific body line, an inline ref run, a marked image region, else the whole element.
   _bindTargetShape(binding, el) {
     if (binding && binding.lineGuid && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
+    if (binding && binding.refGuidTarget && el.type === 'text') { const rr = this._refRunRectWorld(el, binding.refGuidTarget); if (rr) return { x: rr.x, y: rr.y, width: rr.w, height: rr.h }; } // round-5 A: route to a SPECIFIC inline ref run of a text note
     if (binding && binding.frac && (el.type === 'image' || isRoughShape(el.type))) { const rw = this._imgRegionWorld(el, binding.frac); if (rw) return { x: rw.x, y: rw.y, width: rw.w, height: rw.h }; } // F2: a region of an image OR a rough shape
     return el;
   }
@@ -1760,6 +1771,7 @@ class CanvasView {
     const b = { elementId: s.id };
     if (s.type === 'record') { const lg = this._lineGuidAtCard(s, wx, wy); if (lg) b.lineGuid = lg; }
     else if (s.type === 'image') { const r = this._regionAt(s); if (r) { b.frac = r.frac; if (r.fracPoly) b.fracPoly = r.fracPoly; } }
+    else if (s.type === 'text' && s.runs && s.runs.length) { const run = hitInlineRef(s, wx, wy); const g = run && (run.kind === 'line' ? (run.lineGuid || run.guid) : (run.guid || run.lineGuid)); if (g) { b.refGuidTarget = g; b.refKindTarget = run.kind; } } // round-5 A: dropped ON a specific inline ref → bind to its target. KIND-AWARE: a line ref carries BOTH run.guid (the record) AND run.lineGuid — key by the LINE so the LINE gets the ↗, matching the record-card line path
     return b;
   }
   _ptInBBox(el, x, y) { const b = this._elBBox(el); return !!(b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); } // F2: is a world point inside an element's bbox (region-mark target test)
@@ -1778,6 +1790,27 @@ class CanvasView {
     box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
   }
   _closeRegionChoice() { if (this._regionChoiceEl) { try { this._regionChoiceEl.remove(); } catch (_e) {} this._regionChoiceEl = null; } }
+  // round-5 A: the WHOLE-box-vs-specific-INLINE-REF prompt at the drop point. Lists "Whole box" + one button per inline ref of
+  // the targeted text note (deduped by target guid). Picking a ref writes refGuidTarget/refKindTarget into the connection's
+  // binding (→ that LINKED record gets the ↗); "Whole box" clears it. Dismiss = a press anywhere else (handled in onDown via
+  // the refOnly pending-link). Pre-selects whatever the user dropped on (a check on the matching button).
+  _showRefChoice(arrow, textEl, bindKey, sx, sy) {
+    this._closeRegionChoice();
+    const refs = [], seen = new Set();
+    const gOf = (r) => r.kind === 'line' ? (r.lineGuid || r.guid) : (r.guid || r.lineGuid); // KIND-AWARE target guid: a line ref carries BOTH guid (record) + lineGuid — key by the LINE so two refs to different lines of the SAME record stay distinct
+    for (const r of (textEl.runs || [])) { if (r && r.t === 'ref') { const g = gOf(r); if (!g || seen.has(g)) continue; seen.add(g); refs.push(r); } }
+    if (!refs.length) return;
+    const cur = (this._byId(arrow.id) || {})[bindKey] || {}, curG = cur.refGuidTarget || null;
+    const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
+    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Connect to…'; box.appendChild(lab);
+    const mk = (txt, on, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; if (on) b.classList.add('pxc-rc-on'); b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
+    mk('Whole box', !curG, () => { const a = this._byId(arrow.id); if (a && a[bindKey]) { delete a[bindKey].refGuidTarget; delete a[bindKey].refKindTarget; } this._pendingRegionLink = null; this._closeRegionChoice(); this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); this.dirty = true; });
+    for (const r of refs) { const g = gOf(r), name = (r.alias || r.label || (r.kind === 'line' ? 'line' : 'record')); mk((r.kind === 'line' ? '⮑ ' : '→ ') + name, curG === g, () => { const a = this._byId(arrow.id); if (a && a[bindKey]) { a[bindKey].refGuidTarget = g; a[bindKey].refKindTarget = r.kind; } this._pendingRegionLink = null; this._closeRegionChoice(); this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); this.dirty = true; }); }
+    this.wrap.appendChild(box);
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 160, bh = box.offsetHeight || 96;
+    box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
+    box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
+  }
   // C2 (round 3): describe one connection endpoint for the on-canvas info card (mirrors _reindexBackrefs' descEnd).
   _connEndpointDesc(b) {
     if (!b || !b.elementId) return { name: 'point' };
@@ -1785,7 +1818,7 @@ class CanvasView {
     const rc = this._recCache;
     if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: (ln && ln.text) || 'line' }; } return { name: (rec && rec.title) || 'note' }; }
     if (e.type === 'linecard') { const rec = rc && rc.get(e.recordGuid); return { name: (rec && rec.title) || 'line' }; }
-    if (e.type === 'text') return { name: (e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' };
+    if (e.type === 'text') { if (b.refGuidTarget && e.runs) { const rr = e.runs.find((r) => r && r.t === 'ref' && (r.guid === b.refGuidTarget || r.lineGuid === b.refGuidTarget)); if (rr) return { name: (rr.alias || rr.label) || 'ref' }; } return { name: (e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' }; } // round-5 A
     if (e.type === 'image') return { name: 'image', img: { fileId: e.fileId, frac: b.frac || null, fracPoly: b.fracPoly || null } };
     return { name: e.type || 'shape' };
   }
@@ -1900,6 +1933,7 @@ class CanvasView {
     for (const b of [arrow.startBinding, arrow.endBinding]) {
       if (!b || !b.elementId) continue; const t = this._byId(b.elementId); if (!t || t.isDeleted) continue;
       if (b.lineGuid && t.type === 'record') { const lr = this._lineRectWorld(t, b.lineGuid); if (lr) { out.push({ bbox: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } }); continue; } }
+      if (b.refGuidTarget && t.type === 'text') { const rr = this._refRunRectWorld(t, b.refGuidTarget); if (rr) { out.push({ bbox: { x: rr.x, y: rr.y, w: rr.w, h: rr.h } }); continue; } } // round-5 A: frame the targeted inline ref run
       if (b.frac && t.type === 'image') { const rw = this._imgRegionWorld(t, b.frac); if (rw && isFinite(rw.x)) { out.push({ inImage: true, elId: t.id, frac: b.frac, fracPoly: b.fracPoly, bbox: rw }); continue; } }
       const bb = this._elBBox(t); if (bb && isFinite(bb.x)) out.push({ bbox: bb });
     }
@@ -2260,14 +2294,15 @@ class CanvasView {
     }
     // CONNECTIONS Phase 4: which lines/regions are CURRENT connection sub-targets (drives the blue flag + region highlight).
     // Built from the (small) bound-arrow set, not the scene; rebuilt every call so a removed/redirected connection clears its flag.
-    const lineT = new Map(), regionT = new Map(), byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5)
+    const lineT = new Map(), regionT = new Map(), refT = new Map(), byEl = new Map(); // byEl: elementId → Set(arrowId) for the select-a-card "see its connections" highlight (Phase 5); refT: textId → Set(refGuidTarget) for the round-5 inline-ref flag
     for (const a of arrows) for (const b of [a.startBinding, a.endBinding]) {
       if (!b || !b.elementId) continue;
       { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
+      else if (b.refGuidTarget) { let s = refT.get(b.elementId); if (!s) refT.set(b.elementId, s = new Set()); s.add(b.refGuidTarget); } // round-5 A: a connection targeting a specific inline ref → flag that run
       else if (b.frac) { let r = regionT.get(b.elementId); if (!r) regionT.set(b.elementId, r = []); r.push({ frac: b.frac, fracPoly: b.fracPoly }); }
     }
-    this._connLineTargets = lineT; this._connRegionTargets = regionT; this._connByEl = byEl;
+    this._connLineTargets = lineT; this._connRegionTargets = regionT; this._connRefTargets = refT; this._connByEl = byEl;
     if (!arrows.length && !labels.length) return; // nothing bound → zero work
     const updArrow = (el) => {
       let changed = false;
@@ -2470,7 +2505,7 @@ class CanvasView {
       // a press OFF it cancels (keeps the whole-element link). Works regardless of the current tool.
       if (this._pendingRegionLink) {
         const prl = this._pendingRegionLink, rel = this._byId(prl.elId);
-        if (rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { this._closeRegionChoice(); mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+        if (!prl.refOnly && rel && !rel.isDeleted && this._ptInBBox(rel, down.x, down.y)) { this._closeRegionChoice(); mode = 'regionmark'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } // refOnly (round-5 A text-ref chooser) has no region-mark drag → any press just dismisses it
         this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true;
       }
       if (this.tool === 'select') {
@@ -2593,6 +2628,12 @@ class CanvasView {
             this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding' };
             const what = s1.type === 'image' ? 'image' : 'shape', sp2 = this.camera.worldToScreen(lp[0], lp[1]);
             this._showRegionChoice(what, sp2.x, sp2.y);
+          }
+          // round-5 A: dropped on a TEXT note carrying inline refs → offer "Whole box" vs each specific inline ref (the screenshot's Pastabilites / pasta). Default = whatever the drop landed on (refGuidTarget already set if it landed on a run).
+          else if (s1 && s1.type === 'text' && s1.runs && s1.runs.some((r) => r && r.t === 'ref' && (r.guid || r.lineGuid)) && created.endBinding) {
+            this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding', refOnly: true };
+            const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
+            this._showRefChoice(created, s1, 'endBinding', sp2.x, sp2.y);
           }
           this.selected.clear(); this.selected.add(created.id); this.tool = 'select'; this._syncToolbar(); this.scheduleSave();
         }
@@ -4140,7 +4181,7 @@ class CanvasView {
       const rc = this._recCache;
       if (e.type === 'record') { const rec = rc && rc.get(e.recordGuid); if (b.lineGuid && rec && rec.lines) { const ln = rec.lines.find((l) => l.lineGuid === b.lineGuid); return { name: clip((ln && ln.text)) || 'line' }; } return { name: clip(rec && rec.title) || 'note' }; }
       if (e.type === 'linecard') { const rec = rc && rc.get(e.recordGuid); return { name: clip(rec && rec.title) || 'line' }; }
-      if (e.type === 'text') return { name: clip(e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' };
+      if (e.type === 'text') { if (b.refGuidTarget && e.runs) { const rr = e.runs.find((r) => r && r.t === 'ref' && (r.guid === b.refGuidTarget || r.lineGuid === b.refGuidTarget)); if (rr) return { name: clip(rr.alias || rr.label) || 'ref' }; } return { name: clip(e.text || (e.runs && e.runs.length ? flattenRuns(e.runs) : '')) || 'text' }; } // round-5 A: a ref-targeted text endpoint reads as the ref's name
       if (e.type === 'image') return { name: 'image', img: { fileId: e.fileId, frac: b.frac || null, fracPoly: b.fracPoly || null } };
       return { name: clip(e.type) || 'shape' };
     };
@@ -4177,6 +4218,7 @@ class CanvasView {
           const extra = { from: other && other.name, dir, img: other && other.img };
           if (t.type === 'record' && t.recordGuid) { if (b.lineGuid) put(b.lineGuid, el.id, lbl, 'line', extra); else put(t.recordGuid, el.id, lbl, 'record', extra); } // Phase 4: bound to a SPECIFIC body line → key the backref by lineGuid so the note's SOURCE LINE gets the ↗ (not the whole record)
           else if (t.type === 'linecard' && t.lineGuid) put(t.lineGuid, el.id, lbl, 'line', extra);
+          else if (t.type === 'text' && b.refGuidTarget) put(b.refGuidTarget, el.id, lbl, b.refKindTarget || 'record', extra); // round-5 A: bound to a SPECIFIC inline ref → key the backref by that ref's target record/line (the LINKED record gets the ↗)
         }
       }
     }
@@ -5175,8 +5217,18 @@ class CanvasView {
     // CONNECTIONS Phase 4: persistent overlay for line/region connection targets — a little blue flag on every targeted body
     // line + a cyan outline on every bound image region. CANVAS-OVERLAY ONLY (zero source-note mutation), world-space so it
     // tracks the card/image live; the note's source line independently gets the ↗ via _reindexBackrefs (keyed by lineGuid).
-    if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size)) {
+    if ((this._connLineTargets && this._connLineTargets.size) || (this._connRegionTargets && this._connRegionTargets.size) || (this._connRefTargets && this._connRefTargets.size)) {
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+      if (this._connRefTargets) for (const [textId, set] of this._connRefTargets) { // round-5 A: cyan flag + underline tint on every targeted inline ref run of a text note
+        const el = this._byId(textId); if (!el || el.isDeleted || el.type !== 'text') continue;
+        for (const g of set) {
+          const rr = this._refRunRectWorld(el, g); if (!rr) continue;
+          ictx.fillStyle = 'rgba(6,182,212,0.12)'; ictx.fillRect(rr.x, rr.y, rr.w, rr.h);
+          const fx = rr.x, fy = rr.y + rr.h + 1.5, ph = 9; // little flag hanging just under the targeted run
+          ictx.fillStyle = '#06b6d4'; ictx.fillRect(fx, fy, 1.6, ph);
+          ictx.beginPath(); ictx.moveTo(fx + 1.6, fy); ictx.lineTo(fx + 7.5, fy + 3); ictx.lineTo(fx + 1.6, fy + 6); ictx.closePath(); ictx.fill();
+        }
+      }
       if (this._connLineTargets) for (const [cardId, set] of this._connLineTargets) {
         const el = this._byId(cardId); if (!el || el.isDeleted || el.type !== 'record') continue;
         for (const lg of set) {
@@ -5217,6 +5269,7 @@ class CanvasView {
       ictx.lineWidth = 2 / z; ictx.setLineDash([7 / z, 4 / z]);
       let drew = false; // Phase 4: outline the LINE BAND / image REGION when releasing here targets one, else the whole element
       if (sub && sub.lineGuid) { const lr = this._lineRectWorld(s, sub.lineGuid); if (lr) { ictx.fillStyle = 'rgba(14,165,233,0.14)'; ictx.fillRect(lr.x, lr.y, lr.w, lr.h); ictx.strokeStyle = '#0ea5e9'; ictx.strokeRect(lr.x + 0.5 / z, lr.y, lr.w - 1 / z, lr.h); drew = true; } }
+      else if (sub && sub.refGuidTarget) { const rr = this._refRunRectWorld(s, sub.refGuidTarget); if (rr) { ictx.fillStyle = 'rgba(6,182,212,0.16)'; ictx.fillRect(rr.x, rr.y, rr.w, rr.h); ictx.strokeStyle = '#06b6d4'; ictx.strokeRect(rr.x + 0.5 / z, rr.y, rr.w - 1 / z, rr.h); drew = true; } } // round-5 A: outline the inline ref run the end will bind to
       else if (sub && sub.frac) { const q = this._regionShapeWorld(s, sub.frac, sub.fracPoly); if (q && q.length) { ictx.beginPath(); ictx.moveTo(q[0].x, q[0].y); for (let i = 1; i < q.length; i++) ictx.lineTo(q[i].x, q[i].y); ictx.closePath(); ictx.fillStyle = 'rgba(14,165,233,0.14)'; ictx.fill(); ictx.strokeStyle = '#0ea5e9'; ictx.stroke(); drew = true; } }
       if (!drew) { ictx.strokeStyle = '#7c5cff'; ictx.strokeRect(Math.min(s.x, s.x + s.width) - 3, Math.min(s.y, s.y + s.height) - 3, Math.abs(s.width) + 6, Math.abs(s.height) + 6); }
       ictx.setLineDash([]); ictx.setTransform(1, 0, 0, 1, 0, 0);
@@ -6366,7 +6419,7 @@ class Plugin extends AppPlugin {
         const els = v.scene.elements.filter((e) => !e.isDeleted);
         const types = {}; for (const e of els) types[e.type] = (types[e.type] || 0) + 1;
         const sel = [...v.selected].map((id) => { const e = els.find((x) => x.id === id); return e ? { type: e.type, w: Math.round(e.width), h: Math.round(e.height), angle: +(e.angle || 0).toFixed(2), fill: e.backgroundColor, fillStyle: e.fillStyle } : null; }).filter(Boolean);
-        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid } : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
+        const conns = els.filter((e) => e.type === 'arrow' || e.type === 'line').map((e) => { const d = (b) => b ? { t: (v._byId(b.elementId) || {}).type, frac: !!b.frac, line: !!b.lineGuid, ref: b.refGuidTarget || null, refKind: b.refKindTarget || null } : null; return { start: d(e.startBinding), end: d(e.endBinding), sa: e.startArrowhead, ea: e.endArrowhead }; });
         // round-4 thumbnail diagnostic: for every image-bound connection endpoint, does _imgFor resolve a loaded image and does _regionThumb produce a data URL?
         const thumbTest = [];
         for (const e of els) { if (e.type !== 'arrow' && e.type !== 'line') continue; for (const b of [e.startBinding, e.endBinding]) { if (!b || !b.elementId) continue; const t = v._byId(b.elementId); if (!t || t.type !== 'image') continue; let im = null, thumb = 'NULL', err = null; try { im = v._imgFor(t.fileId); } catch (x) { err = 'imgFor:' + x; } try { const u = this._regionThumb({ fileId: t.fileId, frac: b.frac || null }); if (u) thumb = 'dataURL(' + u.length + ')'; } catch (x) { err = (err || '') + ' regionThumb:' + x; } thumbTest.push({ fileId: t.fileId, frac: !!b.frac, imgResolved: !!im, imgWH: im ? ((im.naturalWidth || im.width) + 'x' + (im.naturalHeight || im.height)) : null, thumb, err }); } }
@@ -7167,6 +7220,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-region-choice .pxc-rc-label { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; opacity: .55; padding: 1px 2px 2px; }
 .pxc-host .pxc-root .pxc-rc-btn { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-rc-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-rc-btn.pxc-rc-on { border-color: #06b6d4; box-shadow: inset 0 0 0 1px #06b6d4; } /* round-5 A: the currently-targeted ref (or "Whole box") */
 /* C2 round 3: connection info card (source / direction / thumbnail) on hover or select */
 .pxc-host .pxc-root .pxc-conninfo { position: absolute; z-index: 6; display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 5px 8px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.32); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); pointer-events: none; transform: translate(-50%, 0); }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }

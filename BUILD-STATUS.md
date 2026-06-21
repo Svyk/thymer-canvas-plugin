@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.66.0 — round-5 Phase A: arrow → a SPECIFIC inline ref of a text note (→ the linked record) (2026-06-20)
+- A connection dropped on a text note that carries inline `@`/`@@` refs now offers a **drop chooser** — "Whole box" + one
+  button per inline ref (e.g. the screenshot's *Pastabilites* / *pasta*). Picking a ref binds the endpoint to that ref's
+  **target record/line** — so the **linked record** (not the text box) gets the ↗ back-reference and the flyback frames the run.
+- Binding shape gains `refGuidTarget` (record/line guid) + `refKindTarget`. New `_refRunRectWorld(el, targetGuid)` returns the
+  ref run's world rect (from `measureRuns`/`_pxcRunLayout`); degrades to whole-box on a rotated text note (mirrors `_lineRectWorld`).
+- Routing: `_bindingFor` sets the fields when the drop lands on a ref run; `_bindTargetShape` routes the endpoint to the run rect
+  (branch ordered AFTER lineGuid, BEFORE frac); `_updateBindings` builds `_connRefTargets` (textId → Set(guid)) for the overlay;
+  `_reindexBackrefs` keys the backref by `refGuidTarget` (else-if after record/linecard); `_connFlashExtras` + `_bindHoverSub` +
+  the persistent overlay all draw a **cyan flag** on the targeted run; `descEnd`/`_connEndpointDesc` name the ref in the breadcrumb.
+- Chooser `_showRefChoice` reuses the `.pxc-region-choice` DOM + the `_pendingRegionLink` dismiss (new `refOnly:true` so any
+  outside press just closes it — no region-mark drag). Pre-checks (`.pxc-rc-on`) whatever the drop landed on. `test.dump()`
+  connections now report `ref`/`refKind`. Pure-logic node test (rect math + reindex keying) 7/7. **Canvas-overlay + synced-index
+  only — zero source-note mutation** preserved.
+
 ## ✅ v1.65.0 — @ref chip hover preview (round 4) (2026-06-20)
 - Hovering a record-ref chip on the canvas (a whole-element ref OR an inline `@`/`@@` ref run) now shows a `.pxc-refpreview`
   popover: the referenced record's **title + first body lines** (via the live `_recFor` cache — uncached shows "Loading…" then
