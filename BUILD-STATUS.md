@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.75.0 — cite combine: region-marking tools keep your selection (so region + text cite together) (2026-06-21)
+- **Root cause (diagnosed LIVE via the `wrap.__pxcView` handle):** the user's stored reference was a **region-ONLY cite**
+  (`extraN: 0` — "this is a test" was only the chip *label*, never a target), so the snapshot had no text and the (pre-v1.74)
+  flyback framed the far union. A live re-cite with the text selected proved the rest already works: the union snapshot **renders
+  the text** (82% bright pixels in the text area) and the v1.74 flyback **frames the region** (`targetIsRegion: true`).
+- **The gap was the cite FLOW dropping the text:** the **lasso**, **pen**, and **crop** region-marking tools all cleared the
+  selection on press — so "select the text → mark a region → Cite" lost the text. Fixes: pen + crop no longer clear the selection;
+  the **lasso restores the prior selection when it marks an image region** (a Cite intent) while pure select-lassos still replace.
+  Now selecting a text and lassoing/penning/cropping a region keeps BOTH → the Cite is a true composite (union snapshot shows the
+  region AND the text; the ↗ frames the region). Node test 4/4. (No new flyback change — v1.74 already fixed it.)
 ## ✅ v1.74.0 — cite ref polish: drop the caption, flyback lands on the region (2026-06-21)
 - **Removed the editable text caption** (v1.73 Phase A) — the user found it messy/redundant. The cited text now lives only IN
   the combined union snapshot image (the multi-target `_renderRegionPng` already renders the region + the text together), not as

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.74.0';
+const PLEXUS_VERSION = '1.75.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2078,7 +2078,13 @@ class CanvasView {
     const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     for (const el of this._elsInLoop(poly, excludeId, false)) this.selected.add(el.id); // lasso SELECT tool keeps arrows/lines
     const reg = this._imageRegionFromLasso(poly, rect, excludeId); // 2026-06-21: intersection-based (was: full lasso bbox vs 92% image)
-    if (reg) { this.selected.delete(reg.img.id); this._setPendingImgRegion(reg.img, reg.rect, poly, true); }
+    if (reg) {
+      this.selected.delete(reg.img.id); this._setPendingImgRegion(reg.img, reg.rect, poly, true);
+      // round-5 G: a lasso that marks an image REGION is a CITE intent → restore the selection that was active before the lasso
+      // (e.g. a text box across the canvas) so the next Cite combines the region AND that text. Pure select-lassos (no region) skip this.
+      if (this._lassoPriorSel) { for (const id of this._lassoPriorSel) { const e = this._byId(id); if (e && !e.isDeleted) this.selected.add(id); } }
+    }
+    this._lassoPriorSel = null;
     this.dirty = true;
   }
   // ── CONNECTIONS round-5 B: GROUP / REGION connections (an arrow endpoint bound to a SET of elements) ──
@@ -2775,7 +2781,7 @@ class CanvasView {
       } else if (this.tool === 'laser') {
         mode = 'laser'; this._laser = [{ x: down.x, y: down.y, t: Date.now() }]; this.dirty = true; // S6: transient trail
       } else if (this.tool === 'pen') {
-        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this._penSm = { x: down.x, y: down.y }; this.scene.elements.push(created); this.selected.clear();
+        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this._penSm = { x: down.x, y: down.y }; this.scene.elements.push(created); this._lassoPriorSel = null; // round-5 G: keep the selection (don't clear) so "select a text → circle a region with the pen → Cite" captures BOTH (the pen's current selection is preserved directly; don't inherit a stale lasso prior)
       } else if (this.tool === 'eraser') {
         mode = 'erase'; const hit = this._hitTopAt(down.x, down.y); if (hit) { hit.isDeleted = true; this.scheduleSave(); }
       } else if (this.tool === 'text') {
@@ -2785,9 +2791,9 @@ class CanvasView {
       } else if (this.tool === 'arrow' || this.tool === 'line') {
         mode = 'linear'; created = makeLinear(down.x, down.y, this.tool, { stroke: this.strokeColor, strokeWidth: 2 }); this.scene.elements.push(created); this.selected.clear();
       } else if (this.tool === 'crop') {
-        mode = 'crop'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; this.selected.clear();
+        mode = 'crop'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; // round-5 G: keep the selection so a region-mark can combine with a selected text in the Cite
       } else if (this.tool === 'lasso') {
-        mode = 'lasso'; this._lasso = [[down.x, down.y]]; if (!e.shiftKey) this.selected.clear();
+        mode = 'lasso'; this._lasso = [[down.x, down.y]]; this._lassoPriorSel = (!e.shiftKey && this.selected.size) ? [...this.selected] : null; if (!e.shiftKey) this.selected.clear(); // round-5 G: remember the prior selection so a lasso that marks an image REGION (a Cite intent) restores it → "select a text → lasso a region → Cite" captures BOTH
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
@@ -2884,7 +2890,7 @@ class CanvasView {
       } else if (mode === 'pen' && created) { freedrawBBox(created); if (this._pendingRegionDraw && this._pendingRegionDraw.mode === 'pen') { const pts = created.points.slice(); created.isDeleted = true; created = null; this._finishRegionDraw(pts); this.scheduleSave(); } else { this.scheduleSave(); this._lastFreedraw = created; created = null; } } // round-5 D: a region-draw pen stroke binds the arrow + discards the stroke (it's a gesture, not a kept shape)
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
-        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } }
+        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
       }
       else if (mode === 'regionmark') { // F2: finalize the drop-to-mark region → write frac into the connection's binding (else keep the whole-element link)
         const rect = this._cropRect; this._cropRect = null; const prl = this._pendingRegionLink; this._pendingRegionLink = null;
