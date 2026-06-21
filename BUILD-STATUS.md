@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.58.0 — backref index self-healing (stale/dup refs) + picker dismiss + F3 thumbnail fix (round 3, A+B) (2026-06-20)
+Round-3 feedback (plan `~/.claude/plans/staged-finding-ritchie.md`); root-caused via a 4-way parallel investigation + a live `plexus_backref` dump (one line target carried 3 connector entries, two identical). All node-tested + adversarially reviewed.
+- **A1 reindex-on-load:** `_reindexBackrefs` ran ONLY in `saveNow`, so a drawing not re-opened/saved never pruned orphaned connector entries. Now also runs on canvas OPEN → opening a drawing self-heals its sub-map from live elements.
+- **A2 per-drawing-replace sync:** `pxcBrefMergeNested` was additive-per-elId (no tombstone) → a remote copy RESURRECTED locally-deleted entries. Rewritten to per-DRAWING last-writer-wins on the whole sub-map (keyed by max entry `t`; every reindex re-stamps now) → deletions propagate cross-device, legit updates still win, concurrent different-drawing edits converge. node-tested.
+- **A3 prune-on-failed-nav:** clicking a stale `↗` whose connector no longer exists now prunes that entry (`_brefPruneEntry`) + toasts "no longer exists" instead of a dead flight.
+- **A4 display-dedup:** two identical connections to one target collapse to one row (signature `label|from|dir|kind|img`); distinct sources still show.
+- **B picker dismiss (Plexus + org-remark):** the outside-close listened for `mousedown` only via `setTimeout(0)`, but Thymer drives `pointerdown` → the first outside click never dismissed. Now listens for `pointerdown`+`mousedown`+`Escape` in capture, attached immediately, guarded by a 1-tick `isOpening` flag; `_closeBrefMenu` tears down all listeners. org-remark got the same `pointerdown` addition (separate repo `Svyk/thymer-org-remark`).
+- **F3 thumbnail latent-bug fix:** `_regionThumb` (Plugin) called `this._imgFor` (a CanvasView method → undefined) → always threw → thumbnails never rendered; now resolves the image through a live view's cache.
+- NEXT: D blub-drag nub viewport-clamp (v1.59); C canvas connection UX (v1.60).
+
 ## ✅ v1.57.0 — drop-to-mark precise region linking (F2) (2026-06-20)
 - Connecting to **part of an image or a rough shape** is now obvious + precise. Drag a connection and drop its END on an
   image/shape with no pre-marked region → the element outlines cyan ("mark a region here") and the NEXT drag draws a marquee

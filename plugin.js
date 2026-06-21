@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.57.0';
+const PLEXUS_VERSION = '1.58.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -682,10 +682,21 @@ function pxcBrefMigrate(raw) {
 function pxcBrefFlatten(nested) {
   const flat = {};
   for (const d in nested) { const sub = nested[d]; for (const target in sub) { const m = sub[target]; for (const elId in m) { const e = m[elId]; const o = { drawing: d, el: elId, label: e.label, kind: e.kind || 'line', t: e.t || 0 }; if (e.from) o.from = e.from; if (e.dir) o.dir = e.dir; if (e.img) o.img = e.img; (flat[target] = flat[target] || []).push(o); } } } // F1/F3: carry the connection breadcrumb fields through to the renderer
-  for (const target in flat) flat[target].sort((a, b) => (b.t || 0) - (a.t || 0));
+  for (const target in flat) {
+    flat[target].sort((a, b) => (b.t || 0) - (a.t || 0));
+    // A4 (round 3): collapse entries with an IDENTICAL content signature (e.g. two identical connections to one line) to a
+    // single row, keeping the newest. Distinct sources/directions still show separately. Declutters the picker + section.
+    const seen = new Set(); flat[target] = flat[target].filter((e) => { const k = (e.label || '') + '|' + (e.from || '') + '|' + (e.dir || '') + '|' + (e.kind || '') + '|' + (e.img ? 'i' : ''); if (seen.has(k)) return false; seen.add(k); return true; });
+  }
   return flat;
 }
-function pxcBrefMergeNested(a, b) { for (const d in b) { a[d] = a[d] || {}; for (const target in b[d]) { a[d][target] = a[d][target] || {}; const mb = b[d][target], ma = a[d][target]; for (const elId in mb) { const eb = mb[elId], ea = ma[elId]; if (!ea || (eb.t || 0) >= (ea.t || 0)) ma[elId] = eb; } } } return a; }
+// A2 (round 3): per-DRAWING last-writer-wins on the WHOLE sub-map (NOT additive per-elId). Every _setDrawingBackrefs
+// re-stamps all entries with Date.now(), so a reindex that DROPPED a connector has a newer max-t and no entry for it →
+// it REPLACES the remote copy → the deletion propagates cross-device. The old additive merge resurrected deletions
+// (a stale remote entry re-appeared locally because entries were only ever added, never removed). Converges under
+// concurrent edits to DIFFERENT drawings (each drawing is owned by whoever last reindexed it).
+function pxcBrefMaxT(sub) { let m = 0; if (sub) for (const tg in sub) { const mm = sub[tg]; if (mm) for (const el in mm) { const e = mm[el]; if (e && (e.t || 0) > m) m = e.t || 0; } } return m; }
+function pxcBrefMergeNested(a, b) { for (const d in b) { if (!a[d] || pxcBrefMaxT(b[d]) > pxcBrefMaxT(a[d])) a[d] = b[d]; } return a; }
 // MINIMAP: fit scene-bounds into a w×h panel with padding → {scale, ox, oy}; world (wx,wy) → mini-local (ox+wx*scale,
 // oy+wy*scale). Inverse: world = (miniLocal - o)/scale. Pure + node-tested.
 function pxcMiniFit(bounds, w, h, pad) {
@@ -4931,6 +4942,7 @@ class CanvasView {
     this.camera.zoomMin = st.zoomMin || 0.1; this.camera.zoomMax = st.zoomMax || 30; // S3
     this._committed = JSON.stringify(this.scene);
     try { this._updateBindings(); } catch (_e) {} // CONNECTIONS Phase 4: settle bindings + build the line/region flag-target maps on open (so the blue flag shows without waiting for the first edit)
+    try { this._reindexBackrefs(); } catch (_e) {} // A1 (round 3): rebuild THIS drawing's backref sub-map from live elements on OPEN — self-heals orphaned/stale connector entries left by deletions in a prior session (was only rebuilt in saveNow)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -5642,6 +5654,14 @@ class Plugin extends AppPlugin {
     s[drawing] = sub; this._brefSaveLocal(); this._brefSyncSchedule();
   }
   _brefPruneDrawing(drawing) { const s = this._brefStore(); if (s[drawing]) { delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); } } // GC: drawing trashed → drop its sub-map (no ghost ↗)
+  // A3 (round 3): drop ONE connector entry (elId) from a drawing's sub-map across all its targets — used when a stale ref's
+  // connector turns out to no longer exist on nav. Removes a target sub-map left empty. Returns true if anything changed.
+  _brefPruneEntry(drawing, elId) {
+    const s = this._brefStore(); const d = s[drawing]; if (!d || !elId) return false; let changed = false;
+    for (const target of Object.keys(d)) { if (d[target] && d[target][elId]) { delete d[target][elId]; changed = true; if (!Object.keys(d[target]).length) delete d[target]; } }
+    if (changed) { if (!Object.keys(d).length) delete s[drawing]; this._brefSaveLocal(); this._brefSyncSchedule(); }
+    return changed;
+  }
   _brefSyncSchedule() { if (this._brefSyncT) clearTimeout(this._brefSyncT); this._brefSyncT = setTimeout(() => { this._brefSyncT = null; this._brefSyncFlush(); }, 800); } // debounced + coalesced
   // Resolve the singleton index record: cached guid → marker-title search (dedup by smallest guid) → create. All
   // defensive; if it fails the plugin still works (localStorage stays authoritative — only cross-device sync is lost).
@@ -5682,12 +5702,14 @@ class Plugin extends AppPlugin {
   // F1: arrow-direction glyph for a connection backref, relative to THIS note ('in' = points here).
   _dirGlyph(dir) { return dir === 'both' ? '↔' : dir === 'out' ? '←' : dir === 'in' ? '→' : '·'; }
   _brefText(en) { const lbl = (en && en.label) || 'reference'; return (en && (en.from || en.img)) ? ((en.img ? 'image' : en.from) + ' ' + this._dirGlyph(en.dir) + ' ' + lbl) : lbl; } // plain-text breadcrumb for tooltips
-  // F3: a small cropped PNG thumbnail of an image-region endpoint (data URL), or null. The image lives in THIS drawing's
-  // scene, so _imgFor resolves it; the canvas is same-origin (blob object URL) so toDataURL is not tainted.
+  // F3: a small cropped PNG thumbnail of an image-region endpoint (data URL), or null. Resolve the decoded image through a
+  // live CanvasView's image cache (`_imgFor` is a VIEW method — these dialog renderers run on the PLUGIN; an earlier version
+  // called this.`_imgFor` which is undefined on the Plugin → the thumbnail never rendered). Same-origin blob → no taint.
   _regionThumb(imgRef) {
     try {
       if (!imgRef || !imgRef.fileId) return null;
-      const im = this._imgFor(imgRef.fileId); if (!im || !(im.naturalWidth || im.width)) return null;
+      let im = null; for (const v of (this._views || [])) { if (!v || v.destroyed) continue; try { const x = v._imgFor(imgRef.fileId); if (x && (x.naturalWidth || x.width)) { im = x; break; } } catch (_e) {} }
+      if (!im || !(im.naturalWidth || im.width)) return null;
       const nw = im.naturalWidth || im.width, nh = im.naturalHeight || im.height, f = imgRef.frac;
       const sx = f ? Math.max(0, f.rx) * nw : 0, sy = f ? Math.max(0, f.ry) * nh : 0, sw = f ? Math.max(0.02, f.rw) * nw : nw, sh = f ? Math.max(0.02, f.rh) * nh : nh;
       const TW = 52, TH = Math.max(20, Math.min(64, Math.round(TW * (sh / Math.max(1, sw)))));
@@ -5732,15 +5754,20 @@ class Plugin extends AppPlugin {
   }
   // MULTI-REF (request 5): when a line/record is referenced by >1 canvas element, the ↗ opens a small picker — choose
   // which reference to fly to (mirrors org-remark's multi-target nav). Single ref → fly directly (no menu).
+  // B (round 3): tear down the picker + ALL its outside-dismiss listeners (pointerdown + mousedown + keydown, capture phase).
+  _closeBrefMenu() {
+    try { const m = document.getElementById('plexus-bref-menu'); if (m) m.remove(); } catch (_e) {}
+    if (this._brefMenuClose) { for (const t of ['pointerdown', 'mousedown', 'keydown']) { try { document.removeEventListener(t, this._brefMenuClose, true); } catch (_e) {} } this._brefMenuClose = null; }
+  }
   _openBackrefPicker(entries, anchorEl) {
-    try { if (this._brefMenuClose) { document.removeEventListener('mousedown', this._brefMenuClose, true); this._brefMenuClose = null; } const prev = document.getElementById('plexus-bref-menu'); if (prev) prev.remove(); } catch (_e) {}
+    this._closeBrefMenu();
     const menu = document.createElement('div'); menu.id = 'plexus-bref-menu'; menu.className = 'plexus-bref-menu';
     const head = document.createElement('div'); head.className = 'plexus-bref-head'; head.textContent = entries.length + ' canvas references'; menu.appendChild(head);
     for (const en of entries) {
       const row = document.createElement('div'); row.className = 'plexus-bref-row';
       const dot = document.createElement('span'); dot.className = 'plexus-bref-dot'; dot.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(dot);
       this._appendBrefContent(row, en, 'bref'); // F1/F3: from → dir → label (+ region thumbnail)
-      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); try { menu.remove(); } catch (_e2) {} this._brefMenuClose = null; this._navToCanvasAnchor(en); });
+      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closeBrefMenu(); this._navToCanvasAnchor(en); });
       menu.appendChild(row);
     }
     document.body.appendChild(menu);
@@ -5748,9 +5775,17 @@ class Plugin extends AppPlugin {
       let left = Math.round(r.left); if (left + mw > vw - 8) left = Math.max(8, vw - mw - 8);
       let top = Math.round(r.bottom + 4); if (top + mh > vh - 8) top = Math.max(8, Math.round(r.top) - mh - 4); // flip above the badge near the bottom edge
       menu.style.left = left + 'px'; menu.style.top = top + 'px'; } catch (_e) {}
-    const close = (e) => { if (!menu.contains(e.target)) { try { menu.remove(); } catch (_e2) {} document.removeEventListener('mousedown', close, true); this._brefMenuClose = null; } };
+    // B (round 3): dismiss on an outside press. Thymer's editor drives POINTERDOWN (and may swallow mousedown in capture),
+    // so listen for BOTH in capture phase + Escape. Guard the opening gesture's own event frame with a 1-tick flag instead
+    // of the old fragile setTimeout(0)+stopPropagation interplay (which left the first outside click un-dismissed).
+    let isOpening = true; setTimeout(() => { isOpening = false; }, 1);
+    const close = (e) => {
+      if (isOpening) return;
+      if (e.type === 'keydown') { if (e.key === 'Escape') { e.stopPropagation(); this._closeBrefMenu(); } return; }
+      if (!menu.contains(e.target)) this._closeBrefMenu();
+    };
     this._brefMenuClose = close;
-    setTimeout(() => { try { document.addEventListener('mousedown', close, true); } catch (_e) {} }, 0);
+    try { document.addEventListener('pointerdown', close, true); document.addEventListener('mousedown', close, true); document.addEventListener('keydown', close, true); } catch (_e) {}
   }
   _scanRefBadges() {
     let idx; try { idx = this._loadBackref(); } catch (_e) { return; }
@@ -5904,6 +5939,14 @@ class Plugin extends AppPlugin {
     }
     if (!view) return;
     for (let j = 0; j < 25 && !view.rec; j++) await sleep(100); // let the scene load so the bbox is real before fitting
+    // A3 (round 3): the connector may have been deleted but its index entry lingered (orphan) → verify it's a LIVE element;
+    // if gone, prune the stale entry, refresh the badges, tell the user, and DON'T fly to a dead anchor.
+    if (entry.el && view.scene && view.scene.elements && !view.scene.elements.some((e) => e.id === entry.el && !e.isDeleted)) {
+      try { this._brefPruneEntry(entry.drawing, entry.el); } catch (_e) {}
+      for (const v of this._views) { v.dirty = true; }
+      try { this.ui.addToaster({ title: 'That connection no longer exists — removed the stale reference.', dismissible: true }); } catch (_e) {}
+      return;
+    }
     // Navigating TO the canvas → always start wide (the whole source image) then cinematically zoom into the region.
     try { view._flashAnchor(entry, { establishImage: true }); } catch (e) { console.error('[Plexus] navToAnchor', e); }
   }
