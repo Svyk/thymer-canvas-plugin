@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.71.0 — FIX: lasso region capture (text + image-edge) + a DOM-discoverable view handle (2026-06-21)
+- **Bug (user-reported):** lassoing "this is a test" + an image edge captured the text but **not the image region**. Root cause
+  (both Cite `_selectFromLoop` and the group-lasso): the region heuristic compared the lasso's **full bounding box** to the
+  image area (`(lassoBbox area) < image*0.92`) — when the lasso also encloses a far element the bbox is huge → no region marked.
+- **Fix:** new `_imageRegionFromLasso(poly, lassoBbox, excludeId)` derives the region from the **intersection** of the lasso
+  bbox with the image (the part actually over the image), marks a region at 1%–95% coverage, and only builds a freehand
+  `fracPoly` when the lasso is **mostly over** the image (else a clean rect — avoids distorting the shape when the lasso spans
+  far outside). Both the Cite path and the group-lasso route through it. Node test 6/6 (text+image-edge now marks a region;
+  whole-image/barely-overlap/self-loop still return null).
+- **Debuggability (Phase 0):** the live `CanvasView` was unreachable from the test hook after a hot-reload leak (`_views` empty).
+  Now `wrap.__pxcView = this` on the `.pxc-root` wrap; `_activeView()` falls back to `_domView()` which finds the live view via
+  the DOM, **preferring the active panel's** (so `automate` writes never hit a non-focused leaked view). Reviewed clean.
+
 ## ✅ v1.70.0 — round-5 B follow-up: "part of the image" — image REGIONS inside a group connection (2026-06-21)
 - A group connection target can now mix **whole elements + image sub-REGIONS**: `b.group = { ids:[...], regions:[{elId,
   frac, fracPoly}] }`. The **drop-then-lasso** flow now mirrors Cite — when the lasso covers a sub-area of a large top image

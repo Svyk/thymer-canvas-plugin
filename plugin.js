@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.70.0';
+const PLEXUS_VERSION = '1.71.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1554,6 +1554,7 @@ class CanvasView {
     const hint = document.createElement('div'); hint.className = 'pxc-hint';
     hint.textContent = 'V select · R/O/D shapes · handles resize/rotate · drag = pan · scroll = zoom · ⌫ delete';
     wrap.appendChild(hint); host.appendChild(wrap); this.wrap = wrap;
+    wrap.__pxcView = this; // DEBUG/VERIFY: a DOM-discoverable handle on the rendered view, so test.dump/automate can reach the LIVE view even when a hot-reload leak leaves the plugin's _views empty (the rendered view belongs to a prior instance)
     this._resize();
     const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
     ro.observe(this.host.closest('.panel-scroller-y') || wrap); this._localDisposers.push(() => ro.disconnect());
@@ -1945,6 +1946,26 @@ class CanvasView {
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
   // `poly` (optional, world coords) = the freehand lasso loop → cited as the exact shape, not just its bbox.
+  // 2026-06-21 FIX: derive the image region from the lasso's INTERSECTION with the image — NOT the lasso's full bounding box.
+  // The old test `(lassoBbox area) < image*0.92` failed when the lasso also enclosed a far-away element (e.g. a text box): the
+  // bbox spanned text→image so it exceeded the image and no region was marked → "captured the text but not the image". Using the
+  // intersection (the part of the lasso actually over the image) marks the edge/slice regardless of how far the other element is.
+  // Returns { img, rect(intersection), frac, fracPoly } or null (lasso barely touches, or covers ~the whole image → keep whole).
+  _imageRegionFromLasso(poly, lb, excludeId) {
+    if (!lb || lb.w <= 0 || lb.h <= 0) return null;
+    const img = this._topImageIn(lb); if (!img || img.id === excludeId) return null;
+    const ib = this._elBBox(img); if (!ib || !(ib.w > 0) || !(ib.h > 0)) return null;
+    const ix0 = Math.max(lb.x, ib.x), iy0 = Math.max(lb.y, ib.y), ix1 = Math.min(lb.x + lb.w, ib.x + ib.w), iy1 = Math.min(lb.y + lb.h, ib.y + ib.h);
+    if (ix1 - ix0 < 4 || iy1 - iy0 < 4) return null; // lasso barely overlaps the image
+    const inter = { x: ix0, y: iy0, w: ix1 - ix0, h: iy1 - iy0 };
+    const interArea = inter.w * inter.h, cover = interArea / (ib.w * ib.h);
+    if (cover < 0.01 || cover > 0.95) return null; // ~nothing or ~the whole image → keep it as a WHOLE element, not a region
+    const frac = this._imgRegionFrac(img, inter); if (!frac) return null;
+    // freehand outline ONLY when the lasso is MOSTLY over the image — else (lasso spans far outside, e.g. around a far text box)
+    // clamping every poly point into the image distorts the shape, so fall back to a clean rectangular region (the intersection).
+    const fracPoly = (poly && poly.length >= 3 && interArea > (lb.w * lb.h) * 0.5) ? resamplePoly(poly, 16).map(([px, py]) => ({ fx: Math.max(0, Math.min(1, (px - ib.x) / ib.w)), fy: Math.max(0, Math.min(1, (py - ib.y) / ib.h)) })) : null;
+    return { img, rect: inter, frac, fracPoly };
+  }
   _setPendingImgRegion(img, rect, poly, keepSel) {
     const frac = this._imgRegionFrac(img, rect); if (!frac) return false;
     let fracPoly = null;
@@ -1984,10 +2005,8 @@ class CanvasView {
     for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
     const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     for (const el of this._elsInLoop(poly, excludeId, false)) this.selected.add(el.id); // lasso SELECT tool keeps arrows/lines
-    if (rect.w > 4 && rect.h > 4) {
-      const img = this._topImageIn(rect), ib = img ? this._elBBox(img) : null;
-      if (img && ib && img.id !== excludeId && (rect.w * rect.h) < (ib.w * ib.h) * 0.92) { this.selected.delete(img.id); this._setPendingImgRegion(img, rect, poly, true); }
-    }
+    const reg = this._imageRegionFromLasso(poly, rect, excludeId); // 2026-06-21: intersection-based (was: full lasso bbox vs 92% image)
+    if (reg) { this.selected.delete(reg.img.id); this._setPendingImgRegion(reg.img, reg.rect, poly, true); }
     this.dirty = true;
   }
   // ── CONNECTIONS round-5 B: GROUP / REGION connections (an arrow endpoint bound to a SET of elements) ──
@@ -2800,19 +2819,15 @@ class CanvasView {
         if (arrow && !arrow.isDeleted && poly.length >= 3) {
           const otherB = arrow[pgl.key === 'endBinding' ? 'startBinding' : 'endBinding'], exId = otherB && otherB.elementId; // self-loop guard: the OTHER endpoint's element must not become a member of THIS endpoint's group (parity with the nub-drag guard)
           let ids = this._idsInLoop(poly, arrow.id); if (exId) ids = ids.filter((id) => id !== exId);
-          // round-5 B: "part of the image" — if the lasso covers a SUB-AREA of a large top image, capture it as a REGION
-          // (frac/fracPoly) instead of the whole image (parity with Cite + avoids a giant union bbox). Same test as _selectFromLoop.
+          // round-5 B: "part of the image" — if the lasso covers a SUB-AREA of an image, capture it as a REGION (frac/fracPoly)
+          // instead of the whole image. 2026-06-21: via _imageRegionFromLasso (intersection-based) so it fires even when the
+          // lasso also encloses a far-away text box (the old full-bbox test missed it).
           const regions = [];
           let lx0 = Infinity, ly0 = Infinity, lx1 = -Infinity, ly1 = -Infinity;
           for (const p of poly) { lx0 = Math.min(lx0, p[0]); ly0 = Math.min(ly0, p[1]); lx1 = Math.max(lx1, p[0]); ly1 = Math.max(ly1, p[1]); }
           const lrect = { x: lx0, y: ly0, w: lx1 - lx0, h: ly1 - ly0 };
-          if (lrect.w > 4 && lrect.h > 4) { const img = this._topImageIn(lrect), ib = img ? this._elBBox(img) : null;
-            if (img && ib && img.id !== exId && (lrect.w * lrect.h) < (ib.w * ib.h) * 0.92) {
-              const frac = this._imgRegionFrac(img, lrect);
-              if (frac) { const b = this._elBBox(img), fracPoly = resamplePoly(poly, 16).map(([px, py]) => ({ fx: Math.max(0, Math.min(1, (px - b.x) / b.w)), fy: Math.max(0, Math.min(1, (py - b.y) / b.h)) }));
-                ids = ids.filter((id) => id !== img.id); regions.push({ elId: img.id, frac, fracPoly }); }
-            }
-          }
+          const reg = this._imageRegionFromLasso(poly, lrect, exId);
+          if (reg) { ids = ids.filter((id) => id !== reg.img.id); regions.push({ elId: reg.img.id, frac: reg.frac, fracPoly: reg.fracPoly }); }
           if (ids.length || regions.length) { const group = { ids }; if (regions.length) group.regions = regions; arrow[pgl.key] = { group }; this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.scheduleSave(); const n = ids.length + regions.length; try { this.plugin.ui.addToaster({ title: 'Connected to a group of ' + n + (regions.length ? ' (incl. ' + regions.length + ' image region' + (regions.length > 1 ? 's' : '') + ')' : '') + '.', dismissible: true }); } catch (_e) {} }
           else try { this.plugin.ui.addToaster({ title: 'No elements in the lasso — the connection end is unchanged.', dismissible: true }); } catch (_e) {}
         }
@@ -5839,7 +5854,21 @@ class Plugin extends AppPlugin {
   }
   _teardown() { try { this._hideBrefHover(); } catch (_e) {} try { this._closeBrefMenu(); } catch (_e) {} for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */ }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
-  _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || null; }
+  _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || this._domView() || null; }
+  // DEBUG/VERIFY: find the LIVE rendered view via its DOM handle (wrap.__pxcView) — survives a hot-reload leak where this
+  // plugin instance's _views is empty because the rendered view belongs to a previous instance. Prefer the active panel's.
+  _domView() {
+    try {
+      let activePanel = null; try { activePanel = this.ui.getActivePanel(); } catch (_e) {}
+      const roots = document.querySelectorAll('.pxc-root'); let connected = null, any = null;
+      for (const r of roots) { const v = r.__pxcView; if (!v || v.destroyed) continue; any = v;
+        const pe = v.panel && v.panel.getElement && v.panel.getElement(); const inPanel = pe && pe.contains(r);
+        if (inPanel && activePanel && v.panel === activePanel) return v; // the ACTIVE panel's live view wins (avoids writing into a non-focused leaked view)
+        if (inPanel && !connected) connected = v;
+      }
+      return connected || any;
+    } catch (_e) { return null; }
+  }
   // S9: shared bounded LRU image-decode cache. One Image per fileId across every view. Returns the ready
   // Image or null while async-decoding (callers already handle the placeholder). Map insertion order = LRU.
   _imgCacheGet(fileId, files) {
