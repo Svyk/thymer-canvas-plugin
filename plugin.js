@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.77.2';
+const PLEXUS_VERSION = '1.78.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -43,6 +43,9 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   aiProvider: 'openai', aiModel: '',
   // S9/S14 Advanced
   pdfScale: 2, cullMargin: 80, allowImageCache: true, imageCacheMax: 120,
+  // SCALE Phase 1: insert-time transcode + externalized blob assets (see SCALE-ARCHITECTURE.md).
+  // Lean defaults — cap the longest edge + recompress to WebP so images never bloat the scene.
+  imageMaxDim: 1600, imageQuality: 0.8, imageInlineThreshold: 65536,
 };
 // S10: module-level mirror of settings.linkOpacity (0..1) for free-function renderers (drawText has no `this`).
 let PLEXUS_LINK_ALPHA = 1;
@@ -2348,9 +2351,10 @@ class CanvasView {
     ctx.restore();
   }
   // Phase 8: download the current scene as a standalone SVG file.
-  _exportSvg() {
+  async _exportSvg() {
     try {
-      const svg = exportSvg(this.scene);
+      const scene = await this._sceneWithInlineImages(); // SCALE: resolve externalized blobGuid images → dataURL so SVG export isn't blank
+      const svg = exportSvg(scene);
       const blob = new Blob([svg], { type: 'image/svg+xml' });
       const url = URL.createObjectURL(blob); const a = document.createElement('a');
       a.href = url; a.download = 'plexus-drawing.svg'; document.body.appendChild(a); a.click();
@@ -2358,6 +2362,25 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Exported drawing as SVG.', dismissible: true }); } catch (_e) {}
       return svg.length;
     } catch (e) { console.error('[Plexus] exportSvg', e); return 0; }
+  }
+  // SCALE: a shallow scene clone whose externalized (blobGuid) image files are resolved to inline dataURLs — for the
+  // sync SVG exporter (which can only read f.dataURL). Prefers the already-decoded cache img; else downloads the blob.
+  async _sceneWithInlineImages() {
+    const files = this.scene.files || {};
+    const needs = Object.keys(files).filter((fid) => { const f = files[fid]; return f && f.blobGuid && !f.dataURL; });
+    if (!needs.length) return this.scene;
+    const merged = {}; for (const fid of Object.keys(files)) merged[fid] = files[fid];
+    await Promise.all(needs.map(async (fid) => {
+      const f = files[fid];
+      try {
+        let im = this._imgFor(fid); // decoded cache hit?
+        let url = null;
+        if (!(im && im.complete && im.naturalWidth)) { url = await this.plugin._assetGet(f); if (!url) return; im = await new Promise((res) => { const x = new Image(); x.onload = () => res(x); x.onerror = () => res(null); x.src = url; }); }
+        if (im && im.naturalWidth) { const cv = document.createElement('canvas'); cv.width = im.naturalWidth; cv.height = im.naturalHeight; cv.getContext('2d').drawImage(im, 0, 0); merged[fid] = Object.assign({}, f, { dataURL: cv.toDataURL('image/png') }); }
+        if (url) { try { URL.revokeObjectURL(url); } catch (_e) {} }
+      } catch (_e) {}
+    }));
+    return Object.assign({}, this.scene, { files: merged });
   }
   // S8: export the drawing as a PNG, honoring the export settings (scale / padding / background).
   async _exportPngFile() {
@@ -3438,16 +3461,122 @@ class CanvasView {
     else { const z = this.camera.zoom; ctx.fillStyle = 'rgba(124,92,255,0.08)'; ctx.fillRect(el.x, el.y, el.width, el.height); ctx.strokeStyle = '#7c5cff'; ctx.lineWidth = 1 / z; ctx.setLineDash([5 / z, 4 / z]); ctx.strokeRect(el.x, el.y, el.width, el.height); ctx.setLineDash([]); }
     ctx.restore();
   }
+  // SCALE Phase 1: normalize ANY image (HEIC/JPEG/PNG/GIF/AVIF/…) → a downscaled WebP blob, then EXTERNALIZE it
+  // to the Thymer blob store (referenced by guid) so the scene JSON never carries base64. See SCALE-ARCHITECTURE.md.
   async _addImageFromFile(file, wx, wy) {
-    const dataURL = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(file); });
-    if (!dataURL) return null;
-    const dims = await new Promise((res) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight }); im.onerror = () => res({ w: 200, h: 150 }); im.src = dataURL; });
-    let w = dims.w || 200, h = dims.h || 150; const max = 480; if (Math.max(w, h) > max) { const s = max / Math.max(w, h); w *= s; h *= s; }
+    const norm = await this._normalizeImageForInsert(file);
+    if (!norm) return null;
+    const dispMax = 480; let w = norm.w, h = norm.h;
+    if (Math.max(w, h) > dispMax) { const s = dispMax / Math.max(w, h); w *= s; h *= s; }
     const fileId = newFileId(); if (!this.scene.files) this.scene.files = {};
-    this.scene.files[fileId] = { dataURL, mimeType: file.type || 'image/png', w: dims.w, h: dims.h };
+    const base = (file.name || 'image').replace(/\.[a-z0-9]+$/i, '') || 'image';
+    const ref = await this._assetPut(norm.blob, base + '.webp');
+    if (ref && ref.anchored) {
+      this.scene.files[fileId] = { blobGuid: ref.blobGuid, name: ref.name, mimeType: ref.mimeType, w: norm.w, h: norm.h };
+    } else {
+      // No record / upload failed / couldn't DURABLY ANCHOR → inline the (already-small) normalized WebP so the image
+      // is never lost (the bytes are capped at Lean size, so even inline it stays tiny). Safe by construction.
+      const durl = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(norm.blob); });
+      if (!durl) return null;
+      this.scene.files[fileId] = { dataURL: durl, mimeType: norm.mime, w: norm.w, h: norm.h };
+    }
+    // Pre-seed the decode cache from the just-encoded blob so the image appears instantly (no download round-trip).
+    try { const url = URL.createObjectURL(norm.blob); const seed = new Image(); const ce = { img: seed, ready: false, url }; const cache = this.plugin._imgCache || (this.plugin._imgCache = new Map()); cache.set(fileId, ce); seed.onload = () => { ce.ready = true; for (const v of this.plugin._views) { v.dirty = true; v._dragLayerValid = false; } }; seed.onerror = () => { ce.broken = true; try { URL.revokeObjectURL(url); } catch (_e) {} }; seed.src = url; } catch (_e) {}
     const el = makeImage(wx - w / 2, wy - h / 2, w, h, fileId);
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
+  }
+  // SCALE: decode (HEIC feature-detected) → cap longest edge to imageMaxDim → re-encode WebP (q). Returns {blob,w,h,mime} or null.
+  async _normalizeImageForInsert(file) {
+    const st = (this.plugin && this.plugin._settings) || {};
+    const maxDim = st.imageMaxDim || 1600, quality = st.imageQuality || 0.8;
+    let bmp = null;
+    try { bmp = await createImageBitmap(file); } catch (_e) { bmp = null; }
+    if (!bmp) {
+      // Fallback decode via <img> (some browsers/Electron decode HEIC here even when createImageBitmap can't).
+      const url = URL.createObjectURL(file);
+      bmp = await new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = url; });
+      try { URL.revokeObjectURL(url); } catch (_e) {}
+    }
+    if (!bmp) { // truly undecodable (e.g. HEIC on a non-Apple web client)
+      try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t decode that image (HEIC may need converting to JPEG on this device).', dismissible: true }); } catch (_e) {}
+      return null;
+    }
+    const iw = bmp.naturalWidth || bmp.width || 0, ih = bmp.naturalHeight || bmp.height || 0;
+    if (!iw || !ih) { try { bmp.close && bmp.close(); } catch (_e) {} return null; }
+    const scale = Math.max(iw, ih) > maxDim ? maxDim / Math.max(iw, ih) : 1;
+    const ow = Math.max(1, Math.round(iw * scale)), oh = Math.max(1, Math.round(ih * scale));
+    const cv = document.createElement('canvas'); cv.width = ow; cv.height = oh;
+    try { cv.getContext('2d').drawImage(bmp, 0, 0, ow, oh); } catch (_e) { try { bmp.close && bmp.close(); } catch (_e2) {} return null; }
+    try { bmp.close && bmp.close(); } catch (_e) {}
+    let blob = await new Promise((r) => { try { cv.toBlob(r, 'image/webp', quality); } catch (_e) { r(null); } });
+    let mime = 'image/webp';
+    if (!blob) { blob = await new Promise((r) => { try { cv.toBlob(r, 'image/jpeg', quality); } catch (_e) { r(null); } }); mime = 'image/jpeg'; }
+    if (!blob) { blob = await new Promise((r) => { try { cv.toBlob(r, 'image/png'); } catch (_e) { r(null); } }); mime = 'image/png'; }
+    if (!blob) return null;
+    return { blob, w: ow, h: oh, mime };
+  }
+  // SCALE: upload a blob to the Thymer blob store + anchor it to the record so it persists (GC-safe). Prefers an
+  // `Assets` MANY file-property ("in properties"), verified via files() read-back; falls back to a body `file`
+  // line-item (the same durable fallback the Scene store uses). Returns {blobGuid,name,mimeType} or null.
+  async _assetPut(blob, name) {
+    if (!this.rec) return null;
+    let up = null;
+    try { up = await this.plugin.data.uploadBlob(new File([blob], name || 'asset.webp', { type: blob.type || 'image/webp' })); } catch (_e) {}
+    if (!up || !up.guid) return null;
+    const ref = { blobGuid: up.guid, name: up.fileName || name || 'asset.webp', mimeType: blob.type || 'image/webp' };
+    let anchored = false;
+    // Anchor #1: an `Assets` many file-property (if the collection has one). Verify it stuck — a phantom prop no-ops silently.
+    try {
+      const ap = this.rec.prop('Assets');
+      if (ap && typeof ap.addValue === 'function' && typeof ap.files === 'function') {
+        try { ap.addValue({ name: ref.name, error: null, guid: up.guid, imgData: null, imgUrl: null, imgClass: null }); } catch (_e) {}
+        for (let i = 0; i < 3 && !anchored; i++) { try { const vs = ap.files() || []; if (vs.some((v) => v && v.guid === up.guid)) anchored = true; } catch (_e) {} if (!anchored) await sleep(100); }
+      }
+    } catch (_e) {}
+    // Anchor #2 (universal): a hidden body `file` line-item carrying the blob (createLineItem can lag a <1s-old record).
+    if (!anchored) {
+      try { let li = null; for (let i = 0; i < 3 && !li; i++) { try { li = await this.rec.createLineItem(null, null, 'file', null, null); } catch (_e) {} if (!li) await sleep(120); } if (li) { try { anchored = await li.setBlob(up) !== false; } catch (_e) {} } } catch (_e) {}
+    }
+    // DATA-SAFETY: report whether a DURABLE anchor confirmed. Callers MUST NOT drop the source bytes (drop the inline
+    // dataURL / skip the inline fallback) unless ref.anchored is true — else a GC of the unanchored blob loses the image.
+    ref.anchored = anchored;
+    return ref;
+  }
+  // SCALE data-safety: re-anchor a scene's externalized image blobs to `rec` (by adding each blobGuid to rec's `Assets`
+  // property) — used when a scene is COPIED to a NEW record (extract), so the shared blob stays alive even if the source
+  // record is deleted. No re-upload: the same blob is referenced by both records' Assets. No-ops if rec lacks Assets.
+  async _reanchorAssets(rec, scene) {
+    if (!rec || !scene || !scene.files) return;
+    let ap = null; try { ap = rec.prop('Assets'); } catch (_e) {}
+    if (!ap || typeof ap.addValue !== 'function') return; // new rec's collection has no Assets prop → blob stays anchored to the source
+    for (const fid of Object.keys(scene.files)) {
+      const f = scene.files[fid]; if (!f || !f.blobGuid) continue;
+      try { ap.addValue({ name: f.name || 'asset.webp', error: null, guid: f.blobGuid, imgData: null, imgUrl: null, imgClass: null }); } catch (_e) {}
+    }
+  }
+  // SCALE: one-time migration of a legacy scene that stored images as inline base64. Transcode each BIG inline image →
+  // externalize → drop the dataURL, so the monolithic Scene blob shrinks below the save limit. Returns #migrated.
+  async _migrateBigInlineAssets() {
+    const files = this.scene && this.scene.files; if (!files) return 0;
+    const TH = (this.plugin._settings && this.plugin._settings.imageInlineThreshold) || 65536;
+    let migrated = 0;
+    for (const fid of Object.keys(files)) {
+      const f = files[fid];
+      if (!f || f.blobGuid || !f.dataURL) continue;
+      if ((f.dataURL.length || 0) <= TH) continue; // small inline images stay inline (cheap, no churn)
+      try {
+        const srcBlob = await (await fetch(f.dataURL)).blob();
+        const norm = await this._normalizeImageForInsert(new File([srcBlob], 'legacy', { type: f.mimeType || srcBlob.type || 'image/png' }));
+        if (!norm) continue;
+        const ref = await this._assetPut(norm.blob, 'asset.webp');
+        if (!ref || !ref.anchored) continue; // DATA-SAFETY: keep the fat inline dataURL unless the blob DURABLY anchored — never delete the only copy
+        files[fid] = { blobGuid: ref.blobGuid, name: ref.name, mimeType: ref.mimeType, w: norm.w, h: norm.h };
+        try { if (this.plugin._imgCache) { const ce = this.plugin._imgCache.get(fid); if (ce && ce.url) { try { URL.revokeObjectURL(ce.url); } catch (_e) {} } this.plugin._imgCache.delete(fid); } } catch (_e) {}
+        migrated++;
+      } catch (_e) {}
+    }
+    return migrated;
   }
   // Rasterize an SVG string to a single clean IMAGE element (not hundreds of vector primitives).
   // For a complex map/illustration this is what you want — one croppable image, like Excalidraw does.
@@ -3519,7 +3648,7 @@ class CanvasView {
   // Enumerate the EDITABLE typed properties of a record (skip system/Plexus-internal). Type inferred from the live shape:
   // choices()→choice, date()→date, linkedRecords()→relation, number()→number, else text. Empty props default to text (v1).
   _recPanelFields(rec) {
-    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text']);
+    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text', 'Assets', 'Scene Rev', 'Scene Schema']);
     const out = []; let props = [];
     try { props = (rec.getAllProperties && rec.getAllProperties()) || []; } catch (_e) {}
     for (const p of props) {
@@ -4556,7 +4685,7 @@ class CanvasView {
     let guid = null; try { guid = col.createRecord('Extracted drawing'); } catch (_e) {}
     if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the drawing.', dismissible: true }); } catch (_e) {} return null; }
     const rec = await getRecordPoll(this.plugin, guid);
-    if (rec) await saveScene(this.plugin, rec, scene, new Camera(), { _sceneLine: null });
+    if (rec) { try { await this._reanchorAssets(rec, scene); } catch (_e) {} await saveScene(this.plugin, rec, scene, new Camera(), { _sceneLine: null }); } // SCALE data-safety: re-anchor shared image blobs to the NEW record so they survive if the source is later deleted
     for (const e of els) e.isDeleted = true; // remove the originals from this canvas
     this._insertBoardCard(guid, minx + 150, miny + 110); // drop a live board-card link where the bricks were
     try { this.plugin.ui.addToaster({ title: 'Extracted ' + els.length + ' element(s) to a new drawing + linked back.', dismissible: true }); } catch (_e) {}
@@ -5186,7 +5315,8 @@ class CanvasView {
     const img = this._singleSel(); if (!img || img.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image first.', dismissible: true }); } catch (_e) {} return; }
     const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
     if (provider !== 'openai') { try { this.plugin.ui.addToaster({ title: 'Plexus: image edit needs the OpenAI provider.', dismissible: true }); } catch (_e) {} return; }
-    const file = this.scene.files && this.scene.files[img.fileId]; if (!file || !file.dataURL || !/,/.test(file.dataURL)) return;
+    const file = this.scene.files && this.scene.files[img.fileId];
+    if (!file || !file.dataURL || !/,/.test(file.dataURL)) { if (file && file.blobGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI image-edit isn’t supported for externalized images yet.', dismissible: true }); } catch (_e) {} } return; }
     const prompt = await this._promptText('How should the AI edit this image?', 'add a soft gradient background'); if (!prompt) return;
     const key = await this._aiKey('openai'); if (!key) return;
     try { this.plugin.ui.addToaster({ title: 'Plexus: editing image (needs a square PNG)…', dismissible: true }); } catch (_e) {}
@@ -5508,6 +5638,7 @@ class CanvasView {
       if (cached) return draw(cached);
       const file = this.scene.files && this.scene.files[el.fileId];
       if (file && file.dataURL) { const im = new Image(); im.onload = () => draw(im); im.onerror = () => resolve(null); im.src = file.dataURL; }
+      else if (file && file.blobGuid) { this.plugin._assetGet(file).then((url) => { if (!url) return resolve(null); const im = new Image(); im.onload = () => { draw(im); try { URL.revokeObjectURL(url); } catch (_e) {} }; im.onerror = () => { try { URL.revokeObjectURL(url); } catch (_e) {} resolve(null); }; im.src = url; }); } // SCALE: externalized image not yet decoded → resolve from the blob store for the snapshot
       else resolve(null);
     });
   }
@@ -5600,6 +5731,21 @@ class CanvasView {
     try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
     // REF DISPLAY (2026-06-19): retire whole-element @/@@ ref chips into inline ref RUNs (no prefix, underlined, editable).
     try { let _mig = 0; for (const e of (this.scene.elements || [])) { if (pxcChipToInlineRun(e)) _mig++; } if (_mig && this.rec) setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 700); } catch (_e) {}
+    // SCALE Phase 1: migrate a LEGACY scene whose images were inline base64 (the bytes that overflowed the single Scene
+    // blob and broke saving) → transcode + externalize each big one, then save the slim scene. Runs once; later opens skip.
+    try {
+      const TH = (this.plugin._settings && this.plugin._settings.imageInlineThreshold) || 65536;
+      const big = this.scene.files && Object.values(this.scene.files).some((f) => f && !f.blobGuid && f.dataURL && (f.dataURL.length || 0) > TH);
+      if (big && this.rec) {
+        this._migrating = true; // SYNC: block the other scheduled saves (500/700ms) from snapshotting the fat scene before migration finishes
+        setTimeout(async () => {
+          if (this.destroyed) { this._migrating = false; return; }
+          let n = 0; try { n = await this._migrateBigInlineAssets(); } catch (_e) {}
+          this._migrating = false; // clear BEFORE our own save so it isn't blocked
+          if (n) { this.dirty = true; let r = null; try { r = await this.saveNow(); } catch (_e) {} if (r && r.ok) { try { this.plugin.ui.addToaster({ title: 'Plexus: externalized ' + n + ' large image' + (n > 1 ? 's' : '') + ' — the canvas saves again.', dismissible: true }); } catch (_e) {} } }
+        }, 600);
+      }
+    } catch (_e) {}
     // CRITICAL: the scene was just REPLACED by the loaded one. A render may have already built the spatial grid from
     // the empty pre-load scene (loadOrInit is async) — force a rebuild, or the grid-driven render cull draws NOTHING.
     this._gridDirty = true; this._grid = null; this._cacheValid = false;
@@ -6036,6 +6182,7 @@ class CanvasView {
   }
   async saveNow() {
     if (!this.rec || this.destroyed) return null;
+    if (this._migrating) { this.scheduleSave(); return { ok: false, reason: 'migrating' }; } // DATA-SAFETY: never snapshot a half-migrated (still-fat) scene over the migration's slim save (re-bloat race)
     // Tombstone GC: compact the deleted-element graveyard when it dominates, so n (every scan/snapshot/save) reflects
     // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
     // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
@@ -6230,23 +6377,52 @@ class Plugin extends AppPlugin {
       return e.ready ? e.img : null;
     }
     const file = files && files[fileId];
-    if (!file || !file.dataURL) return null;
-    const img = new Image(); e = { img, ready: false }; cache.set(fileId, e);
-    img.onload = () => { e.ready = true; for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } this._imgCacheEvict(); }; // _dragLayerValid=false → a static image finishing decode mid-drag forces ONE rebuild frame so it isn't stuck behind the frozen layer
-    img.onerror = () => { e.broken = true; }; // keep a broken-marker so a bad dataURL isn't re-decoded every frame
-    img.src = file.dataURL;
-    if (st.allowImageCache === false) { const drop = () => cache.delete(fileId); img.addEventListener('load', drop, { once: true }); img.addEventListener('error', drop, { once: true }); }
-    else this._imgCacheEvict();
+    if (!file) return null;
+    if (file.dataURL) {
+      const img = new Image(); e = { img, ready: false }; cache.set(fileId, e);
+      img.onload = () => { e.ready = true; for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } this._imgCacheEvict(); }; // _dragLayerValid=false → a static image finishing decode mid-drag forces ONE rebuild frame so it isn't stuck behind the frozen layer
+      img.onerror = () => { e.broken = true; }; // keep a broken-marker so a bad dataURL isn't re-decoded every frame
+      img.src = file.dataURL;
+      if (st.allowImageCache === false) { const drop = () => cache.delete(fileId); img.addEventListener('load', drop, { once: true }); img.addEventListener('error', drop, { once: true }); }
+      else this._imgCacheEvict();
+      return null;
+    }
+    if (file.blobGuid) {
+      // SCALE: externalized asset → resolve from the Thymer blob store async (download → objectURL → decode), then cache like any image
+      e = { img: null, ready: false, url: null, loading: true }; cache.set(fileId, e);
+      this._assetGet(file).then((url) => {
+        if (cache.get(fileId) !== e) { if (url) { try { URL.revokeObjectURL(url); } catch (_e) {} } return; } // evicted while downloading → don't leak the objectURL or write to an orphan
+        if (!url) { e.broken = true; return; }
+        e.url = url; const img = new Image();
+        img.onload = () => { e.img = img; e.ready = true; e.loading = false; for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } this._imgCacheEvict(); };
+        img.onerror = () => { e.broken = true; try { URL.revokeObjectURL(url); } catch (_e) {} };
+        img.src = url;
+      });
+      if (st.allowImageCache !== false) this._imgCacheEvict();
+      return null;
+    }
     return null;
+  }
+  // SCALE: resolve an externalized asset blob (by guid) → an objectURL the decoder can load. The blob is GC-anchored
+  // to the record (Assets property / body file line-item); we resolve it directly by blob-guid, no enumeration.
+  async _assetGet(file) {
+    try {
+      const fv = { name: file.name || 'asset', error: null, guid: file.blobGuid, imgData: null, imgUrl: null, imgClass: null };
+      const b = await this.data.getBlobFromPropertyFileValue(fv);
+      if (!b) return null;
+      const ab = await b.download();
+      if (!ab) return null;
+      return URL.createObjectURL(new Blob([ab], { type: file.mimeType || b.contentType || 'image/webp' }));
+    } catch (_e) { return null; }
   }
   _imgCacheEvict() {
     const cache = this._imgCache; if (!cache) return;
     const max = Math.max(1, (this._settings && this._settings.imageCacheMax) || 120);
     if (cache.size <= max) return;
     let over = cache.size - max;
-    for (const k of cache.keys()) { cache.delete(k); if (--over <= 0) break; } // front of the Map = least-recently-used
+    for (const k of cache.keys()) { const e = cache.get(k); if (e && e.url) { try { URL.revokeObjectURL(e.url); } catch (_e) {} } cache.delete(k); if (--over <= 0) break; } // front of the Map = LRU; revoke objectURLs so externalized-asset blobs don't leak
   }
-  _purgeImageCache() { if (this._imgCache) this._imgCache.clear(); else this._imgCache = new Map(); for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } }
+  _purgeImageCache() { if (this._imgCache) { for (const e of this._imgCache.values()) { if (e && e.url) { try { URL.revokeObjectURL(e.url); } catch (_e) {} } } this._imgCache.clear(); } else this._imgCache = new Map(); for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } }
   // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
   _getEmbedder() {
     if (this._embedderP) return this._embedderP;

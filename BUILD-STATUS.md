@@ -1,5 +1,32 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.78.0 — SCALE Phase 1: externalized image assets (unblock saving) + HEIC/any-format support (2026-06-22)
+Root problem: images were stored as inline base64 INSIDE the scene JSON; one 23MB pasted PNG made the scene 25MB →
+the single `Scene` blob save FAILED. Full validated near-unlimited design in `SCALE-ARCHITECTURE.md` (confirmed by a
+3-angle workflow: SDK limits / render / persistence). This is Phase 1 — stop inlining, externalize to blobs.
+- **Insert-time transcode** (`_normalizeImageForInsert`): ANY image (HEIC/JPEG/PNG/GIF/AVIF/…) → `createImageBitmap`
+  (HEIC feature-detected; `<img>` fallback; toast→convert-to-JPEG if undecodable) → cap longest edge to **1600px**
+  (Lean) → `toBlob('image/webp', 0.8)` (jpeg→png fallback chain). ~120–250KB each.
+- **Externalize** (`_assetPut` / `_assetGet`): upload as its OWN Thymer blob (stable `guid`); scene stores only
+  `{blobGuid,w,h}` — NEVER base64. Anchored to the new **`Assets` MANY file-property** on Plexus Drawings (created via
+  MCP; "in properties" per the user), verified via `files()` read-back; falls back to a body `file` line-item (the same
+  durable fallback `Scene` uses) for any collection without it. Lazy, cull-gated decode into the existing LRU;
+  `_imgCacheGet` gained a `blobGuid` branch; objectURLs revoked on evict/purge.
+- **Migrate-on-open** (`_migrateBigInlineAssets`): a legacy scene's big inline images are transcoded + externalized
+  600ms after load, then the slim scene saves → **25MB → <1MB, saving works again** (toast on confirmed save).
+- **Adversarial data-safety review → fixed:** **(CRITICAL)** migration no longer drops the source dataURL unless the
+  blob DURABLY anchored — `_assetPut` now returns `ref.anchored`; insert falls to the inline fallback when not anchored;
+  migration KEEPS the fat dataURL otherwise (never deletes the only copy). **(HIGH)** migration/save race — a sync
+  `_migrating` flag makes the other scheduled saves (500/700ms) skip + re-arm so a fat snapshot can't re-bloat over the
+  slim save; the migration awaits its own save before the success toast. **(MED)** evicted-while-downloading orphan leak
+  — `.then` bails + revokes if the cache entry was evicted. **Regressions fixed:** SVG export resolves externalized
+  images to dataURL first (`_sceneWithInlineImages`); cite/note-embed snapshot resolves them; extract-to-new-record
+  re-anchors the shared blob to the new record (`_reanchorAssets`); AI image-edit shows a toast instead of silent no-op.
+- Settings: `imageMaxDim:1600, imageQuality:0.8, imageInlineThreshold:65536`. Node test `pxc_scale_p1` 21/21 (downscale
+  math + migration predicate + the anchored data-safety gate). `Assets`/`Scene Rev`/`Scene Schema` hidden from the panel.
+- **NEXT:** Phase 2 (shard+cap Assets, C=64) · Phase 3 (chunk shapes + delta save + Manifest) · Phase 4 (render/memory
+  hardening). Known Phase-1 gaps: AI image-edit on externalized images; the test-only `exportSvg(v.scene)` hook at 7728.
+
 ## ✅ v1.77.2 — record/line card surface matches the whiteboard theme (was a fixed navy) (2026-06-21)
 - The canvas record + line cards filled with a hardcoded `#1b1d24` navy in dark mode, which didn't match the board background.
   `_themeDark()` (which already reads the live `--cards-bg`/`--color-bg-900`) now caches that resolved color as
