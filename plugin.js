@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.78.0';
+const PLEXUS_VERSION = '1.79.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -939,6 +939,20 @@ function linearBBox(el) {
 }
 let _fileIdC = 0;
 function newFileId() { return 'f' + Date.now().toString(36) + (_fileIdC++).toString(36); }
+// SCALE/relational: read a record-relation property's target guids robustly. PluginProperty.values() may yield guid
+// strings, {guid} objects, or a one-element array holding a JSON-string of guids (how an MCP-written relation lands);
+// linkedRecords() returns [] for stored-but-unresolved relations (the gotcha), so we parse values() instead.
+function pxcRelValues(p) {
+  let raw = []; try { raw = (p && p.values) ? (p.values() || []) : []; } catch (_e) { raw = []; }
+  const out = [];
+  for (const v of (raw || [])) {
+    if (v == null) continue;
+    if (typeof v === 'string') { if (v[0] === '[') { try { for (const g of JSON.parse(v)) if (g) out.push(String(g)); continue; } catch (_e) {} } out.push(v); }
+    else if (v.guid) out.push(v.guid);
+    else if (v.getGuid) { try { const g = v.getGuid(); if (g) out.push(g); } catch (_e) {} }
+  }
+  return out;
+}
 function makeImage(x, y, w, h, fileId, style) {
   return {
     id: newId(), type: 'image', x, y, width: w, height: h, angle: 0, fileId,
@@ -1534,7 +1548,7 @@ function makeRenderer(view) { return RENDERER_BACKEND === 'webgl' ? new WebGLRen
 /* ──────────────────────────────── canvas view ──────────────────────────────── */
 class CanvasView {
   constructor(plugin, panel, recordGuid, opts) {
-    this.plugin = plugin; this.panel = panel; this.recordGuid = recordGuid;
+    this.plugin = plugin; this.panel = panel; this.recordGuid = recordGuid; this.hostGuid = recordGuid; // hostGuid = navigation identity (flip-back); recordGuid/rec become the BACKING drawing after _resolveBackingDrawing
     this.host = panel.getElement(); this.rec = null; this._sceneLine = null;
     this._blank = !!(opts && opts.blank); // flipped-from-note: start with an empty canvas
     this.scene = newScene(this._blank); this.camera = new Camera();
@@ -1632,11 +1646,12 @@ class CanvasView {
   // Flip back to the plain note. UX-3: open IN PLACE (navigate THIS panel to the note editor), not a side panel.
   async _flipToNote() {
     const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
-    try { await this.panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); return; } catch (_e) {}
+    const noteGuid = this.hostGuid || this.recordGuid; // flip back to the HOST note, not the backing drawing
+    try { await this.panel.navigateTo({ type: 'edit_panel', rootId: noteGuid, workspaceGuid: ws }); return; } catch (_e) {}
     // Fallback: if in-place nav fails, open in a side panel.
     let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
     if (!panel) { try { panel = await this.plugin.ui.createPanel(); } catch (_e) {} }
-    if (panel) { try { panel.navigateTo({ type: 'edit_panel', rootId: this.recordGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); } }
+    if (panel) { try { panel.navigateTo({ type: 'edit_panel', rootId: noteGuid, workspaceGuid: ws }); } catch (e) { console.error('[Plexus] flipToNote', e); } }
   }
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
@@ -3466,6 +3481,7 @@ class CanvasView {
   async _addImageFromFile(file, wx, wy) {
     const norm = await this._normalizeImageForInsert(file);
     if (!norm) return null;
+    if (this._pendingBacking && !this._isBacking) { try { await this._ensureBackingAndMigrate(); } catch (_e) {} } // SCALE/backing: anchor the image to the backing drawing's Assets property, never the host body
     const dispMax = 480; let w = norm.w, h = norm.h;
     if (Math.max(w, h) > dispMax) { const s = dispMax / Math.max(w, h); w *= s; h *= s; }
     const fileId = newFileId(); if (!this.scene.files) this.scene.files = {};
@@ -3534,26 +3550,36 @@ class CanvasView {
         for (let i = 0; i < 3 && !anchored; i++) { try { const vs = ap.files() || []; if (vs.some((v) => v && v.guid === up.guid)) anchored = true; } catch (_e) {} if (!anchored) await sleep(100); }
       }
     } catch (_e) {}
-    // Anchor #2 (universal): a hidden body `file` line-item carrying the blob (createLineItem can lag a <1s-old record).
-    if (!anchored) {
-      try { let li = null; for (let i = 0; i < 3 && !li; i++) { try { li = await this.rec.createLineItem(null, null, 'file', null, null); } catch (_e) {} if (!li) await sleep(120); } if (li) { try { anchored = await li.setBlob(up) !== false; } catch (_e) {} } } catch (_e) {}
-    }
-    // DATA-SAFETY: report whether a DURABLE anchor confirmed. Callers MUST NOT drop the source bytes (drop the inline
-    // dataURL / skip the inline fallback) unless ref.anchored is true — else a GC of the unanchored blob loses the image.
+    // SCALE/backing (BD-1): the body `file` line-item fallback was REMOVED — `this.rec` is always a backing Plexus Drawings
+    // record (resolved in loadOrInit), so Anchor #1 (the `Assets` property) always works. If it somehow fails, the caller
+    // (_addImageFromFile) falls back to inline-small-webp — NEVER a body line-item (which clutters note bodies).
+    // DATA-SAFETY: report whether a DURABLE anchor confirmed. Callers MUST NOT drop the source bytes unless ref.anchored.
     ref.anchored = anchored;
     return ref;
   }
   // SCALE data-safety: re-anchor a scene's externalized image blobs to `rec` (by adding each blobGuid to rec's `Assets`
   // property) — used when a scene is COPIED to a NEW record (extract), so the shared blob stays alive even if the source
   // record is deleted. No re-upload: the same blob is referenced by both records' Assets. No-ops if rec lacks Assets.
+  // Returns the Set of blob guids CONFIRMED present on rec's `Assets` property after the re-anchor (via files() read-back).
+  // Callers that delete the blob's OTHER anchor (e.g. a host body line) MUST only do so for guids in this confirmed set.
   async _reanchorAssets(rec, scene) {
-    if (!rec || !scene || !scene.files) return;
+    const confirmed = new Set();
+    if (!rec || !scene || !scene.files) return confirmed;
     let ap = null; try { ap = rec.prop('Assets'); } catch (_e) {}
-    if (!ap || typeof ap.addValue !== 'function') return; // new rec's collection has no Assets prop → blob stays anchored to the source
+    if (!ap || typeof ap.addValue !== 'function' || typeof ap.files !== 'function') return confirmed; // no Assets prop → nothing anchored here (blob stays on its source anchor)
+    const wanted = [];
     for (const fid of Object.keys(scene.files)) {
       const f = scene.files[fid]; if (!f || !f.blobGuid) continue;
+      wanted.push(f.blobGuid);
       try { ap.addValue({ name: f.name || 'asset.webp', error: null, guid: f.blobGuid, imgData: null, imgUrl: null, imgClass: null }); } catch (_e) {}
     }
+    if (!wanted.length) return confirmed;
+    for (let i = 0; i < 4 && confirmed.size < wanted.length; i++) { // DATA-SAFETY: read back which guids actually landed
+      let have = null; try { have = ap.files() || []; } catch (_e) {}
+      if (have) { const hs = new Set(have.map((v) => v && v.guid).filter(Boolean)); for (const g of wanted) if (hs.has(g)) confirmed.add(g); }
+      if (confirmed.size < wanted.length) await sleep(120);
+    }
+    return confirmed;
   }
   // SCALE: one-time migration of a legacy scene that stored images as inline base64. Transcode each BIG inline image →
   // externalize → drop the dataURL, so the monolithic Scene blob shrinks below the save limit. Returns #migrated.
@@ -5707,8 +5733,90 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: (n > 1 ? (n + ' targets cited') : (prim.kind === 'region' ? 'Region cited' : 'Reference copied')) + ' — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
-  async loadOrInit() {
+  // SCALE/backing: redirect ALL storage from the HOST record (the note/Journal the panel opened on, which may have no
+  // canvas properties) to a backing Plexus Drawings record (which has Scene/Assets → body-free, in-properties, unlimited).
+  // `hostGuid` stays the navigation identity (flip-back); `rec`/`recordGuid` become the backing for every save/load.
+  async _resolveBackingDrawing() {
+    this.hostGuid = this.recordGuid;
     this.rec = await getRecordPoll(this.plugin, this.recordGuid);
+    if (!this.rec || this.destroyed) return;
+    if (await this.plugin._isDrawingRecord(this.hostGuid)) { this._isBacking = true; return; } // (a) host IS a drawing → its own backing
+    const backingGuid = await this.plugin._findBackingDrawing(this.hostGuid); // (b) existing backing via Source Note
+    if (backingGuid && backingGuid !== this.hostGuid) {
+      const brec = await getRecordPoll(this.plugin, backingGuid);
+      if (brec) { this.rec = brec; this.recordGuid = backingGuid; this._isBacking = true; return; }
+    }
+    this._pendingBacking = true; // (c) no backing yet → keep rec=host so a LEGACY body scene still loads; create lazily on first content
+  }
+  // Create (once, race-guarded) the backing drawing + move scene/assets onto its properties + relate it back to the host,
+  // then trash the host's body canvas lines. Adopts an existing backing if another view/open created it first.
+  async _ensureBackingAndMigrate() {
+    if (this._isBacking) return true;
+    const map = (this.plugin._backingInflight || (this.plugin._backingInflight = new Map()));
+    let p = map.get(this.hostGuid); const mine = !p;
+    if (!p) { p = this._createBackingAndMigrate(); map.set(this.hostGuid, p); }
+    let backingGuid = null; try { backingGuid = await p; } catch (_e) {}
+    if (mine) { try { if (map.get(this.hostGuid) === p) map.delete(this.hostGuid); } catch (_e) {} }
+    if (backingGuid) { const brec = await getRecordPoll(this.plugin, backingGuid); if (brec) { this.rec = brec; this.recordGuid = backingGuid; this._isBacking = true; this._pendingBacking = false; this._sceneLine = null; } }
+    return this._isBacking;
+  }
+  async _createBackingAndMigrate() {
+    const hostGuid = this.hostGuid, hostRec = this.rec;
+    let backingGuid = await this.plugin._findBackingDrawing(hostGuid), backing = null, relOk = false;
+    if (backingGuid) { backing = await getRecordPoll(this.plugin, backingGuid); if (backing) relOk = true; } // adopted an existing backing → its Source Note relation already exists (that's how we found it)
+    if (!backing) {
+      const col = await this.plugin._drawingsCollection(); if (!col) return null;
+      let name = 'Canvas'; try { name = (hostRec && hostRec.getName && hostRec.getName()) ? (hostRec.getName() + ' — canvas') : 'Canvas'; } catch (_e) {}
+      try { backingGuid = col.createRecord(name); } catch (_e) {}
+      if (typeof backingGuid !== 'string') return null;
+      backing = await getRecordPoll(this.plugin, backingGuid); if (!backing) return null;
+      // relate the drawing back to the note (record relation). Prefer the record OBJECT; verify via read-back, retry with the guid.
+      try {
+        const sp = backing.prop('Source Note');
+        if (sp && (sp.set || sp.addValue)) {
+          const put = (val) => { try { if (sp.set) sp.set(val); else sp.addValue(val); } catch (_e) {} };
+          put(hostRec || hostGuid);
+          for (let i = 0; i < 3 && !relOk; i++) { try { relOk = pxcRelValues(sp).includes(hostGuid); } catch (_e) {} if (!relOk) { await sleep(90); if (i === 1) put(hostGuid); } }
+        }
+      } catch (_e) {}
+      this.plugin._noteBacking(hostGuid, backingGuid);
+    }
+    this.rec = backing; this.recordGuid = backingGuid; this._isBacking = true; this._pendingBacking = false; this._sceneLine = null; // storage now targets the backing
+    this._migBegin();
+    try {
+      let saved = null; try { saved = await saveScene(this.plugin, backing, this.scene, this.camera, this); } catch (_e) {}
+      // CONFIRM the backing carries THIS scene by blob IDENTITY (not mere presence — defends an adopted backing's stale Scene blob).
+      let confirmed = false;
+      if (saved && saved.ok && saved.blobGuid) { for (let i = 0; i < 4 && !confirmed; i++) { try { const pb = await backing.prop('Scene').fileBlob(); confirmed = !!(pb && pb.guid === saved.blobGuid); } catch (_e) {} if (!confirmed) await sleep(140); } }
+      // DATA-SAFETY: trash host body lines ONLY when (a) THIS scene is on the backing, (b) the Source Note backref is durable
+      // (else a reopen wouldn't find the backing → re-clutter/duplicate), and (c) the view is still alive.
+      if (confirmed && relOk && hostGuid !== backingGuid && !this.destroyed) {
+        let anchoredGuids = new Set(); try { anchoredGuids = await this._reanchorAssets(backing, this.scene); } catch (_e) {}
+        try { await this._trashHostCanvasLines(hostRec, anchoredGuids); } catch (_e) {} // scene line + ONLY assets confirmed on the backing
+      } else if (confirmed && !relOk && hostGuid !== backingGuid) {
+        try { this.plugin.ui.addToaster({ title: 'Plexus: saved the canvas to a drawing but couldn’t link it back to the note — kept the note’s copy intact.', dismissible: true }); } catch (_e) {}
+      }
+    } finally { this._migEnd(); }
+    return backingGuid;
+  }
+  _migBegin() { this._migCount = (this._migCount || 0) + 1; this._migrating = true; }
+  _migEnd() { this._migCount = Math.max(0, (this._migCount || 1) - 1); this._migrating = this._migCount > 0; } // counter so overlapping migrations don't clear each other's guard (F4)
+  // Precisely trash a host record's CANVAS body lines: the scene blob (SCENE_FILENAME — its content is already confirmed on
+  // backing.Scene) + ONLY asset blobs CONFIRMED on backing.Assets (`confirmedAssetGuids`). Never touches the user's own file
+  // attachments, and never deletes an asset line whose blob didn't re-anchor (that would lose the image's only copy).
+  async _trashHostCanvasLines(hostRec, confirmedAssetGuids) {
+    if (!hostRec) return;
+    const safe = (confirmedAssetGuids instanceof Set) ? confirmedAssetGuids : new Set();
+    let items = []; try { items = await hostRec.getLineItems() || []; } catch (_e) {}
+    for (const li of items) {
+      let blob = null; try { blob = await li.getBlob(); } catch (_e) {} // text/heading lines return null fast
+      if (!blob) continue;
+      if (blob.fileName === SCENE_FILENAME || (blob.guid && safe.has(blob.guid))) { try { await li.delete(); } catch (_e) {} }
+    }
+    this._sceneLine = null;
+  }
+  async loadOrInit() {
+    await this._resolveBackingDrawing();
     if (this.destroyed) return;
     let fresh = true, hadStore = false; // hadStore = a scene STORE exists (prop blob or body line), load ok OR not
     if (this.rec) {
@@ -5724,8 +5832,17 @@ class CanvasView {
       }
       // UX-4 migration: scene loaded from the BODY but the collection now has a `Scene` property → migrate on
       // open (saveScene writes the property + deletes the body line). Auto-cleans existing flipped notes.
-      if (!fresh && this._sceneLine && sceneProp) { setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 500); }
+      if (!fresh && this._sceneLine && sceneProp && !this._pendingBacking) { setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 500); }
     }
+    // SCALE/backing: a LEGACY canvas on an arbitrary host (pending backing) with real content → create the backing, move
+    // scene+assets onto its properties, and clean the host body. Once, shortly after load (≥ the 600ms inline migration so
+    // scene.files are blobGuids). Later opens resolve the backing via the Source Note relation.
+    try {
+      if (this._pendingBacking && !this._isBacking && this.rec) {
+        const hasContent = (this.scene.elements && this.scene.elements.some((e) => !e.isDeleted)) || (this.scene.files && Object.keys(this.scene.files).length);
+        if (hasContent) { const fire = () => { if (this.destroyed) return; if (this._migrating) { setTimeout(fire, 200); return; } this._ensureBackingAndMigrate(); }; setTimeout(fire, 900); } // wait out any in-flight inline migration so scene.files are settled blobGuids before re-anchoring
+      }
+    } catch (_e) {}
     // PERF (architecture review): deletes are soft tombstones (isDeleted), never spliced — so n grows unbounded
     // over years and EVERY scan pays for the graveyard. Undo history is empty on load, so compact it away here.
     try { if (this.scene.elements && this.scene.elements.some((e) => e.isDeleted)) this.scene.elements = this.scene.elements.filter((e) => !e.isDeleted); } catch (_e) {}
@@ -5737,11 +5854,11 @@ class CanvasView {
       const TH = (this.plugin._settings && this.plugin._settings.imageInlineThreshold) || 65536;
       const big = this.scene.files && Object.values(this.scene.files).some((f) => f && !f.blobGuid && f.dataURL && (f.dataURL.length || 0) > TH);
       if (big && this.rec) {
-        this._migrating = true; // SYNC: block the other scheduled saves (500/700ms) from snapshotting the fat scene before migration finishes
+        this._migBegin(); // SYNC: block the other scheduled saves (500/700ms) from snapshotting the fat scene before migration finishes
         setTimeout(async () => {
-          if (this.destroyed) { this._migrating = false; return; }
+          if (this.destroyed) { this._migEnd(); return; }
           let n = 0; try { n = await this._migrateBigInlineAssets(); } catch (_e) {}
-          this._migrating = false; // clear BEFORE our own save so it isn't blocked
+          this._migEnd(); // release BEFORE our own save so it isn't blocked (counter stays >0 if a backing migration overlaps)
           if (n) { this.dirty = true; let r = null; try { r = await this.saveNow(); } catch (_e) {} if (r && r.ok) { try { this.plugin.ui.addToaster({ title: 'Plexus: externalized ' + n + ' large image' + (n > 1 ? 's' : '') + ' — the canvas saves again.', dismissible: true }); } catch (_e) {} } }
         }, 600);
       }
@@ -5773,7 +5890,14 @@ class CanvasView {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
     this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group/draw/source state stale (F2/C3/round-5 B/D/F)
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
-    this.dirty = true; if (this.rec && !this.destroyed) { saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; }); this._scheduleBannerText(); }
+    this.dirty = true;
+    if (this.rec && !this.destroyed) {
+      // F6: before the backing exists, route the save through saveNow (which materializes the backing) so undo/redo never
+      // writes the scene to the HOST body (re-cluttering the note); otherwise persist directly.
+      if (this._pendingBacking && !this._isBacking) this.scheduleSave();
+      else saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
+      this._scheduleBannerText();
+    }
   }
   undo() { if (!this._undo.length) return; this._redo.push(this._snapshot()); this._restore(this._undo.pop()); }
   redo() { if (!this._redo.length) return; this._undo.push(this._snapshot()); this._restore(this._redo.pop()); }
@@ -6183,6 +6307,14 @@ class CanvasView {
   async saveNow() {
     if (!this.rec || this.destroyed) return null;
     if (this._migrating) { this.scheduleSave(); return { ok: false, reason: 'migrating' }; } // DATA-SAFETY: never snapshot a half-migrated (still-fat) scene over the migration's slim save (re-bloat race)
+    // SCALE/backing: a pending-backing canvas with real content materializes its backing Plexus Drawings record BEFORE
+    // saving, so scene + assets land in PROPERTIES (never the host body). Empty canvases stay pending (no empty-drawing spam).
+    if (this._pendingBacking && !this._isBacking) {
+      const hasContent = (this.scene.elements && this.scene.elements.some((e) => !e.isDeleted)) || (this.scene.files && Object.keys(this.scene.files).length);
+      if (!hasContent) return { ok: true, reason: 'pending-backing-empty' };
+      try { await this._ensureBackingAndMigrate(); } catch (_e) {}
+      if (this.destroyed) return null;
+    }
     // Tombstone GC: compact the deleted-element graveyard when it dominates, so n (every scan/snapshot/save) reflects
     // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
     // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
@@ -6456,6 +6588,22 @@ class Plugin extends AppPlugin {
     this._drawingsCol = (cols || []).find((c) => c.getName && c.getName() === DRAWINGS_COLLECTION) || null;
     return this._drawingsCol;
   }
+  // SCALE/backing: scan Plexus Drawings ONCE (cached) → the set of drawing guids + a {sourceNoteGuid → drawingGuid}
+  // map (from each drawing's `Source Note` relation). Powers "is this a drawing?" + "which drawing backs note H?".
+  async _scanDrawings(force) {
+    if (this._drawingScan && !force) return this._drawingScan;
+    let recs = []; try { const col = await this._drawingsCollection(); if (col) recs = await col.getAllRecords() || []; } catch (_e) {}
+    const drawingGuids = new Set(), srcMap = new Map();
+    for (const r of recs) {
+      const g = r && r.guid; if (!g) continue; drawingGuids.add(g);
+      try { const p = r.prop('Source Note'); if (p) for (const ng of pxcRelValues(p)) if (ng && !srcMap.has(ng)) srcMap.set(ng, g); } catch (_e) {}
+    }
+    this._drawingScan = { drawingGuids, srcMap };
+    return this._drawingScan;
+  }
+  async _isDrawingRecord(guid) { try { return (await this._scanDrawings()).drawingGuids.has(guid); } catch (_e) { return false; } }
+  async _findBackingDrawing(hostGuid) { try { return (await this._scanDrawings()).srcMap.get(hostGuid) || null; } catch (_e) { return null; } }
+  _noteBacking(hostGuid, drawingGuid) { try { const s = this._drawingScan; if (s) { s.drawingGuids.add(drawingGuid); s.srcMap.set(hostGuid, drawingGuid); } } catch (_e) {} } // keep the cache fresh after creating a backing
   async _newDrawing() {
     const col = await this._drawingsCollection(); if (!col) return null;
     let guid = null; try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
@@ -7669,15 +7817,20 @@ class Plugin extends AppPlugin {
       // Flip an ARBITRARY record guid (proxy for "any note"): open it as a canvas, add a shape, save.
       // Proves the scene lands as a file line item on a record that is NOT in Plexus Drawings.
       flipRecordTest: async (guid) => {
+        // BACKING model: flipping an arbitrary note → storage lands on a BACKING Plexus Drawings record (Scene property),
+        // the note host body stays CLEAN (no scene line), and the drawing relates back via `Source Note`.
         const rec = await getRecordPoll(this, guid); if (!rec) return { error: 'record not resolvable', guid };
-        const existing = await findSceneLine(rec);
-        await this._openPanelFor(guid, { blank: !existing });
-        let v = null; for (let i = 0; i < 30; i++) { await sleep(150); v = [...this._views].filter((x) => x.recordGuid === guid).pop(); if (v && v.rec) break; }
+        const isDrawing = await this._isDrawingRecord(guid);
+        await this._openPanelFor(guid, { blank: true });
+        let v = null; for (let i = 0; i < 30; i++) { await sleep(150); v = [...this._views].filter((x) => x.hostGuid === guid).pop(); if (v && v.rec) break; }
         if (!v) return { error: 'no view mounted', guid };
         v.scene.elements.push(makeRect(40, 40, 90, 60, { stroke: '#7c5cff' }), makeRect(150, 40, 90, 60, { stroke: '#10b981' }));
         v.dirty = true; const saved = await v.saveNow();
-        const line = await findSceneLine(rec); const reloaded = line ? await loadSceneFromLine(line, 10) : null;
-        return { guid, hadSceneBefore: !!existing, startedBlank: !existing, saved: !!(saved && saved.ok), reason: saved ? saved.reason : 'no save', sceneLineGuid: line ? line.guid : null, reloadEls: reloaded ? reloaded.elements.filter((e) => !e.isDeleted).length : -1 };
+        const backingGuid = v.recordGuid;
+        let backingBlob = null; try { backingBlob = await v.rec.prop('Scene').fileBlob(); } catch (_e) {}
+        const hostLine = await findSceneLine(rec); // expected null for a migrated note host
+        let srcNote = null; try { srcNote = pxcRelValues(v.rec.prop('Source Note'))[0] || null; } catch (_e) {}
+        return { guid, isDrawing, saved: !!(saved && saved.ok), reason: saved ? saved.reason : 'no save', backingGuid, backingDiffersFromHost: backingGuid !== guid, backingHasScene: !!backingBlob, hostHasSceneLine: !!hostLine, sourceNote: srcNote };
       },
       // crop / image part-reference: a 200x100 image (left purple, right green); reference the RIGHT
       // half in world coords -> a new element sharing the fileId with crop {x:100,w:100,h:100}.

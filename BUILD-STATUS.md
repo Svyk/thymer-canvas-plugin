@@ -1,5 +1,35 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.79.0 — SCALE BD-1: backing-drawing storage (all canvas data off note bodies, fully relational) (2026-06-22)
+Problem: a canvas can open on ANY record. On a non-"Plexus Drawings" record (Journal/Notes) the plugin can't create
+properties, so the scene — and (since v1.78) each image — fell back to BODY `file` line-items (`plexus-scene.json`,
+`IMG_*.webp`) cluttering the note. The user opened a canvas on the Journal page "Mon Jun 22" and got 6+ image lines in
+its body. Approved fix (plan `staged-finding-ritchie.md`): every canvas's data lives in PROPERTIES on a **backing Plexus
+Drawings record**; the note holds NOTHING; the backing drawing has a `Source Note` relation back to the note.
+- **Split identity:** `this.hostGuid` = the note (navigation / flip-back); `this.rec`/`recordGuid` = the backing drawing
+  (ALL storage). Host-is-a-drawing → host IS its own backing (byte-identical to before).
+- **`_resolveBackingDrawing`** (top of `loadOrInit`): (a) host is a drawing → self; (b) existing backing via the
+  `Source Note` relation (`_scanDrawings` cache → `srcMap`, read via `pxcRelValues` not `linkedRecords()`) → reuse;
+  (c) else pending (lazy — created on first content, so empty flipped notes never spawn drawings).
+- **`_ensureBackingAndMigrate`/`_createBackingAndMigrate`** (race-guarded by `plugin._backingInflight`): create the
+  backing, set `Source Note`=note (record-object write + read-back verify + guid retry), switch storage to the backing,
+  save scene → confirm, re-anchor assets, trash the host's canvas body lines. Triggered from `saveNow`,
+  `_addImageFromFile`, and a migrate-on-open pass (waits out any in-flight inline migration).
+- **`Source Note` (record relation) + the v1.76 `Assets` (many-file) properties added to Plexus Drawings via MCP.**
+- **Removed** the body-line asset fallback (Anchor #2); inline-small-webp is the only non-property fallback. `_flipToNote`
+  → host note. `flipRecordTest` updated to assert scene-on-backing + clean host body + `Source Note` set.
+- **Adversarial data-safety review: no data-loss path; all findings fixed.** **(§1 CRITICAL, pre-fixed)** re-anchor now
+  read-back-confirms and host asset lines are trashed ONLY for blobs verified on `backing.Assets` (never lose an image's
+  only copy). **(F2)** trash gated on the `Source Note` backref being durable (else keep the note's copy + toast — no
+  cross-session duplicate). **(F6)** undo/redo (`_restore`) routes through the backing-ensure so it never writes to the
+  host body. **(F1)** scene confirmed by blob IDENTITY (`saved.blobGuid`), not mere presence. **(F4)** `_migrating` is a
+  counter (`_migBegin`/`_migEnd`) so overlapping migrations don't clear each other's guard. **(F7)** destroy-guard before
+  trash. Node tests: `pxc_backing` 22/22 + `pxc_scale_p1` 21/21.
+- The user's "Mon Jun 22" Journal canvas migrates to a backing drawing on open, its body is cleaned, and the drawing
+  relates back. **NEXT:** Phase 2 (shard `Assets` 64/shard) · Phase 3 (chunk `Scene` → `Chunks_*`/`Manifest`) · Phase 4
+  (render/memory hardening) — all now universal since every canvas is a real Drawings record. Known: one-time camera-key
+  reset per migrated note (F5, benign); cross-DEVICE concurrent first-open could still duplicate (out of scope).
+
 ## ✅ v1.78.0 — SCALE Phase 1: externalized image assets (unblock saving) + HEIC/any-format support (2026-06-22)
 Root problem: images were stored as inline base64 INSIDE the scene JSON; one 23MB pasted PNG made the scene 25MB →
 the single `Scene` blob save FAILED. Full validated near-unlimited design in `SCALE-ARCHITECTURE.md` (confirmed by a
