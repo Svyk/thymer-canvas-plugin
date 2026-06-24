@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.80.0';
+const PLEXUS_VERSION = '1.81.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1443,7 +1443,9 @@ async function saveScene(plugin, rec, scene, camera, view) {
 }
 // The Canvas-Text property mirror + banner-preview PNG. Off the save hot path (debounced); see _scheduleBannerText.
 async function _writeBannerTextInline(plugin, rec, scene) {
-  try { const ct = rec.prop('Canvas Text'); if (ct && typeof ct.set === 'function') { const txt = scene.elements.filter((e) => !e.isDeleted && e.type === 'text' && e.text).map((e) => String(e.text).trim()).filter(Boolean).join(' • ').slice(0, 4000); ct.set(txt); } } catch (_e) {}
+  // SCALE Phase 3: unlimited-enough searchable canvas text — capture EVERY element's text (not just `type:'text'`), and
+  // raise the 4000-char cap to 200KB (~30k words; far beyond any real whiteboard) so search sees all of it.
+  try { const ct = rec.prop('Canvas Text'); if (ct && typeof ct.set === 'function') { const txt = scene.elements.filter((e) => !e.isDeleted && typeof e.text === 'string' && e.text.trim()).map((e) => e.text.trim()).join(' • ').slice(0, 200000); ct.set(txt); } } catch (_e) {}
   try { const showBanner = !plugin._settings || plugin._settings.bannerPreview !== false; if (showBanner) { const png = await exportPng(scene); if (png) { const pb = await plugin.data.uploadBlob(new File([png], 'preview.png', { type: 'image/png' })); if (pb) rec.setBannerFromBlob(pb); } } else { try { rec.setBanner(null); } catch (_e2) {} } } catch (_e) {}
 }
 
