@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.84.0';
+const PLEXUS_VERSION = '1.85.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2963,8 +2963,11 @@ class CanvasView {
         if (this.tool === 'select' && !this.editingId && !this._present && !this._eyedrop) {
           const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
           const over = hit && hit.type === 'text' && hit.runs && hit.runs.length && hitInlineRef(hit, w.x, w.y);
-          // CONNECT: show edge nubs on the hovered connectable element (drag a nub → a bound connection, no tool switch)
-          const ch = (hit && hit.type !== 'arrow' && hit.type !== 'line' && hit.type !== 'frame') ? hit : null;
+          // CONNECT: show edge nubs on the hovered connectable element (drag a nub → a bound connection, no tool switch).
+          // SECTIONS (iter 2): a frame (section) is now eligible too — `_hitTopAt` returns it only on its BORDER/title
+          // (interior passes through to children), so hovering a section's edge shows nubs → drag one to connect FROM the
+          // WHOLE section (its `_connNubsFor` edge-nubs clamp into view for a big section). Completes iter 1's bind-TO.
+          const ch = (hit && hit.type !== 'arrow' && hit.type !== 'line') ? hit : null;
           if ((ch && ch.id) !== (this._connHover && this._connHover.id)) { this._connHover = ch; this.dirty = true; }
           const connId = (hit && (hit.type === 'arrow' || hit.type === 'line')) ? hit.id : null; // C2: hovering a connection → the info card
           if (connId !== this._connInfoHover) { this._connInfoHover = connId; this.dirty = true; }

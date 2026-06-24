@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.85.0 — FEATURE LOOP iter 2: connect FROM a whole section (bidirectional) (2026-06-23)
+Completes iter 1's binding: you could point an arrow AT a section; now you can drag a connection FROM one.
+- `_connHover` (the hover that shows connect-nubs) previously excluded frames; now it only excludes arrow/line.
+  `_hitTopAt` returns a frame ONLY on its border/title (interior passes through → a card inside still wins), so
+  hovering a section's edge shows its edge-nubs (clamped into view for a big section) → drag one → a connection whose
+  START binds the WHOLE section (`startBinding={elementId:frameId}`, routed center-to-edge of the frame bbox).
+- **Adversarial review: CLEAN, no bugs.** No regression to frame select/move/resize/rename (resize/rotate handle
+  checks run before the nub check; nub sits +14px outside the border vs the 6px border tol → no overlap); every
+  `_connHover` consumer is type-agnostic. Node `pxc_section` 15/15 + regressions green.
+- Sections are now first-class BIDIRECTIONAL connection nodes (to + from the whole section / a card inside / part of
+  an image inside). REMAINING for Sections: collapse/expand · section→Thymer-record relation. NEXT loop: those, or
+  backlog B (backgrounds/fills) / C (arrowheads).
+
 ## ✅ v1.84.0 — FEATURE LOOP iter 1: Sections (Heptabase) — bind an arrow to a WHOLE section (2026-06-23)
 First iteration of the Excalidraw/Heptabase feature-port loop. The existing `frame` type (a named boundary that moves
 its contents together) becomes a **Section** with the relational win the user asked for.
