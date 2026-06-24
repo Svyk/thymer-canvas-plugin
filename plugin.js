@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.94.0';
+const PLEXUS_VERSION = '1.95.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -580,7 +580,30 @@ function measureText(el) { // updates el.width/height from el.text; uses a share
 // before). The per-run x-extents are layout-only and MUST NEVER be serialized — they live in this side WeakMap keyed by
 // the element, rebuilt lazily by measureRuns/drawRuns (storing them on the element would corrupt undo/dirty/persistence).
 const _pxcRunLayout = new WeakMap();
-function runDisplay(run) { if (!run) return ''; return run.t === 'ref' ? String(run.alias || run.label || 'ref') : String(run.s == null ? '' : run.s); }
+// Thymer datetime → human string: prefer the SDK-rendered `formatted`; else derive from `d` (YYYYMMDD or ISO). Used so a
+// date entered via @ shows as a real date instead of blank (a datetime segment/run has no plain `text`).
+function pxcFmtThymerDate(d) {
+  if (d == null) return '';
+  try {
+    const s = String(d); let dt;
+    if (/^\d{8}$/.test(s)) dt = new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8));
+    else dt = new Date(s);
+    if (isNaN(+dt)) return s;
+    return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch (_e) { return String(d); }
+}
+// Display text for ONE line-item segment: plain text, a ref's title, or a datetime's formatted/derived date. Previously a
+// datetime (and any non-text/non-titled segment) returned '' → dates VANISHED from cards + the card editor (the bug).
+function pxcSegText(s) {
+  if (!s) return '';
+  if (typeof s.text === 'string') return s.text;
+  const v = (s.text && typeof s.text === 'object') ? s.text : s; // ref/datetime value object
+  if (v.title) return String(v.title);
+  if (v.formatted) return String(v.formatted);
+  if (v.d != null || v.date != null) return pxcFmtThymerDate(v.d != null ? v.d : v.date);
+  return '';
+}
+function runDisplay(run) { if (!run) return ''; if (run.t === 'ref') return String(run.alias || run.label || 'ref'); if (run.t === 'datetime') return run.formatted ? String(run.formatted) : pxcFmtThymerDate(run.d != null ? run.d : run.date); return String(run.s == null ? '' : run.s); }
 function runsOf(el) { return (el && el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: (el && el.text) || '' }]; }
 function flattenRuns(runs) { let o = ''; for (const r of runs) o += runDisplay(r); return o; }
 function hasRefRun(runs) { for (const r of runs) if (r.t === 'ref') return true; return false; }
@@ -1000,7 +1023,7 @@ function makeRecordCard(x, y, w, h, recordGuid) {
 // SUBGRAPH→CANVAS: Brain role → card/arrow colour (matches the Brain's relColor families).
 const ROLE_HEX = { focus: '#7c5cff', parent: '#f59e0b', child: '#0ea5e9', sibling: '#14b8a6', leftFriend: '#a855f7', rightFriend: '#ec4899', friend: '#a855f7' };
 function lineTextOf(li) {
-  try { const segs = li.segments || []; return segs.map((s) => (typeof s.text === 'string') ? s.text : (s.text && s.text.title) ? s.text.title : '').join('').trim(); } catch (_e) { return ''; }
+  try { const segs = li.segments || []; return segs.map(pxcSegText).join('').trim(); } catch (_e) { return ''; }
 }
 // TRANSCLUSION INDENTATION: flatten a line-item subtree into [{text, depth}] (depth 0 = the card body's top level) so a
 // record/line card + card editor render an outline's nesting the way Thymer's outline does. ROOT CAUSE (2026-06-20):
@@ -3374,7 +3397,7 @@ class CanvasView {
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { if ((w.y - hit.y) < 28) this._openCard(hit); else this._editCardBody(hit); } // title band → open the record (rename there); body → edit body lines inline (writes back)
+      else if (hit && hit.type === 'record') { const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else this._editCardBody(hit); } // title + inline-properties band → open the record (rename/edit props there); body → edit body lines inline (writes back)
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -4002,6 +4025,7 @@ class CanvasView {
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
         try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // [{text, depth, lineGuid}] — depth from parent_guid chain (getChildren() returns [] on the flat load); lineGuid → line-level connection targeting (Phase 4)
+        try { entry.props = this._recPanelFields(rec).filter((p) => p && p.value !== '' && p.value != null).slice(0, 4); } catch (_e) {} // INLINE PROPERTIES: the record's typed property values (non-empty, capped) for a read-only chip row under the title
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -4298,7 +4322,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = sk.color || el.strokeColor || '#7c5cff'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? (this._cardSurface || '#1b1d24') : '#ffffff'); // B1: the DEFAULT surface follows the live theme (matches the whiteboard's card colour, dark or light); an explicitly-chosen non-white bg is still respected; export forces light → white
+    ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: an explicit bg (any value, incl. white) wins; else a luminance-gated surface that MATCHES the canvas backdrop (dark on a dark/force-dark canvas, light otherwise)
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
     ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -4308,6 +4332,21 @@ class CanvasView {
     ctx.textBaseline = 'top';
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = dark ? '#8b9096' : '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = titleCol; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
+    // INLINE PROPERTIES (read-only): a compact "Label  value" row per typed property under the title (Thymer record-header
+    // parity). Height is tracked in _cardPropsH so the dblclick open-band + the inline editor's titleH stay in sync.
+    let _propsH = 0;
+    if (rec.props && rec.props.length) {
+      const pTop = ty; ctx.font = '11px system-ui, sans-serif';
+      for (const p of rec.props) {
+        if (ty > y + h - 30) break;
+        const lab = p.name + '  '; ctx.fillStyle = dark ? '#6f7681' : '#9aa0a6'; ctx.fillText(this._clipText(ctx, lab, maxW), tx, ty);
+        const lw = Math.min(ctx.measureText(lab).width, maxW - 24); ctx.fillStyle = dark ? '#c3c9d1' : '#3c4043';
+        ctx.fillText(this._clipText(ctx, String(p.value), Math.max(20, maxW - lw)), tx + lw, ty);
+        ty += 15;
+      }
+      ty += 3; _propsH = ty - pTop;
+    }
+    (this._cardPropsH || (this._cardPropsH = new Map())).set(el.id, _propsH);
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
     const bands = []; // Phase 4: capture each body row's band (relative to card top) for line-level connection targeting + the blue flag
     for (const ln of rec.lines) { if (ty > y + h - 14) break; const rh = this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); if (ln.lineGuid) bands.push({ lineGuid: ln.lineGuid, dy: ty - y, h: rh }); ty += rh; } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
@@ -4887,12 +4926,13 @@ class CanvasView {
     } catch (_e) {}
     if (this.destroyed) return;
     const z = this.camera.zoom, s = this.camera.worldToScreen(card.x, card.y);
-    const titleH = isLine ? 4 : 26; // record card: skip the read-only title band; linecard: edit from the top
+    const titleH = isLine ? 4 : (26 + ((this._cardPropsH && this._cardPropsH.get(card.id)) || 0)); // record card: skip the read-only title + inline-properties band; linecard: edit from the top
     const STEP = 13, PAL = PXC_RAINBOW; // FLOW EDITOR: one DOM row per line, each with the depth-coloured marker dot + indent
     // guides (matching the rendered card's _drawOutlineRow) + editable text. Tab/Shift+Tab re-indent; Enter appends a sibling
     // row; commit reuses pxcWriteCardTree + the SAME data-safety guards. The box is built UNSCALED + transform:scale(z) for zoom.
     const box = document.createElement('div');
-    box.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:#fff;color:#1e1e1e;padding:5px 6px;font:12px system-ui,sans-serif;overflow:auto;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28);transform-origin:0 0';
+    const _edk = PXC_DARK, _ebg = this._cardSurfaceColor(_edk), _efg = _edk ? '#e6e7ea' : '#1e1e1e'; // editor popup matches the card surface (dark editor on a dark card, not a jarring white box)
+    box.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:' + _ebg + ';color:' + _efg + ';padding:5px 6px;font:12px system-ui,sans-serif;overflow:auto;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28);transform-origin:0 0';
     box.style.left = (s.x + 8 * z) + 'px'; box.style.top = (s.y + titleH * z) + 'px';
     box.style.width = Math.max(80, Math.abs(card.width) - 16) + 'px';
     box.style.maxHeight = Math.max(38, Math.abs(card.height) - titleH - 10) + 'px';
@@ -4967,7 +5007,7 @@ class CanvasView {
     const dark = PXC_DARK, accent = el.strokeColor || '#0ea5e9'; // dark-mode-aware surface/ink + a live-transclusion glow
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : (dark ? (this._cardSurface || '#1b1d24') : '#ffffff'); // B1: the DEFAULT surface follows the live theme (matches the whiteboard's card colour, dark or light); an explicitly-chosen non-white bg is still respected; export forces light → white
+    ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: explicit bg wins; else a luminance-gated surface matching the canvas backdrop
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -6275,6 +6315,15 @@ class CanvasView {
       if (bg && !/^var\(/.test(bg) && _cssLum(bg) != null) this._cardSurface = bg;
     } catch (_e) {}
     this._darkCache = dark; this._darkCacheT = t; return dark;
+  }
+  // The card body surface that MATCHES the live canvas backdrop. KEY FIX: `_cardSurface` is captured from the theme's
+  // --cards-bg REGARDLESS of luminance, so force-dark (settings.darkMode) over a LIGHT theme left it light → a white card on
+  // the dark (#0f1117) backdrop. Gate by luminance: when dark, only use _cardSurface if it's itself dark, else an elevated
+  // dark surface; when light, only if light, else white. An explicit el.backgroundColor still wins (handled at the call site).
+  _cardSurfaceColor(dark) {
+    const s = this._cardSurface, L = s ? _cssLum(s) : null;
+    if (dark) return (L != null && L < 0.5) ? s : '#1b1d24';
+    return (L != null && L >= 0.5) ? s : '#ffffff';
   }
   render() {
     if (this.destroyed || !this.staticCv) return;

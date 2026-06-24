@@ -1,5 +1,29 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.95.0 — TRANSCLUSION FIDELITY pass 1: card bg + inline properties + datetime render (2026-06-24)
+Three record-card transclusion fixes from the user's "improving transclusions" pass (the GIF: white card on a dark canvas).
+- **Card body was WHITE on a dark canvas.** Root cause: `_cardSurface` is captured from the theme's `--cards-bg` REGARDLESS
+  of luminance (`_themeDark` :6315), so **force-dark (`settings.darkMode`) over a LIGHT theme** left it light → a white card
+  on the `#0f1117` backdrop. Fix: new **`_cardSurfaceColor(dark)`** (luminance-gated — dark→`_cardSurface` only if dark else
+  `#1b1d24`; light→only if light else `#fff`). Both `_drawRecordCard`/`_drawLineCard` fills → `el.backgroundColor || this._cardSurfaceColor(dark)`,
+  so an explicit bg of ANY value now wins (fixes the old `!== '#ffffff'` quirk that silently ignored a chosen white). The
+  inline card-body editor popup is dark-aware too (was a hardcoded white box).
+- **Inline PROPERTIES bar** (Heptabase/Thymer record-header parity): `_recFor` caches `entry.props = _recPanelFields(rec)`
+  (non-empty, capped 4); `_drawRecordCard` renders a read-only "Label  value" row per property UNDER the title. Height tracked
+  in `this._cardPropsH` (Map by el.id) so the dblclick open-band (:3400) + the inline editor `titleH` (:4929) stay in sync; the
+  body-line `_lineRects` bands are computed from the post-props `ty` (line-level connection targeting unaffected).
+- **Dates rendered BLANK.** `lineTextOf`/`runDisplay` dropped datetime segments (no `.text` string, no `.title` → `''`). New
+  **`pxcSegText`** (text → ref title → datetime `formatted` → derive from `d`) + **`pxcFmtThymerDate`** (YYYYMMDD/ISO → human,
+  local — no UTC off-by-one; empty `formatted` derives per rule 42). Fixes dates in cards + the card editor; ref/text unchanged;
+  a titleless ref still flattens to `''` (preserves the rich-line data-safety signal in `pxcWriteCardTree`).
+- **Adversarial review: clean, no defects** (full band-consumer sweep — every line-level reader goes through `_lineRects`, only
+  the one fixed-28 dblclick band was updated; `_cardPropsH` lifecycle; `_recPanelFields`-in-IIFE `this`; luminance gate +
+  export; datetime edge cases; data-safety/commit-guard unaffected). Node `pxc_transclusion` 24/24 + all regressions green.
+- **DEFERRED to pass 2 (next):** `@` / `@@` ref insertion INSIDE the card-body editor — it's a real editor change (the card
+  editor is multi-row contentEditable → line-item segments under a strict data-safety contract; the `@/@@` picker is coupled to
+  `_editText`'s single textarea + `el.runs`). Needs its own design + review (note-corruption risk via the writeback). `@/@@`
+  ALREADY works in standalone canvas TEXT elements (`_editText`).
+
 ## ✅ v1.94.0 — FEATURE LOOP: format painter — copy / paste styles (Excalidraw) (2026-06-23)
 Backlog D (final item of the resumed run). Lift the VISUAL style off one element and stamp it onto others.
 - **`_copyStyles`** stashes a single element's style into `plugin._styleClip` via explicit allowlists: `common`
