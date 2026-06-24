@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.95.0';
+const PLEXUS_VERSION = '1.96.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1045,11 +1045,25 @@ function pxcOutlineRows(all, root, cap, includeBlank, includeRoot) {
   for (const li of all) { if (out.length >= cap) break; if (!inSubtree(li)) continue; const txt = lineTextOf(li); if (!txt && !includeBlank) continue; out.push({ li, text: txt, depth: Math.max(0, absDepth(li) - base) }); }
   return out;
 }
+// CARD-EDIT @/@@: a card-editor row's runs ([{t:'text',s} | {t:'ref',kind,guid,lineGuid,label}]) → the line's display TEXT
+// (a ref → its label, matching lineTextOf so the structural commit guards compare consistently) and → Thymer line-item
+// SEGMENTS using the SAME tested shape the plugin already writes (ceEdgeSegments / _linkSelectedCards / capture-to-note):
+// {type:'ref', text:{guid, title}}. A LINE ref (@@) targets the line guid; a record ref (@) targets the record guid.
+function flattenRowRuns(runs) { let o = ''; for (const r of (runs || [])) o += (r && r.t === 'ref') ? (r.label || '') : ((r && r.s) || ''); return o; }
+function pxcRowRunsToSegments(runs) {
+  const out = [];
+  for (const r of (runs || [])) {
+    if (r && r.t === 'ref') { const guid = (r.kind === 'line' && r.lineGuid) ? r.lineGuid : r.guid; if (guid) out.push({ type: 'ref', text: { guid, title: r.label || '' } }); }
+    else if (r && r.s) { const last = out[out.length - 1]; if (last && last.type === 'text') last.text += r.s; else out.push({ type: 'text', text: r.s }); }
+  }
+  return out.length ? out : [{ type: 'text', text: '' }];
+}
 // EDIT-INDENT: reconstruct a card body's tree from edited rows. `items` = loaded [{li, depth}] (DFS order); `parsed` =
-// [{depth, text(trimmed)}] from the textarea; `body` = same rows with the leading indent stripped (intra-line spacing
-// kept). Existing lines re-parent via li.move() when their depth changed + setSegments when text changed; extra rows are
-// createLineItem'd. Keyed by a parent/after STACK (lastAt[d] = the last line placed at depth d). Caller refuses a count
-// DECREASE (deletion) + a prefix-reorder. `isLine` → row 0 is the linecard's main line: never moved (it's the anchor).
+// [{depth, text, segs?}] from the editor (segs = proper ref segments when the row carries a user-inserted @/@@ ref); `body` =
+// same rows with the leading indent stripped (intra-line spacing kept). Existing lines re-parent via li.move() when their
+// depth changed + setSegments when text changed; extra rows are createLineItem'd. Keyed by a parent/after STACK (lastAt[d] =
+// the last line placed at depth d). Caller refuses a count DECREASE (deletion) + a prefix-reorder. `isLine` → row 0 is the
+// linecard's main line: never moved (it's the anchor).
 async function pxcWriteCardTree(rec, items, parsed, body, isLine) {
   const lastAt = []; let writes = 0, fails = 0, richSkipped = 0, prevDepth = -1; // fails/richSkipped → honest toaster (the writes are independent + non-transactional; surface partial failures instead of always claiming success)
   for (let i = 0; i < parsed.length; i++) {
@@ -1059,17 +1073,19 @@ async function pxcWriteCardTree(rec, items, parsed, body, isLine) {
     const moveParent = (d === 0) ? rec : (lastAt[d - 1] || rec);
     const createParent = (d === 0) ? (isLine && items[0] ? items[0].li : null) : (lastAt[d - 1] || null); // linecard append: keep new top-level rows UNDER the main line (inside the card's subtree), not as record siblings
     const after = lastAt[d] || null;
+    const userSegs = parsed[i] && parsed[i].segs || null; // a row carrying a user-inserted @/@@ ref → proper {type:'ref'} segments
     let li = null;
     if (i < items.length) {
       li = items[i].li;
       if (!(isLine && i === 0) && d !== items[i].depth) { try { const m = await li.move(moveParent, after); if (m) { li = m; writes++; } } catch (e) { fails++; console.warn('[Plexus] card-edit move', e); } }
       if (text !== (lineTextOf(items[i].li) || '')) {
         const segs = (items[i].li && items[i].li.segments) || []; const rich = segs.some((s) => s && s.type && s.type !== 'text');
-        if (!rich) { try { if (await li.setSegments([{ type: 'text', text: body[i] }])) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit setSegments', e); } } // DATA SAFETY: never flatten a line carrying a ref/datetime/hashtag/bold/etc. to plain text (a no-title ref reads as '' so it'd look "edited") — leave rich lines untouched; edit them in the record
-        else richSkipped++; // the user changed a rich line's visible text — intentionally NOT written (would flatten the ref/date/format). Reported so they know to edit it in the record.
+        if (rich) richSkipped++; // DATA SAFETY: the ORIGINAL line carries a ref/date/format — never reconstruct it from the flattened editor row (would destroy the original ref/date). Edit it in the record. (Holds even if the user ADDED a new ref to it.)
+        else if (userSegs) { try { if (await li.setSegments(userSegs)) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit setSegments(ref)', e); } } // a NEW @/@@ ref the user inserted into a PLAIN line → write proper ref segments
+        else { try { if (await li.setSegments([{ type: 'text', text: body[i] }])) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit setSegments', e); } }
       }
-    } else if (text) {
-      try { li = await rec.createLineItem(createParent, after, 'ulist', [{ type: 'text', text: body[i] }], null); if (li) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit createLineItem', e); }
+    } else if (text || userSegs) {
+      try { li = await rec.createLineItem(createParent, after, 'ulist', userSegs || [{ type: 'text', text: body[i] }], null); if (li) writes++; } catch (e) { fails++; console.warn('[Plexus] card-edit createLineItem', e); }
     }
     if (li) { lastAt[d] = li; lastAt.length = d + 1; prevDepth = d; }
   }
@@ -4939,12 +4955,59 @@ class CanvasView {
     box.style.transform = 'scale(' + z + ')';
     const gutterHTML = (depth) => { let h = ''; for (let L = 0; L < depth; L++) h += '<div style="position:absolute;top:0;bottom:0;left:' + (L * STEP + 3) + 'px;width:1px;background:' + PAL[L % PAL.length] + ';opacity:.45"></div>'; h += '<div style="position:absolute;top:6px;left:' + (depth * STEP + 2) + 'px;width:5px;height:5px;border-radius:50%;background:' + PAL[depth % PAL.length] + '"></div>'; return h; };
     const setDepth = (row, depth) => { row._depth = depth; row._gutter.style.flex = '0 0 ' + (depth * STEP + 14) + 'px'; row._gutter.innerHTML = gutterHTML(depth); };
+    // ── @/@@ REFERENCE INSERTION (card body) — a focused picker (reuses searchByQuery, NOT the textarea-coupled _editText
+    // picker) that inserts an inline ref CHIP into a plain row; on commit, ref-bearing rows write proper {type:'ref'}
+    // segments (pxcRowRunsToSegments). Existing RICH lines stay seeded as plain text + protected by the skip guard. ──
+    let pick = null; // {dom, rows, idx, mode, seq, range:{node,start,end}}
+    const closePick = () => { if (pick && pick.dom) { try { pick.dom.remove(); } catch (_e) {} } pick = null; };
+    const chipFor = (run) => { const sp = document.createElement('span'); sp.className = 'pxc-cardref'; sp.contentEditable = 'false'; sp.textContent = run.label || 'ref'; sp.dataset.kind = run.kind === 'line' ? 'line' : 'record'; sp.dataset.guid = run.guid || ''; sp.dataset.line = run.lineGuid || ''; sp.style.cssText = 'color:' + (run.kind === 'line' ? '#0ea5e9' : '#7c5cff') + ';text-decoration:underline;white-space:nowrap;cursor:default'; return sp; };
+    const readRuns = (txt) => { const out = []; for (const n of txt.childNodes) { if (n.nodeType === 3) { const s = (n.nodeValue || '').replace(/\u200b/g, ''); if (s) out.push({ t: 'text', s }); } else if (n.classList && n.classList.contains('pxc-cardref')) { out.push({ t: 'ref', kind: n.dataset.kind === 'line' ? 'line' : 'record', guid: n.dataset.guid || null, lineGuid: n.dataset.line || null, label: n.textContent || 'ref' }); } else { const s = (n.textContent || '').replace(/\u200b/g, ''); if (s) out.push({ t: 'text', s }); } } return out; };
+    const rowHasRef = (row) => { for (const n of row._txt.childNodes) if (n.classList && n.classList.contains('pxc-cardref')) return true; return false; };
+    const renderPick = (row) => {
+      if (!pick) return; if (pick.dom) { try { pick.dom.remove(); } catch (_e) {} }
+      const dk = PXC_DARK, dom = document.createElement('div'); pick.dom = dom;
+      dom.style.cssText = 'position:absolute;z-index:40;min-width:200px;max-width:320px;max-height:220px;overflow-y:auto;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.3);padding:4px;font:13px/1.3 system-ui,sans-serif;background:' + (dk ? '#1b1f2a' : '#fff') + ';color:' + (dk ? '#e6e8ee' : '#1e1e1e') + ';border:1px solid ' + (dk ? '#333a4a' : '#d0d0d0');
+      if (!pick.rows || !pick.rows.length) { const e = document.createElement('div'); e.style.cssText = 'padding:8px;opacity:.6'; e.textContent = pick.mode === 'line' ? 'Type to find a line…' : 'Type to find a record…'; dom.appendChild(e); }
+      else pick.rows.forEach((r, i) => { const rw = document.createElement('div'); rw.style.cssText = 'padding:6px 8px;border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' + (i === pick.idx ? ';background:rgba(124,92,255,.18)' : ''); rw.textContent = (r.kind === 'line' ? '⮑ ' : '') + r.label; rw.addEventListener('mousedown', (ev) => { ev.preventDefault(); choose(row, i); }); dom.appendChild(rw); });
+      let rect = null; try { rect = window.getSelection().getRangeAt(0).getBoundingClientRect(); } catch (_e) {} const wr = this.wrap.getBoundingClientRect();
+      dom.style.left = ((rect && rect.left ? rect.left : wr.left + 20) - wr.left) + 'px'; dom.style.top = ((rect && rect.bottom ? rect.bottom : wr.top + 20) - wr.top + 4) + 'px';
+      this.wrap.appendChild(dom);
+    };
+    const runSearch = async (query, mode, row) => {
+      const seq = (pick.seq = (pick.seq || 0) + 1);
+      let res = null; try { res = await this.plugin.data.searchByQuery(query || '', 8); } catch (_e) {}
+      if (!pick || pick.seq !== seq) return;
+      const rws = [];
+      if (mode === 'record') { for (const r of (res && res.records || []).slice(0, 8)) rws.push({ kind: 'record', guid: r.guid, label: (r.getName && r.getName()) || 'Untitled' }); }
+      else { for (const li of (res && res.lines || []).slice(0, 8)) { let rg = null; try { const pr = li.getRecord && li.getRecord(); rg = pr && pr.guid; } catch (_e) {} rws.push({ kind: 'line', lineGuid: li.guid, guid: rg, label: lineTextOf(li) || '(line)' }); } }
+      pick.rows = rws; pick.idx = 0; renderPick(row);
+    };
+    const detectRef = (row) => {
+      let sel; try { sel = window.getSelection(); } catch (_e) { return; }
+      if (!sel || !sel.rangeCount) { closePick(); return; }
+      const rng = sel.getRangeAt(0), node = rng.endContainer;
+      if (node.nodeType !== 3 || !row._txt.contains(node)) { closePick(); return; }
+      const before = (node.nodeValue || '').slice(0, rng.endOffset), trig = pxcParseRefTrigger(before, before.length);
+      if (!trig) { closePick(); return; }
+      pick = pick || { seq: 0, idx: 0, rows: [] }; pick.mode = trig.mode; pick.range = { node, start: trig.triggerStart, end: rng.endOffset };
+      if (!trig.query) { pick.rows = []; renderPick(row); } else runSearch(trig.query, trig.mode, row);
+    };
+    const choose = (row, i) => {
+      if (!pick || !pick.rows || !pick.rows[i] || !pick.range || !pick.range.node || !pick.range.node.parentNode) { closePick(); return; }
+      const r = pick.rows[i], rg = pick.range, v = rg.node.nodeValue || '', before = v.slice(0, rg.start), after = v.slice(rg.end);
+      const chip = chipFor({ kind: r.kind, guid: r.guid, lineGuid: r.lineGuid, label: r.label });
+      const afterNode = document.createTextNode(after.length ? after : '\u200b'), parent = rg.node.parentNode; // zero-width landing node for the caret after the chip (stripped on read)
+      parent.replaceChild(afterNode, rg.node); parent.insertBefore(chip, afterNode); if (before) parent.insertBefore(document.createTextNode(before), chip);
+      try { const sel = window.getSelection(), r2 = document.createRange(); r2.setStart(afterNode, after.length ? 0 : 1); r2.collapse(true); sel.removeAllRanges(); sel.addRange(r2); } catch (_e) {}
+      closePick(); try { row._txt.focus(); } catch (_e) {}
+    };
     const rows = [];
     const makeRow = (text, depth) => {
       const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:flex-start;min-height:18px';
       const gutter = document.createElement('div'); gutter.style.cssText = 'position:relative;align-self:stretch'; row._gutter = gutter;
       const txt = document.createElement('div'); txt.contentEditable = 'true'; txt.spellcheck = false; txt.textContent = text || ''; txt.style.cssText = 'flex:1 1 auto;outline:none;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.4;padding:0 1px;min-width:0'; row._txt = txt; // min-width:0 → text wraps (like the card) instead of overflowing a deeply-nested narrow row
       txt.addEventListener('focus', () => { box._lastRow = row; }); // track the active row so Escape/keys resolve even if document.activeElement lags
+      txt.addEventListener('input', () => detectRef(row)); // @/@@ → ref picker
       txt.addEventListener('paste', (ev) => { ev.preventDefault(); const t = (((ev.clipboardData || window.clipboardData).getData('text')) || '').replace(/\s*\n\s*/g, ' '); try { document.execCommand('insertText', false, t); } catch (_e2) {} }); // paste as plain text (no embedded newlines/HTML)
       row.appendChild(gutter); row.appendChild(txt); setDepth(row, depth); return row;
     };
@@ -4955,8 +5018,10 @@ class CanvasView {
     let done = false; this._cardEdit = { ta: box, card, abort: () => { done = true; } }; // `ta` = the editor element (destroy() removes it)
     const commit = async () => {
       if (done) return;
-      const body = rows.map((r) => (r._txt.textContent || '').replace(/\s*\n\s*/g, ' '));
-      const parsed = body.map((text, i) => ({ depth: rows[i]._depth, text })); // UNTRIMMED (= body) so the structural guards + pxcWriteCardTree compare exactly against lineTextOf — a source line with trailing whitespace must not read as "changed" (it would falsely refuse an append)
+      closePick();
+      const rowRuns = rows.map((r) => rowHasRef(r) ? readRuns(r._txt) : null); // a row carrying an inserted @/@@ ref → runs; else plain text
+      const body = rows.map((r, i) => rowRuns[i] ? flattenRowRuns(rowRuns[i]) : (r._txt.textContent || '').replace(/\s*\n\s*/g, ' '));
+      const parsed = body.map((text, i) => ({ depth: rows[i]._depth, text, segs: rowRuns[i] ? pxcRowRunsToSegments(rowRuns[i]) : null })); // UNTRIMMED (= body) so the structural guards + pxcWriteCardTree compare exactly against lineTextOf (incl. a ref's title); segs = proper {type:'ref'} segments for a ref-bearing row, null = plain text
       if (isLine && parsed.length) parsed[0].depth = 0; // the linecard's main line is the depth-0 anchor
       // SAFE write-back (UNCHANGED contract): allow TEXT edits, RE-NESTING (Tab/Shift+Tab), and APPENDS — keyed by the
       // row→line positional map. Refuse a count DECREASE (deletion) or a count GROW whose existing prefix changed (mid-insert/
@@ -4988,7 +5053,14 @@ class CanvasView {
     const caretOffset = (txt) => { try { const sel = window.getSelection(); if (!sel || !sel.rangeCount) return (txt.textContent || '').length; const pre = document.createRange(); pre.selectNodeContents(txt); pre.setEnd(sel.getRangeAt(0).endContainer, sel.getRangeAt(0).endOffset); return pre.toString().length; } catch (_e) { return (txt.textContent || '').length; } };
     box.addEventListener('keydown', (ev) => {
       ev.stopPropagation(); // the canvas host swallows keys otherwise
-      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { box.remove(); } catch (_e) {} this._cardEdit = null; return; } // Escape never depends on resolving the active row
+      if (pick && pick.dom) { // the @/@@ ref picker owns nav keys while open
+        const prow = curRow() || box._lastRow;
+        if (ev.key === 'ArrowDown' && pick.rows && pick.rows.length) { ev.preventDefault(); pick.idx = (pick.idx + 1) % pick.rows.length; renderPick(prow); return; }
+        if (ev.key === 'ArrowUp' && pick.rows && pick.rows.length) { ev.preventDefault(); pick.idx = (pick.idx - 1 + pick.rows.length) % pick.rows.length; renderPick(prow); return; }
+        if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); ev.stopPropagation(); if (pick.rows && pick.rows.length) choose(prow, pick.idx); else closePick(); return; }
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closePick(); return; }
+      }
+      if (ev.key === 'Escape') { ev.preventDefault(); done = true; try { box.remove(); } catch (_e) {} this._cardEdit = null; closePick(); return; } // Escape never depends on resolving the active row
       const row = curRow() || box._lastRow; if (!row) return;
       if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); commit(); return; }
       if (ev.key === 'Enter') { // split the line at the caret, carry the tail into a new sibling row at the same depth (appending at the END commits; a mid-list split refuses non-destructively on commit)

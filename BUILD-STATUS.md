@@ -1,5 +1,28 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.96.0 — TRANSCLUSION FIDELITY pass 2: @ / @@ reference insertion in the card-body editor (2026-06-24)
+The 4th ask from the "improving transclusions" pass. Typing `@` (record) / `@@` (line) while editing a record-card body now
+inserts an inline ref — previously the card editor was plain-text-only (only standalone canvas TEXT elements + the note
+itself supported `@/@@`). **DATA-SAFETY was paramount** (this writes ref segments into the user's real note line items).
+- **Focused picker** (reuses `searchByQuery`, NOT the textarea-coupled `_editText` picker): `@`/`@@` → a dropdown of records/
+  lines; arrow/Enter/click selects; inserts an inline `contenteditable=false` chip span (`.pxc-cardref`, data-kind/guid/line)
+  at the caret (zero-width landing node, stripped on read). `pxcParseRefTrigger` reused; `seq`-guarded async; `closePick` on
+  commit/Escape/choose/stale-detect.
+- **Writeback** (`pxcWriteCardTree` + new `flattenRowRuns`/`pxcRowRunsToSegments`): a ref-bearing row → proper
+  `{type:'ref', text:{guid, title}}` segments (the SAME tested shape as `ceEdgeSegments`/`_linkSelectedCards`/capture-to-note);
+  `@` targets the record guid, `@@` the line guid. A guidless ref is dropped (never writes a broken ref); empty runs →
+  `[{type:'text',text:''}]` (never `[]`).
+- **Rich-line preservation (the critical invariant):** an EXISTING line that originally carried a ref/date/format is ALWAYS
+  skipped (`if (rich) richSkipped++` BEFORE the `userSegs`/text branches; `rich` computed from the ORIGINAL `li.segments`) —
+  even if the user adds a ref to it (the row was seeded as plain title text, so rewriting would DESTROY the original). Only
+  PLAIN lines get a ref write; NEW lines can be created with ref segments. The count-decrease/reorder structural guards are
+  untouched (operate on the still-present `parsed[i].text`/`depth`).
+- **Adversarial review: clean on all 7 sections — no data-safety defects, no correctness defects, no regressions.** The
+  rich-line invariant verified under adversarial tracing (no flattened-row → setSegments path on a rich original). Node
+  `pxc_cardref` 18/18 (incl. the full writeback decision table) + all regressions green. Plain-text-only sessions are
+  byte-identical to before. (v1 limitation: existing ref lines render as plain title text in the editor, not chips — editing
+  them still routes to the record; Enter-splitting a chip degrades the ref to text in the editor only, no source corruption.)
+
 ## ✅ v1.95.0 — TRANSCLUSION FIDELITY pass 1: card bg + inline properties + datetime render (2026-06-24)
 Three record-card transclusion fixes from the user's "improving transclusions" pass (the GIF: white card on a dark canvas).
 - **Card body was WHITE on a dark canvas.** Root cause: `_cardSurface` is captured from the theme's `--cards-bg` REGARDLESS
