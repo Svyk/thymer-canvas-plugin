@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.84.0 — FEATURE LOOP iter 1: Sections (Heptabase) — bind an arrow to a WHOLE section (2026-06-23)
+First iteration of the Excalidraw/Heptabase feature-port loop. The existing `frame` type (a named boundary that moves
+its contents together) becomes a **Section** with the relational win the user asked for.
+- **Bindable as a whole section:** `_bindableAt` previously EXCLUDED frames; now a frame binds as a **whole-section
+  target** via its BORDER or TITLE band (`hitFrameBorder`), as a FALLBACK — a content element inside always wins (the
+  loop `continue`s on the frame, only returns it if no card/shape was hit). So an arrow can target: the whole section
+  (border/title) · a card inside · part of an image inside (existing region binding) — all three. `_bindTargetShape`
+  already routes a frame target to its bbox; move/delete re-route + unbind verified by review.
+- **Section tint:** `_drawFrame` fills `backgroundColor` (0.12 alpha) so a section can carry a color; label/tool/rename
+  relabeled Frame→Section.
+- **Adversarial review: CLEAN, no changes.** Child-wins z-order guaranteed by `continue`-not-`return`; the hover
+  indicator + release bind use the identical `_bindableAt()||_nearestBindable()` so they never disagree for a frame
+  (v1: a section binds only via a precise border/title hit, not the forgiving 44px fallback — intentional). Node
+  `pxc_section` 10/10 + regressions green.
+- NEXT loop items: Sections v2 (collapse, section→Thymer-record relation, connect FROM a section via nubs) · backgrounds
+  /fills · nicer arrows.
+
 ## ✅ v1.83.0 — SCALE Phase 4: render/memory hardening (bounded VRAM + smooth at scale) (2026-06-23)
 The render is already O(visible) (spatial grid cull + hit-test), with an image-decode LRU + objectURL revoke (v1.78),
 a frozen drag layer, and static-layer caching. The one real UNBOUNDED-growth leak was the WebGL texture cache (`_tex`

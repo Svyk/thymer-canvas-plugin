@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.83.0';
+const PLEXUS_VERSION = '1.84.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -258,7 +258,7 @@ const TOOLS = [
   { id: 'text', icon: 'ti-cursor-text', title: 'Text (T)' },
   { id: 'eraser', icon: 'ti-eraser', title: 'Eraser (E)' },
   { id: 'crop', icon: 'ti-scissors', title: 'Reference a region of an image (C) — drag a box over an image' },
-  { id: 'frame', icon: 'ti-layout-board', title: 'Frame (F) — a named boundary; moves its contents together' },
+  { id: 'frame', icon: 'ti-layout-board', title: 'Section (F) — a named boundary you can color, move as a unit, and point an arrow at as a WHOLE (or a card inside, or part of an image)' },
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
   { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
   { id: 'card', icon: 'ti-id', title: 'New record card — click to drop a new note/record (edit its properties on the right)' },
@@ -893,7 +893,7 @@ function makeRect(x, y, w, h, style) {
 }
 // P1.0: a frame — a named boundary that owns the elements inside it (move together; slide/page unit).
 function makeFrame(x, y, w, h) {
-  return { id: newId(), type: 'frame', x, y, width: w, height: h, angle: 0, name: 'Frame', strokeColor: '#9aa0a6', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [] };
+  return { id: newId(), type: 'frame', x, y, width: w, height: h, angle: 0, name: 'Section', strokeColor: '#9aa0a6', backgroundColor: 'transparent', fillStyle: 'solid', strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [] };
 }
 function hitFrameBorder(el, wx, wy, tol, labelH) {
   if (wx >= el.x && wx <= el.x + Math.min(160, el.width) && wy >= el.y - labelH && wy <= el.y) return true; // name-label band
@@ -2607,13 +2607,20 @@ class CanvasView {
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
   _bindableAt(wx, wy, excludeId, excludeId2) {
-    const tol = 8 / this.camera.zoom;
+    const tol = 8 / this.camera.zoom, labelH = 16 / this.camera.zoom;
     // CONNECTIONS: bind an endpoint to ANY content element (card / linecard / image / text-label / shape / board / …) so you
-    // can connect anything. Never bind to another connector's body (arrow/line) or a big frame container. hitElement is bbox
-    // for non-shapes (good enough) + precise for rough shapes; _gridTopFirst gives z-order so the topmost element wins.
-    // excludeId2 = the START-bound element (B2) → the end-snap never lands back on the source (which would collapse the arrow).
-    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) { if (el.isDeleted || el.id === excludeId || el.id === excludeId2 || el.type === 'arrow' || el.type === 'line' || el.type === 'frame') continue; if (hitElement(el, wx, wy, tol)) return el; }
-    return null;
+    // can connect anything. Never bind to another connector's body (arrow/line). hitElement is bbox for non-shapes (good
+    // enough) + precise for rough shapes; _gridTopFirst gives z-order so the topmost element wins. excludeId2 = the
+    // START-bound element (B2) → the end-snap never lands back on the source (which would collapse the arrow).
+    // SECTIONS: a frame (section) binds as a WHOLE-section target — but only as a FALLBACK via its BORDER/TITLE; a content
+    // element inside the section always wins (interior passes through). Query expanded down by labelH to reach the title band.
+    let frame = null;
+    for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2 + labelH)) {
+      if (el.isDeleted || el.id === excludeId || el.id === excludeId2 || el.type === 'arrow' || el.type === 'line') continue;
+      if (el.type === 'frame') { if (!frame && hitFrameBorder(el, wx, wy, tol, labelH)) frame = el; continue; }
+      if (hitElement(el, wx, wy, tol)) return el;
+    }
+    return frame;
   }
   // CONNECT (Heptabase ergonomic): the 4 edge-midpoint "nubs" just OUTSIDE an element — hover an element → nubs appear →
   // drag a nub to draw a BOUND connection from it (no tool switch). World coords; offset scales with zoom so they sit a
@@ -3153,7 +3160,7 @@ class CanvasView {
       else if (hit && hit.type === 'rollup') { this._promptText('Roll-up query:', hit.query).then((q) => { if (q == null) return; this._promptText('Aggregation (count | %done | sum:Prop | avg:Prop):', hit.agg || 'count').then((a) => { if (a == null) return; hit.query = q; hit.agg = a; this._invalidateRollups(); this.dirty = true; this.scheduleSave(); }); }); } // ROLL-UP: dblclick edits query + agg
       else if (hit && hit.type === 'table') { const cell = this._tableCellAt(hit, w.x, w.y); if (cell && cell.prop) this._editTableCell(hit, cell); else this._configureTable(hit); } // LIVE TABLE: dblclick a data cell edits it; header/title/empty reconfigures
       else if (hit && hit.type === 'board') { this._openCard(hit); }
-      else if (hit && hit.type === 'frame') { this._promptText('Frame name:', hit.name || 'Frame').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
+      else if (hit && hit.type === 'frame') { this._promptText('Section name:', hit.name || 'Section').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
@@ -4559,11 +4566,12 @@ class CanvasView {
   _drawFrame(ctx, el) {
     const z = this.camera.zoom;
     ctx.save();
-    ctx.strokeStyle = el.strokeColor || '#9aa0a6'; ctx.lineWidth = 1.4 / z;
     const r = 6 / z;
-    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(el.x, el.y, el.width, el.height, r); else ctx.rect(el.x, el.y, el.width, el.height); ctx.stroke();
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(el.x, el.y, el.width, el.height, r); else ctx.rect(el.x, el.y, el.width, el.height);
+    if (el.backgroundColor && el.backgroundColor !== 'transparent') { ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.12; ctx.fillStyle = el.backgroundColor; ctx.fill(); ctx.restore(); } // SECTION tint — low alpha so the contents inside stay readable
+    ctx.strokeStyle = el.strokeColor || '#9aa0a6'; ctx.lineWidth = 1.4 / z; ctx.stroke();
     ctx.font = (12 / z) + 'px system-ui, sans-serif'; ctx.fillStyle = el.strokeColor || '#9aa0a6'; ctx.textBaseline = 'bottom'; ctx.textAlign = 'left';
-    ctx.fillText(el.name || 'Frame', el.x + 2 / z, el.y - 4 / z);
+    ctx.fillText(el.name || 'Section', el.x + 2 / z, el.y - 4 / z);
     ctx.restore();
   }
   _drawBoardCard(ctx, el) {
