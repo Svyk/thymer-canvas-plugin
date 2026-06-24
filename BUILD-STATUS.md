@@ -1,5 +1,29 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.82.0 — SCALE Phase 3b: spatial scene CHUNKING (delta saves → unlimited shapes) (2026-06-23)
+The single `Scene` blob is rewritten whole on every save — fine to ~thousands of shapes, slow at tens of thousands. Phase
+3b adds spatial chunking so only CHANGED tiles re-upload. Confined by a 5000-element threshold (hysteresis exit <3000) →
+small drawings keep the proven single-blob path UNTOUCHED.
+- **Partition** by element center into 2000px tiles + a `__meta` tile (appState/files/schema/type). Each tile = a JSON
+  blob anchored in the `Chunks` many-file property; the `Manifest` text property maps chunkId→blobGuid + rev. Reads
+  resolve a chunk by its global guid (`getBlobFromPropertyFileValue`). z-order preserved via `index` + sort-on-load.
+- **Delta save** (`saveSceneChunked`): hash each tile (djb2); reuse the blob if unchanged, else upload. CPU per save ==
+  the single-blob path's one full serialize; NETWORK becomes O(changed tiles). DATA-SAFETY: **union-then-prune** the
+  Chunks anchor (new blobs anchored BEFORE the Manifest points at them; old pruned only AFTER) + **Manifest written
+  LAST** + read-back-confirmed. Any failure → the OLD manifest/chunks stay authoritative; a chunked-save failure
+  degrades to a full single-blob write + cleared manifest (manifest-present ⟺ chunked, unambiguous).
+- **Load** prefers the Manifest (batched 16-wide downloads); a single missing/unreadable chunk refuses the PARTIAL load
+  and falls back to the `Scene` blob (a coarse checkpoint refreshed every 5 chunked saves).
+- **Multi-angle adversarial review (workflow: crash-consistency · data-safety · scale): design SOUND + crash-safe for
+  the single-save path; one MUST-FIX applied** → **single-flight save guard** (plugin-level, keyed by record GUID):
+  overlapping saves (reachable single-client via undo-within-debounce, or two panels on one drawing) could desync
+  Manifest vs Chunks → silent loss; now saves serialize + coalesce, and undo/redo (`_restore`) routes through it.
+  Should-fixes: checkpoint cadence 25→5, `pxcElCenter` NaN guard, 16-wide load batching. Verified non-issues:
+  `scene.type` IS captured, tile-crossing re-saves both tiles, tombstone-drop matches load compaction. Node `pxc_chunk`
+  20/20 + all regressions green. Known edge (rare, noted): a steady-state save overlapping a one-time backing migration.
+
+## ✅ v1.81.0 — SCALE Phase 3a: unlimited searchable canvas text (Canvas Text cap 4000→200KB, all element text) (2026-06-23)
+
 ## ✅ v1.80.0 — SCALE Phase 2: sharded image-asset anchoring (bounded per-insert, unlimited images) (2026-06-23)
 Images anchor to the backing drawing's `Assets` property. A single unbounded many-file property risks O(array) cost per
 `addValue`. Phase 2 shards anchoring across `Assets` / `Assets 2` / `Assets 3` / `Assets 4` (all created on Plexus Drawings

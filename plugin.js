@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.81.0';
+const PLEXUS_VERSION = '1.82.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1217,6 +1217,74 @@ async function loadScene(rec, tries = 1) {
   }
   return null;
 }
+// ── SCALE Phase 3: spatial scene CHUNKING (delta saves at tens-of-thousands of elements) ──────────────────────
+// The scene is partitioned into 2000px tiles; each tile (+ a `__meta` tile for appState/files/schema) is a JSON blob
+// anchored in the `Chunks` many-file property, mapped chunkId→blobGuid by the `Manifest` text property. On save, only
+// CHANGED tiles re-upload (content-hash diff) → O(changed) network. CPU is one full serialize (== the single-blob path).
+// DATA-SAFETY: union-then-prune the Chunks anchor (new blobs anchored BEFORE the manifest points at them; old pruned only
+// AFTER) + Manifest written LAST + the single `Scene` blob kept as a coarse fallback. Manifest-present ⟺ chunked mode.
+const PXC_CHUNK_TILE = 2000, PXC_CHUNK_ENTER = 5000, PXC_CHUNK_EXIT = 3000, PXC_CHUNK_CHECKPOINT = 5;
+function pxcHashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h.toString(36); }
+function pxcElCenter(e) {
+  const fb = [(e.x || 0) + (e.width || 0) / 2, (e.y || 0) + (e.height || 0) / 2];
+  if (e.points && e.points.length) { let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; for (const pt of e.points) { const px = pt[0], py = pt[1]; if (px < a) a = px; if (py < b) b = py; if (px > c) c = px; if (py > d) d = py; } const cx = (a + c) / 2, cy = (b + d) / 2; return [isFinite(cx) ? cx : fb[0], isFinite(cy) ? cy : fb[1]]; } // guard NaN (empty/malformed points) → fall back to x/y center
+  return fb;
+}
+function pxcChunkId(e) { const ctr = pxcElCenter(e); return Math.floor((ctr[0] || 0) / PXC_CHUNK_TILE) + '_' + Math.floor((ctr[1] || 0) / PXC_CHUNK_TILE); }
+function pxcPartition(elements) { const m = new Map(); for (const e of elements) { if (e.isDeleted) continue; const id = pxcChunkId(e); let arr = m.get(id); if (!arr) { arr = []; m.set(id, arr); } arr.push(e); } return m; }
+function pxcReadManifest(rec) { try { const mp = rec.prop('Manifest'); if (mp && mp.text) { const t = mp.text(); if (t && t.trim()) { const m = JSON.parse(t); if (m && m.chunks) return m; } } } catch (_e) {} return null; }
+function pxcChunkFv(guid) { return { name: 'chunk.json', error: null, guid, imgData: null, imgUrl: null, imgClass: null }; }
+async function loadSceneChunked(plugin, rec) {
+  const manifest = pxcReadManifest(rec); if (!manifest || !manifest.chunks) return null;
+  const ids = Object.keys(manifest.chunks); if (!ids.length) return null;
+  const fetchOne = async (chunkId) => {
+    const guid = manifest.chunks[chunkId] && manifest.chunks[chunkId].g; if (!guid) return null;
+    try { const blob = await plugin.data.getBlobFromPropertyFileValue(pxcChunkFv(guid)); if (!blob) return null; const ab = await blob.download(); if (!ab) return null; return { chunkId, data: JSON.parse(new TextDecoder().decode(ab)) }; } catch (_e) { return null; }
+  };
+  const parts = []; // batched (16-wide) so a 50k-element / hundreds-of-chunks open doesn't fire hundreds of parallel downloads
+  for (let i = 0; i < ids.length; i += 16) { const r = await Promise.all(ids.slice(i, i + 16).map(fetchOne)); for (const x of r) parts.push(x); }
+  if (parts.some((p) => !p)) return null; // a missing/unreadable chunk → DON'T return a PARTIAL scene; caller falls back to the Scene blob
+  const scene = newScene(false); scene.elements = [];
+  for (const p of parts) {
+    if (p.chunkId === '__meta') { const m = p.data || {}; if (m.appState) scene.appState = m.appState; if (m.files) scene.files = m.files; if (m.schema != null) scene.schema = m.schema; if (m.type) scene.type = m.type; }
+    else if (p.data && Array.isArray(p.data.elements)) { for (const e of p.data.elements) scene.elements.push(e); }
+  }
+  scene.elements.sort((a, b) => String(a.index || '').localeCompare(String(b.index || ''))); // restore z-order (paint order) — chunks reassemble out of order
+  return scene;
+}
+// Returns {ok, mode:'chunked', rev, chunks} or {ok:false, reason}. On ANY failure the OLD manifest/chunks stay valid (no loss).
+async function saveSceneChunked(plugin, rec, scene, view) {
+  const parts = pxcPartition(scene.elements);
+  const prevHashes = (view && view._chunkHashes) || {};
+  const prevManifest = pxcReadManifest(rec) || { chunks: {}, rev: 0 };
+  let prevFvs = []; try { const cp = rec.prop('Chunks'); if (cp && cp.files) prevFvs = (cp.files() || []).filter((v) => v && v.guid); } catch (_e) {}
+  const newHashes = {}, manifestChunks = {}, currentFvs = [];
+  const work = [['__meta', { appState: scene.appState, files: scene.files, schema: scene.schema, type: scene.type }]];
+  for (const entry of parts) work.push([entry[0], { elements: entry[1] }]);
+  for (const item of work) {
+    const chunkId = item[0], json = JSON.stringify(item[1]), hash = pxcHashStr(json);
+    newHashes[chunkId] = hash;
+    const prevG = prevManifest.chunks[chunkId] && prevManifest.chunks[chunkId].g;
+    if (prevHashes[chunkId] === hash && prevG) { manifestChunks[chunkId] = { g: prevG }; currentFvs.push(pxcChunkFv(prevG)); continue; } // unchanged → reuse blob
+    let up = null; try { up = await plugin.data.uploadBlob(new File([json], 'chunk-' + chunkId + '.json', { type: 'application/json' })); } catch (_e) {}
+    if (!up || !up.guid) return { ok: false, reason: 'chunk upload ' + chunkId };
+    manifestChunks[chunkId] = { g: up.guid }; currentFvs.push(pxcChunkFv(up.guid));
+  }
+  const dedup = (arr) => { const seen = new Set(), out = []; for (const v of arr) { if (v && v.guid && !seen.has(v.guid)) { seen.add(v.guid); out.push(v); } } return out; };
+  const cp = rec.prop('Chunks');
+  if (cp && cp.set) { try { cp.set(dedup(currentFvs.concat(prevFvs))); } catch (_e) {} } // UNION: anchor NEW blobs while OLD are still anchored (so the manifest never points at an unanchored/GC-able blob)
+  const rev = (prevManifest.rev || 0) + 1;
+  let okManifest = false;
+  try { const mp = rec.prop('Manifest'); if (mp && mp.set) { mp.set(JSON.stringify({ v: 1, rev, chunks: manifestChunks })); for (let i = 0; i < 4 && !okManifest; i++) { try { const m2 = JSON.parse((mp.text && mp.text()) || '{}'); okManifest = m2 && m2.rev === rev; } catch (_e) {} if (!okManifest) await sleep(120); } } } catch (_e) {}
+  if (!okManifest) return { ok: false, reason: 'manifest write' }; // chunks anchored (union), OLD manifest still authoritative → no loss
+  if (cp && cp.set) { try { cp.set(dedup(currentFvs)); } catch (_e) {} } // PRUNE: drop now-unreferenced old blobs → GC
+  try { if (rec.prop('Scene Rev')) { rec.prop('Scene Rev').set(rev); if (rec.prop('Scene Schema')) rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
+  if (view) {
+    view._chunkHashes = newHashes; view._wasChunked = true; view._chunkSaveCount = (view._chunkSaveCount || 0) + 1;
+    if (view._chunkSaveCount % PXC_CHUNK_CHECKPOINT === 0) { try { const cf = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' }); const cb = await plugin.data.uploadBlob(cf); if (cb && rec.prop('Scene') && rec.prop('Scene').setFileFromBlob) rec.prop('Scene').setFileFromBlob(cb); } catch (_e) {} } // periodic full-Scene checkpoint refreshes the coarse fallback
+  }
+  return { ok: true, mode: 'chunked', rev, chunks: Object.keys(manifestChunks).length };
+}
 function exportPng(scene, maxPx = 1024, opts) {
   opts = opts || {};
   return new Promise((resolve) => {
@@ -1404,6 +1472,13 @@ async function saveScene(plugin, rec, scene, camera, view) {
   // CP-1: stamp a valid fractional z-index reflecting paint (array) order, so the persisted scene is
   // Excalidraw-export-valid (was a dead 'a0' constant). Lexicographically sortable, fixed-width base36.
   for (let i = 0; i < scene.elements.length; i++) scene.elements[i].index = 'a' + i.toString(36).padStart(8, '0');
+  // SCALE Phase 3: chunked mode for large scenes (hysteresis: enter ≥5000 live elements, exit <3000); else the proven
+  // single-blob path. A chunked-save failure falls through to the single-blob FULL write (safe) + clears the manifest below.
+  const liveCount = scene.elements.reduce((n, e) => n + (e.isDeleted ? 0 : 1), 0);
+  const wasChunked = view ? !!view._wasChunked : !!pxcReadManifest(rec);
+  if (wasChunked ? (liveCount >= PXC_CHUNK_EXIT) : (liveCount >= PXC_CHUNK_ENTER)) {
+    try { const r = await saveSceneChunked(plugin, rec, scene, view); if (r && r.ok) return r; } catch (_e) {}
+  }
   const file = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' });
   const blob = await plugin.data.uploadBlob(file);
   if (!blob) return { ok: false, reason: 'uploadBlob null' };
@@ -1439,6 +1514,10 @@ async function saveScene(plugin, rec, scene, camera, view) {
   // They're now a DEBOUNCED idle pass (view._scheduleBannerText) — cosmetic + search-only, decoupled from the
   // durable scene write above. View-less saves (rare) still refresh them inline here so nothing is lost.
   if (!view) { try { _writeBannerTextInline(plugin, rec, scene); } catch (_e) {} }
+  // SCALE Phase 3: we just persisted the FULL scene via the Scene blob → clear any manifest so load is unambiguous
+  // (manifest-present ⟺ chunked). Covers a chunked→single shrink AND a chunked-save failure that degraded to here.
+  try { const mp = rec.prop('Manifest'); if (mp && mp.text && (mp.text() || '').trim() && mp.set) { mp.set(''); const cp = rec.prop('Chunks'); if (cp && cp.set) cp.set([]); } } catch (_e) {}
+  if (view) { view._wasChunked = false; view._chunkHashes = {}; }
   return { ok, mode, blobGuid: blob.guid };
 }
 // The Canvas-Text property mirror + banner-preview PNG. Off the save hot path (debounced); see _scheduleBannerText.
@@ -3689,7 +3768,7 @@ class CanvasView {
   // Enumerate the EDITABLE typed properties of a record (skip system/Plexus-internal). Type inferred from the live shape:
   // choices()→choice, date()→date, linkedRecords()→relation, number()→number, else text. Empty props default to text (v1).
   _recPanelFields(rec) {
-    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text', 'Assets', 'Assets 2', 'Assets 3', 'Assets 4', 'Scene Rev', 'Scene Schema', 'Source Note']);
+    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text', 'Assets', 'Assets 2', 'Assets 3', 'Assets 4', 'Scene Rev', 'Scene Schema', 'Source Note', 'Chunks', 'Manifest']);
     const out = []; let props = [];
     try { props = (rec.getAllProperties && rec.getAllProperties()) || []; } catch (_e) {}
     for (const p of props) {
@@ -5835,9 +5914,17 @@ class CanvasView {
     if (this.destroyed) return;
     let fresh = true, hadStore = false; // hadStore = a scene STORE exists (prop blob or body line), load ok OR not
     if (this.rec) {
+      // SCALE Phase 3: a CHUNKED scene (Manifest present) → load from chunks; a missing/unreadable chunk returns null →
+      // fall through to the Scene-blob fallback (never load a partial scene). `hadStore` set so we never seed empty over a store.
+      let mani = null; try { mani = pxcReadManifest(this.rec); } catch (_e) {}
+      if (mani && mani.chunks && Object.keys(mani.chunks).length) {
+        hadStore = true;
+        const loaded = await loadSceneChunked(this.plugin, this.rec);
+        if (loaded && loaded.elements) { this.scene = loaded; fresh = false; this._wasChunked = true; }
+      }
       // UX-4: prefer the `Scene` FILE PROPERTY (clean storage); fall back to a body `file` line item.
       let sceneProp = null; try { sceneProp = this.rec.prop('Scene'); } catch (_e) {}
-      if (sceneProp) {
+      if (fresh && sceneProp) {
         let pblob = null; try { pblob = await sceneProp.fileBlob(); } catch (_e) {} // a REAL stored scene → blob present
         if (pblob) { hadStore = true; const loaded = await loadScene(this.rec, 10); if (loaded && loaded.elements) { this.scene = loaded; fresh = false; } }
       }
@@ -5910,7 +5997,7 @@ class CanvasView {
       // F6: before the backing exists, route the save through saveNow (which materializes the backing) so undo/redo never
       // writes the scene to the HOST body (re-cluttering the note); otherwise persist directly.
       if (this._pendingBacking && !this._isBacking) this.scheduleSave();
-      else saveScene(this.plugin, this.rec, this.scene, this.camera, this).then((r) => { this._lastSave = r; });
+      else this.saveNow(); // route through the single-flight guard so undo/redo never overlaps a chunked save (Manifest/Chunks desync)
       this._scheduleBannerText();
     }
   }
@@ -6321,22 +6408,36 @@ class CanvasView {
   }
   async saveNow() {
     if (!this.rec || this.destroyed) return null;
-    if (this._migrating) { this.scheduleSave(); return { ok: false, reason: 'migrating' }; } // DATA-SAFETY: never snapshot a half-migrated (still-fat) scene over the migration's slim save (re-bloat race)
-    // SCALE/backing: a pending-backing canvas with real content materializes its backing Plexus Drawings record BEFORE
-    // saving, so scene + assets land in PROPERTIES (never the host body). Empty canvases stay pending (no empty-drawing spam).
-    if (this._pendingBacking && !this._isBacking) {
-      const hasContent = (this.scene.elements && this.scene.elements.some((e) => !e.isDeleted)) || (this.scene.files && Object.keys(this.scene.files).length);
-      if (!hasContent) return { ok: true, reason: 'pending-backing-empty' };
-      try { await this._ensureBackingAndMigrate(); } catch (_e) {}
-      if (this.destroyed) return null;
+    // SCALE Phase 3 MUST-FIX (chunk review): SINGLE-FLIGHT. Two overlapping chunked saves both read prevManifest rev=N,
+    // both bump to N+1, and each prunes Chunks to its OWN set → the Manifest can point at a guid the other already pruned →
+    // a missing chunk → fallback to a stale Scene checkpoint = silent loss. Reachable single-client (undo within the save
+    // debounce). So: only one save runs at a time; a save requested mid-flight COALESCES (re-schedules) instead of overlapping.
+    // Guard is keyed by the backing RECORD (plugin-level), not just this view — so two panels open on the SAME drawing
+    // also serialize (chunking's split Manifest/Chunks state is not atomic across concurrent writers like the single blob was).
+    const recKey = this.recordGuid, inflight = (this.plugin._saveInflightRecs || (this.plugin._saveInflightRecs = new Set()));
+    if (this._saveInflight || inflight.has(recKey)) { this._pendingSave = true; return { ok: true, reason: 'coalesced' }; }
+    this._saveInflight = true; inflight.add(recKey);
+    try {
+      if (this._migrating) { this.scheduleSave(); return { ok: false, reason: 'migrating' }; } // DATA-SAFETY: never snapshot a half-migrated (still-fat) scene over the migration's slim save (re-bloat race)
+      // SCALE/backing: a pending-backing canvas with real content materializes its backing Plexus Drawings record BEFORE
+      // saving, so scene + assets land in PROPERTIES (never the host body). Empty canvases stay pending (no empty-drawing spam).
+      if (this._pendingBacking && !this._isBacking) {
+        const hasContent = (this.scene.elements && this.scene.elements.some((e) => !e.isDeleted)) || (this.scene.files && Object.keys(this.scene.files).length);
+        if (!hasContent) return { ok: true, reason: 'pending-backing-empty' };
+        try { await this._ensureBackingAndMigrate(); } catch (_e) {}
+        if (this.destroyed) return null;
+      }
+      // Tombstone GC: compact the deleted-element graveyard when it dominates, so n (every scan/snapshot/save) reflects
+      // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
+      // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
+      try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
+      const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res;
+      try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
+      return res;
+    } finally {
+      this._saveInflight = false; try { inflight.delete(recKey); } catch (_e) {}
+      if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
-    // Tombstone GC: compact the deleted-element graveyard when it dominates, so n (every scan/snapshot/save) reflects
-    // LIVE elements. Safe — undo/redo hold self-contained snapshots and `filter` preserves z-order. (Load-time
-    // compaction handles cross-session accumulation; this bounds within-session growth on heavy edit-and-delete.)
-    try { const els = this.scene.elements; let del = 0; for (const e of els) if (e.isDeleted) del++; if (del > 200 && del > els.length - del) { this.scene.elements = els.filter((e) => !e.isDeleted); this._gridDirty = true; this._cacheValid = false; } } catch (_e) {}
-    const res = await saveScene(this.plugin, this.rec, this.scene, this.camera, this); this._lastSave = res;
-    try { this._reindexBackrefs(); } catch (_e) {} // FLYBACK: keep the note→canvas backref index in lockstep with the durable save
-    return res;
   }
   destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
