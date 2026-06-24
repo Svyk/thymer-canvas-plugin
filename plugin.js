@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.93.0';
+const PLEXUS_VERSION = '1.94.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2915,6 +2915,29 @@ class CanvasView {
     fr.height = Math.max(fr.height, 2 * P + rows * cellH + (rows - 1) * G);
     this._gridDirty = true; this._cacheValid = false; this._updateBindings(); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Arranged ' + ordered.length + ' cards (' + (mode === 'stack' ? 'stack' : mode === 'row' ? 'row' : cols + '×' + rows + ' grid') + ').', dismissible: true }); } catch (_e) {}
+  }
+  // FORMAT PAINTER (Excalidraw copy/paste styles): lift the VISUAL style off one element and stamp it onto others. Pure
+  // style — explicit allowlists, NEVER geometry/content/bindings/type. Type-aware on apply (line-only + text-only fields are
+  // gated). No new element state; just sets existing fields every render/export path already reads. Undoable via scheduleSave.
+  _copyStyles() {
+    const el = this._singleSel() || [...this.selected].map((id) => this._byId(id)).filter(Boolean)[0];
+    if (!el) { try { this.plugin.ui.addToaster({ title: 'Plexus: select an element to copy its style.', dismissible: true }); } catch (_e) {} return; }
+    const pick = (keys) => { const o = {}; for (const k of keys) if (el[k] !== undefined) o[k] = el[k]; return o; };
+    this.plugin._styleClip = {
+      common: pick(['strokeColor', 'backgroundColor', 'fillStyle', 'strokeWidth', 'roughness', 'opacity']),
+      line: pick(['lineStyle', 'startArrowhead', 'endArrowhead']),
+      text: pick(['fontSize', 'fontFamily', 'textAlign']),
+    };
+    try { this.plugin.ui.addToaster({ title: 'Style copied — select element(s) and run “Paste style”.', dismissible: true }); } catch (_e) {}
+  }
+  _pasteStyles() {
+    const clip = this.plugin._styleClip;
+    if (!clip) { try { this.plugin.ui.addToaster({ title: 'Plexus: copy a style first (“Copy style”).', dismissible: true }); } catch (_e) {} return; }
+    const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type !== 'frame');
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select the element(s) to paste the style onto.', dismissible: true }); } catch (_e) {} return; }
+    for (const el of els) { Object.assign(el, clip.common); if (el.type === 'arrow' || el.type === 'line') Object.assign(el, clip.line); if (el.type === 'text') Object.assign(el, clip.text); }
+    this.dirty = true; this.scheduleSave(); if (this._syncPropPanel) this._syncPropPanel(true);
+    try { this.plugin.ui.addToaster({ title: 'Style applied to ' + els.length + ' element' + (els.length > 1 ? 's' : '') + '.', dismissible: true }); } catch (_e) {}
   }
   // CP-4: selection stats — count + bounding box (x/y/w/h) + single-element angle, shown as a toaster.
   _selectionStats() {
@@ -6742,6 +6765,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy style', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._copyStyles(); } }); // FORMAT PAINTER
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste style', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._pasteStyles(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Selection stats', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._selectionStats(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Eyedropper (sample a colour)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._eyedropper(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Set external link on element', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._setLink(); } }); // CP-7/C-CF6

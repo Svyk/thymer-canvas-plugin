@@ -1,5 +1,25 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.94.0 — FEATURE LOOP: format painter — copy / paste styles (Excalidraw) (2026-06-23)
+Backlog D (final item of the resumed run). Lift the VISUAL style off one element and stamp it onto others.
+- **`_copyStyles`** stashes a single element's style into `plugin._styleClip` via explicit allowlists: `common`
+  (strokeColor/backgroundColor/fillStyle/strokeWidth/roughness/opacity) · `line` (lineStyle/startArrowhead/endArrowhead) ·
+  `text` (fontSize/fontFamily/textAlign). Only keys `!== undefined` are picked (a `null` arrowhead IS copied — it correctly
+  propagates "no head"; truly-absent keys are omitted so they never clobber a target).
+- **`_pasteStyles`** applies `common` to every selected non-frame element, `line` only to arrow/line targets, `text` only to
+  text targets, then `scheduleSave()` (undoable). NO geometry/content/identity/bindings ever copied or written — pure style.
+- Two command-palette entries (Copy style / Paste style, `ti-palette`).
+- **Adversarial review: clean, no defects** — allowlist safety (no geometry/content/binding/identity leak), NO new
+  visible/hittable state (only re-writes existing style fields every render/export path reads), type-gating, undo +
+  canvas-only data-safety (never writes the embedded Thymer record's properties), all edge cases. Node `pxc_formatpainter`
+  16/16 + all regressions green.
+
+— **RESUMED-RUN FEATURE LOOP COMPLETE (v1.90–v1.94, 5 ships):** nested/drill-down target [connection drill v1.90 + cite
+breadcrumb v1.91] · curved/multi-point arrows v1.92 · section auto-layout v1.93 · format painter v1.94. Every ship:
+node pure-logic test + adversarial code-review (full visibility/hittability sweep) + /usr/bin/git push. Backward-compatible
+by construction; no migrations. DEFERRED: nested-target Phase 3 polish (note-chip DOM "in section" prefix; whole-section-vs-
+leaf Cite menu) — low value. Open candidates for a future loop: lock element, connector labels-on-curve, per-child drill submenu.
+
 ## ✅ v1.93.0 — FEATURE LOOP: section AUTO-LAYOUT — grid / stack / row (Heptabase) (2026-06-23)
 Backlog C. Arrange a section's child cards into a clean pack. Relational + non-destructive — repositions x/y only
 (translates arrow points too), GROWS the frame to contain the pack so every card stays owned (center-in), undoable
