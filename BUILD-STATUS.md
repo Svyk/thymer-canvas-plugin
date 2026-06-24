@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.87.0 — FEATURE LOOP iter 4: background grid styles — dots / lines (Excalidraw) (2026-06-23)
+Backlog B. The existing grid already drew DOTS at intersections; added a traditional ruled LINES grid.
+- `scene.appState.gridStyle` ('dots' default | 'lines'); `_drawGrid` branches on it (lines = O(cols+rows), even
+  cheaper than the dots O(cols×rows) loop). `_gridStyle()`/`_setGridStyle()` helpers; a command "Plexus: Grid style —
+  dots / lines" cycles it (and enables the grid if off, so the change shows). Persists via `appState` through both the
+  single-blob and chunked `__meta` paths; old scenes default to 'dots' (identical to before).
+- **Adversarial review: clean, no regressions** (geometry/save-restore balanced, backward-compat confirmed, perf
+  strictly better than the dots loop). Known coupling (pre-existing, not introduced): grid-on also enables grid-snapping
+  — picking a style turns snapping on. Pure background render — no scene.elements/visibility change. Node `pxc_gridstyle`
+  10/10 + regressions green.
+- 4 of up to 6 loop iterations shipped. NEXT loop: cross-hatch/dots element FILLS (rest of B) or backlog C (arrowheads).
+
 ## ✅ v1.86.0 — FEATURE LOOP iter 3: Sections collapse / expand (Heptabase) (2026-06-23)
 A Section now folds to its title bar, hiding its contents (command "Plexus: Collapse / expand section" on the selected
 section; a ▸ marks a collapsed one).

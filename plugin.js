@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.86.0';
+const PLEXUS_VERSION = '1.87.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1825,6 +1825,8 @@ class CanvasView {
   _gridSize() { return (this.scene.appState && this.scene.appState.gridSize) || 20; }
   _snap(n) { if (!this._gridOn()) return n; const gs = this._gridSize(); return Math.round(n / gs) * gs; }
   _toggleGrid() { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridModeEnabled = !this._gridOn(); this.dirty = true; this.scheduleSave(); return this.scene.appState.gridModeEnabled; }
+  _gridStyle() { return (this.scene.appState && this.scene.appState.gridStyle) || 'dots'; } // B: 'dots' (default) | 'lines'
+  _setGridStyle(s) { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridStyle = (s === 'lines' ? 'lines' : 'dots'); if (!this._gridOn()) this.scene.appState.gridModeEnabled = true; this.dirty = true; this.scheduleSave(); return this.scene.appState.gridStyle; } // setting a style turns the grid ON if it was off
   // Phase 8: elbow-arrow toggle on the selected arrow/line elements.
   _toggleElbow() { let ch = false, on = null; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = !el.elbowed; on = el.elbowed; ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); } return on; }
   // Phase 8: presentation/view mode — hide chrome, fit the scene, read-only until Esc.
@@ -2472,8 +2474,16 @@ class CanvasView {
     const sx = Math.floor(x0 / gs) * gs, sy = Math.floor(y0 / gs) * gs;
     const op = Math.max(0, Math.min(100, st.gridOpacity == null ? 28 : st.gridOpacity)) / 100; // S5
     const col = st.gridDynamic ? (st.darkMode ? 'rgba(255,255,255,' + op + ')' : 'rgba(0,0,0,' + op + ')') : hexToRgba(st.gridColor || '#7c5cff', op);
-    ctx.save(); ctx.fillStyle = col; const r = Math.max(0.5, 1 / z);
-    for (let x = sx; x <= x1; x += gs) for (let y = sy; y <= y1; y += gs) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+    ctx.save();
+    if (this._gridStyle() === 'lines') { // B: a traditional ruled LINES grid (Excalidraw "grid")
+      ctx.strokeStyle = col; ctx.lineWidth = Math.max(0.4, 0.6 / z); ctx.beginPath();
+      for (let x = sx; x <= x1; x += gs) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+      for (let y = sy; y <= y1; y += gs) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+      ctx.stroke();
+    } else { // DOTS grid (default — a dot at each intersection, Excalidraw "dots")
+      ctx.fillStyle = col; const r = Math.max(0.5, 1 / z);
+      for (let x = sx; x <= x1; x += gs) for (let y = sy; y <= y1; y += gs) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+    }
     ctx.restore();
   }
   // Phase 8: download the current scene as a standalone SVG file.
@@ -6522,6 +6532,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Grid style — dots / lines', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (!v) return; const next = v._gridStyle() === 'lines' ? 'dots' : 'lines'; v._setGridStyle(next); try { this.ui.addToaster({ title: 'Grid: ' + next, dismissible: true }); } catch (_e) {} } }); // B: cycle the background grid style
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as PNG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportPngFile(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Print frames as pages (PDF)', icon: 'ti-printer', onSelected: () => { const v = this._activeView(); if (v) v._printFrames(); } });
