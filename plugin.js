@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.90.0';
+const PLEXUS_VERSION = '1.91.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2638,6 +2638,18 @@ class CanvasView {
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
+  // SECTIONS Phase 2 (reference parity): the section that OWNS an element — inverse of _drillTarget. The SMALLEST frame whose
+  // bounds contain the element's center (most specific when sections nest/overlap). Pure breadcrumb CONTEXT; never geometry.
+  _ownerSection(el) {
+    if (!el || el.type === 'frame') return null;
+    let best = null, bestA = Infinity;
+    for (const f of this.scene.elements) {
+      if (f.isDeleted || f.type !== 'frame' || f.id === el.id) continue;
+      if (!this._centerIn(el, f)) continue;
+      const a = (f.width || 0) * (f.height || 0); if (a < bestA) { bestA = a; best = f; }
+    }
+    return best;
+  }
   // SECTIONS nesting: a short display name for an element (used in the drill menu rows).
   _elShortName(e) {
     if (!e) return 'item';
@@ -5928,17 +5940,21 @@ class CanvasView {
       : (tg.tx ? { el: tg.el, region: tg.region, text: tg.tx } : { el: tg.el, region: tg.region }));
     // round-5 E (reverted): the cited TEXT shows IN the combined snapshot image (the union render includes it), not as a separate
     // editable caption line — the user found the caption messy/redundant. `tg.tx` still rides along in extra[] (harmless metadata).
+    // SECTIONS Phase 2 (reference parity): record which SECTION the primary target lives in — pure CONTEXT for the
+    // breadcrumb (the leaf el/region still resolves identically). Mirrors the connection drill's `sectionId`.
+    const ownSec = this._ownerSection(this._byId(prim.kind === 'region' ? prim.imgId : prim.el));
     this.plugin._imgRefClip = {
       png, sourceRecordGuid: this.recordGuid, label, region,
       elementId: prim.kind === 'region' ? prim.imgId : prim.el,
       crop: (prim.kind === 'el' && prim.isImage) ? ((this._byId(prim.el) || {}).crop || null) : null,
       inImage: prim.kind === 'region' ? true : undefined, frac: prim.frac, fracPoly: prim.fracPoly,
       extra: extra.length ? extra : undefined,
+      sec: ownSec ? ownSec.id : undefined, secName: ownSec ? (ownSec.name || 'Section') : undefined,
       w: Math.round((region && region.w) || 0), h: Math.round((region && region.h) || 0),
     };
     this._pendingImgRegion = null; this.dirty = true;
     const n = targets.length;
-    try { this.plugin.ui.addToaster({ title: (n > 1 ? (n + ' targets cited') : (prim.kind === 'region' ? 'Region cited' : 'Reference copied')) + ' — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: (n > 1 ? (n + ' targets cited') : (prim.kind === 'region' ? 'Region cited' : 'Reference copied')) + (ownSec ? ' · in “' + (ownSec.name || 'Section') + '”' : '') + ' — run “Plexus: Paste image reference” in a note.', dismissible: true }); } catch (_e) {}
     return true;
   }
   // SCALE/backing: redirect ALL storage from the HOST record (the note/Journal the panel opened on, which may have no
@@ -6895,7 +6911,7 @@ class Plugin extends AppPlugin {
     // Encode the whole cross-reference into the image's BLOB FILENAME (synced metadata that travels to every
     // client — web AND desktop), so the ↗ chip + navigation reconstruct anywhere, not just where it was made.
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
-    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra });
+    const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra, sec: clip.sec });
     let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
     // Nest the image UNDER the line the cursor is on (a CHILD), not at the record's top level. Resolve the
     // cursor line from the active editor (the thread-target marker) → the matching line item → use as parent.
@@ -6911,7 +6927,7 @@ class Plugin extends AppPlugin {
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(parentLine, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
     if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
-    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra }); } catch (_e) {} }
+    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra, sec: clip.sec || null, secName: clip.secName || null }); } catch (_e) {} }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
     return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
@@ -7206,10 +7222,15 @@ class Plugin extends AppPlugin {
       return 'e.' + encodeURIComponent(x.el);
     };
     let lbl = enc(d.label), extra = (d.extra && d.extra.length) ? d.extra.slice(0, 6) : null;
-    const build = () => 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + lbl + '~' + frac + '~' + poly + '~' + (extra && extra.length ? 'E' + extra.map(encExtra).join('!') : '') + '.png';
+    // SECTIONS Phase 2: optional owning-section breadcrumb as a 9th '~'-segment (S<frameId>). Old parsers read only
+    // parts[1..7] so they IGNORE it (backward-compatible). It's pure context, so it STRIPS FIRST under length pressure.
+    let sec = d.sec ? 'S' + enc(d.sec) : '';
+    const build = () => 'plexusref~' + enc(d.drawing) + '~' + enc(d.el) + '~' + reg + '~' + lbl + '~' + frac + '~' + poly + '~' + (extra && extra.length ? 'E' + extra.map(encExtra).join('!') : '') + (sec ? '~' + sec : '') + '.png';
     let name = build();
-    // Filenames must stay < 255: progressively strip until it fits — in-image extras, then all extras, then the
-    // primary freehand poly (the frac rect still anchors the region), then clip the label as a last resort.
+    // Filenames must stay < 255: progressively strip until it fits — the section breadcrumb FIRST (region/el survive),
+    // then in-image extras, then all extras, then the primary freehand poly (the frac rect still anchors the region),
+    // then clip the label as a last resort.
+    if (name.length > 250 && sec) { sec = ''; name = build(); }
     if (name.length > 250 && extra) { extra = extra.filter((x) => !x.inImage); if (!extra.length) extra = null; name = build(); }
     if (name.length > 250 && extra) { extra = null; name = build(); }
     if (name.length > 250 && poly) { poly = ''; name = build(); }
@@ -7240,6 +7261,7 @@ class Plugin extends AppPlugin {
       }
       if (ex.length) out.extra = ex;
     }
+    if (parts[8] && parts[8][0] === 'S') { const sg = dec(parts[8].slice(1)); if (sg) out.sec = sg; } // SECTIONS Phase 2: owning-section breadcrumb (context only; the leaf el/region above still drives navigation)
     return out;
   }
   // On opening a note, rebuild the local index from the synced image-blob filenames, so the ↗ chips appear
@@ -7285,6 +7307,9 @@ class Plugin extends AppPlugin {
       try { this.ui.addToaster({ title: 'That connection no longer exists — removed the stale reference.', dismissible: true }); } catch (_e) {}
       return;
     }
+    // SECTIONS Phase 2: breadcrumb — if the cited target lived inside a section, name it on the way back. Resolved LIVE
+    // from the loaded scene by guid (cross-device: the section name need not travel in the filename, only its id does).
+    if (entry.sec) { try { const sf = (view.scene.elements || []).find((e) => e.id === entry.sec && e.type === 'frame' && !e.isDeleted); if (sf) this.ui.addToaster({ title: 'In section “' + (sf.name || 'Section') + '”', dismissible: true }); } catch (_e) {} }
     // Navigating TO the canvas → always start wide (the whole source image) then cinematically zoom into the region.
     try { view._flashAnchor(entry, { establishImage: true }); } catch (e) { console.error('[Plexus] navToAnchor', e); }
   }

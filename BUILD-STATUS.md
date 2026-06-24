@@ -1,5 +1,28 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.91.0 — NESTED/DRILL-DOWN TARGET Phase 2: cite/reference parity (section breadcrumb) (2026-06-23)
+Backlog A, final nested-target phase. A citation made from inside a section now records WHICH section as pure
+breadcrumb CONTEXT — symmetric with the connection drill's `sectionId` (v1.90.0). Additive + backward-compatible
+by construction: the leaf (`el`/`frac`/`fracPoly`) stays the sole geometry source of truth; `sec` is touched only
+by the breadcrumb toaster — it changes NOTHING that's drawn, hit, selected, exported, or minimapped.
+- **`_ownerSection(el)`** — inverse of `_drillTarget`: the SMALLEST frame whose bounds contain the element's center
+  (most specific when sections nest), or null. Runs at cite time on a visible element (collapsed sections naturally
+  don't match — benign).
+- **`sec`/`secName` on the clip** (`_copyImageRefToClip`) = the owning section of the PRIMARY target. Threaded into
+  the filename codec + the xref entry; `_syncImageRefsForRecord` carries it cross-device automatically.
+- **Filename codec** gains an OPTIONAL 9th `~`-segment `S<frameId>` (parts[8]). Old 8-segment filenames parse
+  byte-identically (old parsers never read parts[8]); a new no-section encode is byte-identical to the pre-feature
+  output. Under the 255-char cap the section breadcrumb STRIPS FIRST (region/el/extra survive — navigation still works).
+- **Breadcrumb surfaced** in the cite toaster ("· in 'Section'") and on navigate-back (`_navToCanvasAnchor` resolves
+  the section NAME live from `view.scene` by guid — only the id travels in the filename, so it's cross-device-safe).
+- **Adversarial review: CLEAN — no correctness or backward-compat defects** (codec compat empirically simulated; strip-
+  first ordering; `_ownerSection` null/nest/collapse cases; sec threading; live breadcrumb resolution; data-model-only
+  sweep all verified). Node `pxc_refparity` 17/17 + all regressions green.
+- **NESTED-TARGET FEATURE DONE (phases 0–2, v1.90–v1.91):** connection drill-into-section + cite/reference breadcrumb,
+  unified on one `sectionId`/`sec` context field + shared `_drillTarget`/`_ownerSection`/`_showNestingChoice`.
+  DEFERRED (Phase 3 polish, low value): note-chip DOM "in section" prefix (needs cross-device name resolution) +
+  whole-section-vs-leaf Cite menu (no target ambiguity in select-then-Cite — the section rides as auto context).
+
 ## ✅ v1.90.0 — NESTED/DRILL-DOWN TARGET Phase 0+1: drop an arrow on a section → drill into it (2026-06-23)
 Backlog A (design: `NESTED-TARGET-DESIGN.md`). Target a Section as a WHOLE, then drill DEEPER — a card inside,
 or a REGION of an image inside — unified on ONE optional `sectionId` CONTEXT field. Additive + backward-compatible
