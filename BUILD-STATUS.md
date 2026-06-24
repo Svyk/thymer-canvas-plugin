@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.88.0 — FEATURE LOOP iter 5: cross-hatch element fill (Excalidraw) (2026-06-23)
+Backlog B (fills). Added a `cross-hatch` `fillStyle` alongside the existing hachure + solid.
+- `hachure()` gained a `cross` param → a perpendicular (down-right) second pass over the down-left set = a true
+  cross-hatch. All 7 fill renderers (rect/ellipse/diamond/`_roughFillPoly`/roundrect/cylinder/cloud) pass
+  `opts.fillStyle === 'cross-hatch'` via one `replace_all`. A "Cross" button joins the fill picker
+  (Solid/Hachure/Cross/None); active-highlight already derives from `el.fillStyle`.
+- **Adversarial review: clean, no regressions.** replace_all hit exactly the 7 sites; cross pass is a perpendicular
+  mirror with balanced ctx state; hachure/solid/undefined render identically to before; `fillStyle` persists
+  (single-blob + chunked); PNG export renders it, SVG export emits solid (same as hachure today — no new regression).
+  Pure-visual, no scene.elements/visibility change. Node `pxc_crosshatch` 10/10 + regressions green.
+- 5 of up to 6 loop iterations shipped. NEXT (final): backlog C — arrowhead styles (dot/triangle/bar).
+
 ## ✅ v1.87.0 — FEATURE LOOP iter 4: background grid styles — dots / lines (Excalidraw) (2026-06-23)
 Backlog B. The existing grid already drew DOTS at intersections; added a traditional ruled LINES grid.
 - `scene.appState.gridStyle` ('dots' default | 'lines'); `_drawGrid` branches on it (lines = O(cols+rows), even

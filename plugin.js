@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.87.0';
+const PLEXUS_VERSION = '1.88.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -400,12 +400,13 @@ function roughSeg(ctx, x1, y1, x2, y2, rng, r) {
     ctx.quadraticCurveTo(mx + o(), my + o(), x2 + o(), y2 + o()); ctx.stroke();
   }
 }
-function hachure(ctx, x, y, w, h, color, sw, rng) {
+function hachure(ctx, x, y, w, h, color, sw, rng, cross) {
   ctx.save();
   ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
   ctx.strokeStyle = color; ctx.lineWidth = Math.max(0.6, sw * 0.5);
   const gap = 8;
   for (let d = -h; d < w + h; d += gap) { const j = (rng() * 2 - 1) * 1.5; ctx.beginPath(); ctx.moveTo(x + d + j, y); ctx.lineTo(x + d - h + j, y + h); ctx.stroke(); }
+  if (cross) for (let d = -h; d < w + h; d += gap) { const j = (rng() * 2 - 1) * 1.5; ctx.beginPath(); ctx.moveTo(x + d + j, y); ctx.lineTo(x + d + h + j, y + h); ctx.stroke(); } // CROSS-HATCH: a perpendicular second pass (down-right) over the down-left set
   ctx.restore();
 }
 function applyStroke(ctx, opts) {
@@ -420,7 +421,7 @@ function roughRect(ctx, x, y, w, h, opts, seed) {
   ctx.save(); applyStroke(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') {
     if (opts.fillStyle === 'solid') { ctx.save(); ctx.globalAlpha = (opts.opacity == null ? 1 : opts.opacity); ctx.fillStyle = opts.fill; ctx.fillRect(x, y, w, h); ctx.restore(); }
-    else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng);
+    else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch');
   }
   roughSeg(ctx, x, y, x + w, y, rng, r); roughSeg(ctx, x + w, y, x + w, y + h, rng, r);
   roughSeg(ctx, x + w, y + h, x, y + h, rng, r); roughSeg(ctx, x, y + h, x, y, rng, r);
@@ -431,7 +432,7 @@ function roughEllipse(ctx, x, y, w, h, opts, seed) {
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
   const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   const N = 18; let started = false; ctx.beginPath();
   for (let i = 0; i <= N; i++) {
     const a = (i / N) * Math.PI * 2;
@@ -445,7 +446,7 @@ function roughDiamond(ctx, x, y, w, h, opts, seed) {
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const mx = x + w / 2, my = y + h / 2;
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(x + w, my); ctx.lineTo(mx, y + h); ctx.lineTo(x, my); ctx.closePath(); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(x + w, my); ctx.lineTo(mx, y + h); ctx.lineTo(x, my); ctx.closePath(); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   roughSeg(ctx, mx, y, x + w, my, rng, r); roughSeg(ctx, x + w, my, mx, y + h, rng, r);
   roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
   ctx.restore();
@@ -455,7 +456,7 @@ function _roughFillPoly(ctx, x, y, w, h, pts, opts, rng) { // shared: clip to a 
   if (!opts.fill || opts.fill === 'transparent') return;
   ctx.save(); ctx.beginPath(); pts.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.clip();
   if (opts.fillStyle === 'solid') { ctx.globalAlpha = opts.opacity == null ? 1 : opts.opacity; ctx.fillStyle = opts.fill; ctx.fill(); }
-  else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng);
+  else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch');
   ctx.restore();
 }
 function roughTriangle(ctx, x, y, w, h, opts, seed) {
@@ -483,7 +484,7 @@ function roughRoundRect(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const k = Math.min(Math.min(Math.abs(w), Math.abs(h)) * 0.18, 24);
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, k); else ctx.rect(x, y, w, h); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, k); else ctx.rect(x, y, w, h); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   roughSeg(ctx, x + k, y, x + w - k, y, rng, r); roughSeg(ctx, x + w, y + k, x + w, y + h - k, rng, r);
   roughSeg(ctx, x + w - k, y + h, x + k, y + h, rng, r); roughSeg(ctx, x, y + h - k, x, y + k, rng, r);
   const corner = (cx, cy, a0) => { ctx.beginPath(); for (let j = 0; j <= 4; j++) { const a = a0 + (j / 4) * (Math.PI / 2); const px = cx + Math.cos(a) * k + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * k + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
@@ -494,7 +495,7 @@ function roughCylinder(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
   const e = Math.min(Math.abs(h) * 0.18, 18), rx = w / 2, cx = x + w / 2;
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.rect(x, y + e / 2, w, h - e); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.rect(x, y + e / 2, w, h - e); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   const arc = (cy, a0, a1) => { ctx.beginPath(); const N = 18; for (let j = 0; j <= N; j++) { const a = a0 + (j / N) * (a1 - a0); const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * (e / 2) + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
   roughSeg(ctx, x, y + e / 2, x, y + h - e / 2, rng, r); roughSeg(ctx, x + w, y + e / 2, x + w, y + h - e / 2, rng, r);
   arc(y + h - e / 2, 0, Math.PI);          // bottom front lip
@@ -507,7 +508,7 @@ function roughCloud(ctx, x, y, w, h, opts, seed) {
   const base = []; for (let k = 0; k < N; k++) { const a = (k / N) * Math.PI * 2 - Math.PI / 2; base.push([cx + Math.cos(a) * ax, cy + Math.sin(a) * ay, a]); }
   const path = () => { ctx.beginPath(); for (let k = 0; k < N; k++) { const p0 = base[k], p1 = base[(k + 1) % N]; let a1 = p1[2]; if (a1 < p0[2]) a1 += Math.PI * 2; const ma = (p0[2] + a1) / 2; const b = bump + (rng() * 2 - 1) * 2; const mx = cx + Math.cos(ma) * (ax + b), my = cy + Math.sin(ma) * (ay + b); if (k === 0) ctx.moveTo(p0[0], p0[1]); ctx.quadraticCurveTo(mx, my, p1[0], p1[1]); } ctx.closePath(); };
   ctx.save(); applyStroke(ctx, opts);
-  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); path(); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng); ctx.restore(); }
+  if (opts.fill && opts.fill !== 'transparent') { ctx.save(); path(); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   path(); ctx.stroke();
   ctx.restore();
 }
@@ -2572,7 +2573,7 @@ class CanvasView {
     const op = document.createElement('input'); op.type = 'range'; op.min = '10'; op.max = '100'; op.value = '100'; op.className = 'pxc-prop-range'; this._opRange = op;
     op.addEventListener('input', () => this._applyProp('opacity', Math.round(+op.value) / 100)); p.appendChild(op);
     p.appendChild(sep()); p.appendChild(lab('Fill')); this._fillBtns = {};
-    for (const [t, v] of [['Solid', 'solid'], ['Hachure', 'hachure'], ['None', 'none']]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyFill(v)); p.appendChild(b); this._fillBtns[v] = b; }
+    for (const [t, v] of [['Solid', 'solid'], ['Hachure', 'hachure'], ['Cross', 'cross-hatch'], ['None', 'none']]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyFill(v)); p.appendChild(b); this._fillBtns[v] = b; }
     return p;
   }
   _applyProp(key, val) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { el[key] = val; ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
