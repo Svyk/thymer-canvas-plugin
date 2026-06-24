@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.96.0';
+const PLEXUS_VERSION = '1.97.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6979,7 +6979,18 @@ class Plugin extends AppPlugin {
     this._installAutomate();
     if (TEST_HOOKS) this._installTestHooks();
   }
-  _teardown() { try { this._hideBrefHover(); } catch (_e) {} try { this._closeBrefMenu(); } catch (_e) {} for (const v of this._views) { try { v.destroy(); } catch (_e) {} } this._views.clear(); try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */ }
+  _teardown() {
+    try { this._hideBrefHover(); } catch (_e) {} try { this._closeBrefMenu(); } catch (_e) {}
+    const deadHosts = [];
+    for (const v of this._views) { try { if (v.host) deadHosts.push(v.host); } catch (_e) {} try { v.destroy(); } catch (_e) {} }
+    this._views.clear();
+    // HOT-RELOAD GUARD: reinstalling the plugin while a canvas is OPEN tears the live view down (its toolbar + pointer
+    // listeners are removed) but Thymer does NOT re-mount the open panel → a dead canvas (no working toolbar, can't pan).
+    // Replace each orphaned host with a clear reload prompt instead of a silently-dead UI. A real re-mount (mount() does
+    // host.innerHTML='') or a page reload wipes it; harmless on actual page-unload.
+    for (const host of deadHosts) { try { if (host && host.querySelector && host.querySelector('.pxc-root')) host.innerHTML = '<div class="pxc-reload-note" style="padding:28px;font:14px system-ui,sans-serif;text-align:center;opacity:.7">Plexus Canvas was updated — reload this tab (⌘⇧R / Ctrl+Shift+R) to continue.</div>'; } catch (_e) {} }
+    try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */
+  }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || this._domView() || null; }
   // DEBUG/VERIFY: find the LIVE rendered view via its DOM handle (wrap.__pxcView) — survives a hot-reload leak where this

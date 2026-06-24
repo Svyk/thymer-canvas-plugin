@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.97.0 — HOT-RELOAD GUARD: clear "reload to continue" instead of a dead canvas after reinstall (2026-06-24)
+User report: "this update broke things — the toolbar isn't there and I can't pan." **Diagnosed live via chrome-devtools (NOT a
+code regression):** opened the user's EXACT "Mon Jun 22 — canvas" (`1NZE16...`) fresh under v1.96.0 → mounted clean, toolbar
+present (27 els), the Ford card + properties rendered, `_cardSurfaceColor` returned `#1b1d24` for dark (the v1.95 fix working;
+`_cardSurface` was white = the force-dark-over-light-theme case). Direct `_drawRecordCard` on the real card → ok, no throw.
+**Root cause = the classic hot-reload-leak trap (GUARDRAILS):** reinstalling the plugin WHILE a canvas was open runs onLoad →
+`_teardown` → the old view's `destroy()` removes its pointer + toolbar listeners, but Thymer does NOT re-mount the open panel,
+so the canvas is left dead (no working toolbar, no pan) until a reload. A fresh open/reload always works (proven).
+- **Fix:** `_teardown` now replaces each orphaned canvas host (one that still holds a `.pxc-root`) with a clear
+  "Plexus Canvas was updated — reload this tab (⌘⇧R) to continue" note instead of a silently-dead UI. A real re-mount
+  (`mount()` does `host.innerHTML=''`) or a reload wipes it; harmless on actual page-unload. Only fires on whole-plugin
+  teardown (reinstall / `onUnload`), never on a normal single-panel close (that path calls `view.destroy()` directly).
+- No enumerate-and-re-mount auto-recover is possible (no `getOpenPanels` in the UI API), so a reload is still required — the
+  banner just makes that obvious. node `--check` + key regressions green. (The standing remedy after any reinstall remains:
+  hard-reload the web tab to clear leaked instances.)
+
 ## ✅ v1.96.0 — TRANSCLUSION FIDELITY pass 2: @ / @@ reference insertion in the card-body editor (2026-06-24)
 The 4th ask from the "improving transclusions" pass. Typing `@` (record) / `@@` (line) while editing a record-card body now
 inserts an inline ref — previously the card editor was plain-text-only (only standalone canvas TEXT elements + the note
