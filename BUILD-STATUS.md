@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.89.0 — FEATURE LOOP iter 6 (final): arrowhead styles — arrow / triangle / dot / bar (2026-06-23)
+Backlog C. The head value (`endArrowhead`/`startArrowhead`) now carries a STYLE, not just truthiness.
+- `drawArrowhead(...,style)`: dot (●, filled circle) · bar (│, perpendicular) · triangle (▶, filled) · arrow (open V,
+  legacy default). Fills use `ctx.strokeStyle` so the head matches the line color. The renderer passes the head value as
+  the style; legacy `'arrow'`/`null` render byte-identically (gate unchanged). `_setConnHeads` PRESERVES the style across
+  presence toggles; new `_setConnHeadStyle` + a head-style picker row (▷▶●│) in the connection panel; `_applyRelPreset`
+  preserves the style too.
+- **Adversarial review: clean, ship.** Fill color correct; no `=== 'arrow'` consumer breaks (all read truthiness);
+  persists (single-blob + chunked); PNG renders styles, SVG export draws no head as before (no new regression). Node
+  `pxc_arrowhead` 11/11 + all regressions green. Known: style memory is the head value → a full "none" toggle resets to
+  the default arrow on re-add (persists across single↔double).
+
+— **FEATURE PORT LOOP COMPLETE (6/6, v1.84–v1.89):** Sections (bind to/from whole · color · collapse) · grid dots/lines ·
+cross-hatch fill · arrowhead styles. DEFERRED (awaiting Svyat's decision): section→Thymer-record relation (what it should DO).
+
 ## ✅ v1.88.0 — FEATURE LOOP iter 5: cross-hatch element fill (Excalidraw) (2026-06-23)
 Backlog B (fills). Added a `cross-hatch` `fillStyle` alongside the existing hachure + solid.
 - `hachure()` gained a `cross` param → a perpendicular (down-right) second pass over the down-left set = a true

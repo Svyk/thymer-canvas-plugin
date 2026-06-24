@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.88.0';
+const PLEXUS_VERSION = '1.89.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -818,8 +818,12 @@ function drawIcon(ctx, el) {
   ctx.fillText(el.glyph, el.x + el.width / 2, el.y + el.height / 2);
   ctx.restore();
 }
-function drawArrowhead(ctx, fromX, fromY, toX, toY, size) {
+function drawArrowhead(ctx, fromX, fromY, toX, toY, size, style) {
   const ang = Math.atan2(toY - fromY, toX - fromX), len = size || 14, spread = 0.45;
+  if (style === 'dot') { ctx.beginPath(); ctx.arc(toX, toY, Math.max(2, len * 0.32), 0, 7); ctx.fillStyle = ctx.strokeStyle; ctx.fill(); return; }
+  if (style === 'bar') { const px = Math.cos(ang + Math.PI / 2), py = Math.sin(ang + Math.PI / 2), b = len * 0.5; ctx.beginPath(); ctx.moveTo(toX - px * b, toY - py * b); ctx.lineTo(toX + px * b, toY + py * b); ctx.stroke(); return; }
+  if (style === 'triangle') { ctx.beginPath(); ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang - spread), toY - len * Math.sin(ang - spread)); ctx.lineTo(toX - len * Math.cos(ang + spread), toY - len * Math.sin(ang + spread)); ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill(); return; }
+  // default 'arrow' (open V) — also the value of every legacy arrow, so existing connections are unchanged
   ctx.beginPath();
   ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang - spread), toY - len * Math.sin(ang - spread));
   ctx.moveTo(toX, toY); ctx.lineTo(toX - len * Math.cos(ang + spread), toY - len * Math.sin(ang + spread));
@@ -856,8 +860,8 @@ function drawLinear(ctx, el) {
     for (let i = 0; i < pts.length - 1; i++) roughSeg(ctx, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], rng, rgh);
   }
   const ah = (el.strokeWidth || 2) * 5 + 6;
-  if (el.endArrowhead) { const a = pts[pts.length - 2], b = pts[pts.length - 1]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
-  if (el.startArrowhead) { const a = pts[1], b = pts[0]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah); }
+  if (el.endArrowhead) { const a = pts[pts.length - 2], b = pts[pts.length - 1]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah, el.endArrowhead); } // the head VALUE is now its STYLE (arrow|triangle|dot|bar); legacy 'arrow' → the open V
+  if (el.startArrowhead) { const a = pts[1], b = pts[0]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah, el.startArrowhead); }
   ctx.restore();
 }
 function drawElement(ctx, el) {
@@ -2124,6 +2128,15 @@ class CanvasView {
     mk(sg2, '↔', heads === 'double', () => this._setConnHeads('double'), 'Double');
     r2.appendChild(sg2);
     box.appendChild(r2);
+    // Row 2b: arrowhead STYLE (applies to the present head(s); picking one adds an end head if there is none).
+    const r2b = document.createElement('div'); r2b.className = 'pxc-cs-row';
+    const curHead = arrow.endArrowhead || arrow.startArrowhead || 'arrow', hasHead = !!(arrow.endArrowhead || arrow.startArrowhead);
+    const sg3 = seg('pxc-cs-headstyle');
+    mk(sg3, '▷', hasHead && curHead === 'arrow', () => this._setConnHeadStyle('arrow'), 'Open arrow head');
+    mk(sg3, '▶', hasHead && curHead === 'triangle', () => this._setConnHeadStyle('triangle'), 'Triangle head');
+    mk(sg3, '●', hasHead && curHead === 'dot', () => this._setConnHeadStyle('dot'), 'Dot head');
+    mk(sg3, '│', hasHead && curHead === 'bar', () => this._setConnHeadStyle('bar'), 'Bar head');
+    r2b.appendChild(sg3); box.appendChild(r2b);
     // Row 3: manual colour strip (overrides the preset colour).
     const r3 = document.createElement('div'); r3.className = 'pxc-cs-row pxc-cs-colors';
     for (const c of ['#1e1e1e', '#64748b', '#7c5cff', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#a855f7']) {
@@ -3304,13 +3317,14 @@ class CanvasView {
     const preset = PXC_REL_PRESETS.find((p) => p.key === key); if (!preset) return; let ch = false;
     for (const id of this.selected) { const el = this._byId(id); if (!el || (el.type !== 'arrow' && el.type !== 'line')) continue;
       el.relType = preset.key; el.strokeColor = preset.color; el.lineStyle = preset.lineStyle;
-      el.endArrowhead = (preset.heads === 'none') ? null : 'arrow'; el.startArrowhead = (preset.heads === 'double') ? 'arrow' : null;
+      { const style = el.endArrowhead || el.startArrowhead || 'arrow'; el.endArrowhead = (preset.heads === 'none') ? null : style; el.startArrowhead = (preset.heads === 'double') ? style : null; } // preserve the chosen head STYLE through a preset (mirror _setConnHeads)
       this._setConnLabelText(el, preset.label); ch = true;
     }
     if (ch) { this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave(); this._connStyleId = null; }
   }
   _setConnLineStyle(style) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.lineStyle = style; ch = true; } } if (ch) { this.dirty = true; this.scheduleSave(); this._connStyleId = null; } }
-  _setConnHeads(mode) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.endArrowhead = (mode === 'none') ? null : 'arrow'; el.startArrowhead = (mode === 'double') ? 'arrow' : null; ch = true; } } if (ch) { this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // heads change → dir glyph in the breadcrumb changes
+  _setConnHeads(mode) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { const style = el.endArrowhead || el.startArrowhead || 'arrow'; el.endArrowhead = (mode === 'none') ? null : style; el.startArrowhead = (mode === 'double') ? style : null; ch = true; } } if (ch) { this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // heads change → dir glyph in the breadcrumb changes; PRESERVES the head STYLE across presence toggles
+  _setConnHeadStyle(style) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { if (!el.endArrowhead && !el.startArrowhead) el.endArrowhead = style; else { if (el.endArrowhead) el.endArrowhead = style; if (el.startArrowhead) el.startArrowhead = style; } ch = true; } } if (ch) { this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // change the STYLE (arrow|triangle|dot|bar) of the present head(s); if none, add an end head
   _setConnColor(color) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.strokeColor = color; el.relType = null; ch = true; } } if (ch) { this.dirty = true; this.scheduleSave(); this._connStyleId = null; } } // a manual color override clears the preset tag
   _editText(el) {
     try { this._closeRefPicker(); } catch (_e) {} // re-entry: kill a leftover picker dropdown before the old _ta is removed
