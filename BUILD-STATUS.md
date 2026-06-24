@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.83.0 — SCALE Phase 4: render/memory hardening (bounded VRAM + smooth at scale) (2026-06-23)
+The render is already O(visible) (spatial grid cull + hit-test), with an image-decode LRU + objectURL revoke (v1.78),
+a frozen drag layer, and static-layer caching. The one real UNBOUNDED-growth leak was the WebGL texture cache (`_tex`
+Map, never evicted → VRAM grew with every image ever rendered → crash at thousands of images).
+- **WebGL texture LRU eviction:** `_texFor` now LRU-touches (Map insertion order) and evicts the least-recently-used
+  textures via `gl.deleteTexture` once over the cap (== the decode cache, ~120) → VRAM bounded; an evicted-but-visible
+  texture re-uploads next frame from the still-cached `<img>`.
+- **Per-frame texture-upload budget (24/frame):** panning into a dense image region no longer uploads hundreds of
+  textures in one frame (a hitch) — the overflow renders progressively over the next frame(s) (`view.dirty`).
+- Low data-risk (pure render perf). Known edge: >~120 images simultaneously on-screen may briefly cycle textures
+  (extreme density); self-heals next frame. Other Phase-4 items (incremental grid insert, move-gated hit-tests) are
+  deferred micro-opts — the grid is already O(visible) for queries and rebuilds lazily once per edit. All tests green.
+- **SCALE EFFORT COMPLETE (Phases 1–4 + BD-1):** unlimited images (sharded Assets), unlimited text (200KB mirror),
+  unlimited shapes (chunked delta saves), bounded RAM/VRAM — all on backing Plexus Drawings records, data-safety
+  adversarially reviewed at every phase.
+
 ## ✅ v1.82.0 — SCALE Phase 3b: spatial scene CHUNKING (delta saves → unlimited shapes) (2026-06-23)
 The single `Scene` blob is rewritten whole on every save — fine to ~thousands of shapes, slow at tens of thousands. Phase
 3b adds spatial chunking so only CHANGED tiles re-upload. Confined by a 5000-element threshold (hysteresis exit <3000) →

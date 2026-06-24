@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.82.0';
+const PLEXUS_VERSION = '1.83.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1618,8 +1618,14 @@ class WebGLRenderer {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf); gl.enableVertexAttribArray(this.loc.quad); gl.vertexAttribPointer(this.loc.quad, 2, gl.FLOAT, false, 0, 0);
       gl.uniform3f(this.loc.cam, this.camera.x, this.camera.y, this.camera.zoom);
       gl.uniform2f(this.loc.vp, this.view.cssW, this.view.cssH); gl.uniform1i(this.loc.tex, 0); // vp in CSS px (DPR handled by gl.viewport)
+      // SCALE Phase 4: cap NEW texture uploads per frame — panning into a dense image region won't upload hundreds of
+      // textures in one frame (a hitch); the overflow renders next frame (progressive). Cached textures always draw.
+      let newTex = 0, deferred = false; const BUDGET = 24;
       for (const { el, img } of this._images) {
+        const cached = this._tex.has(el.fileId);
+        if (!cached && newTex >= BUDGET) { deferred = true; continue; }
         const tex = this._texFor(gl, el.fileId, img); if (!tex) continue;
+        if (!cached) newTex++;
         const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height), w = Math.abs(el.width), h = Math.abs(el.height);
         gl.uniform4f(this.loc.rect, x, y, w, h);
         const c = el.crop, uv = (c && img.naturalWidth) ? [c.x / img.naturalWidth, c.y / img.naturalHeight, c.w / img.naturalWidth, c.h / img.naturalHeight] : [0, 0, 1, 1];
@@ -1627,11 +1633,20 @@ class WebGLRenderer {
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
+      if (deferred) { try { this.view.dirty = true; } catch (_e) {} } // upload the remaining textures over the next frame(s)
     } catch (_e) {}
   }
   _texFor(gl, fileId, img) {
-    let t = this._tex.get(fileId); if (t) return t;
-    try { t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); this._tex.set(fileId, t); return t; } catch (_e) { return null; }
+    let t = this._tex.get(fileId); if (t) { this._tex.delete(fileId); this._tex.set(fileId, t); return t; } // LRU touch (Map insertion order = recency)
+    try {
+      t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); this._tex.set(fileId, t);
+      // SCALE Phase 4: bound VRAM — evict the least-recently-used textures (gl.deleteTexture) so the cache can't grow with
+      // every image ever rendered (a leak at 10k+ images). Capped to the decode cache size; an evicted-but-visible texture
+      // simply re-uploads next frame from the still-cached <img>.
+      const cap = Math.max(32, (this.view && this.view.plugin && this.view.plugin._settings && this.view.plugin._settings.imageCacheMax) || 120);
+      while (this._tex.size > cap) { const k = this._tex.keys().next().value; const old = this._tex.get(k); this._tex.delete(k); try { gl.deleteTexture(old); } catch (_e) {} }
+      return t;
+    } catch (_e) { return null; }
   }
   dispose() { try { if (this.glCv && this.glCv.parentElement) this.glCv.parentElement.removeChild(this.glCv); } catch (_e) {} this.gl = null; this._tex.clear(); }
 }
