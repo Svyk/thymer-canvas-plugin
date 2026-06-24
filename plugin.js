@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.89.0';
+const PLEXUS_VERSION = '1.90.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1918,6 +1918,7 @@ class CanvasView {
   }
   // The pseudo-shape bindPoint should route an endpoint to: a specific body line, an inline ref run, a marked image region, else the whole element.
   _bindTargetShape(binding, el) {
+    if (el && el.secHidden) { const sec = this._byId(el.secHidden); if (sec) return sec; } // SECTIONS: the bound element is hidden by a COLLAPSED section (el.secHidden = the section id) → route to the section title bar, not its off-screen position (covers BOTH drilled + flat child bindings)
     if (binding && binding.group) { const gb = this._groupUnionWorld(binding.group); if (gb) return { x: gb.x, y: gb.y, width: gb.w, height: gb.h }; } // round-5 B: a GROUP target → the live union bbox of members + image regions (el is irrelevant/absent for a group binding)
     if (binding && binding.lineGuid && el && el.type === 'record') { const lr = this._lineRectWorld(el, binding.lineGuid); if (lr) return { x: lr.x, y: lr.y, width: lr.w, height: lr.h }; }
     if (binding && binding.refGuidTarget && el && el.type === 'text') { const rr = this._refRunRectWorld(el, binding.refGuidTarget); if (rr) return { x: rr.x, y: rr.y, width: rr.w, height: rr.h }; } // round-5 A: route to a SPECIFIC inline ref run of a text note
@@ -1937,33 +1938,36 @@ class CanvasView {
   _ptInBBox(el, x, y) { const b = this._elBBox(el); return !!(b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); } // F2: is a world point inside an element's bbox (region-mark target test)
   // C3 (round 3): the two-button WHOLE-vs-REGION prompt shown at the drop point. "Whole" disarms the pending region-link
   // (the whole-element binding stays); "Pick a region" keeps it armed so the next drag on the element marks the sub-region.
-  _showRegionChoice(what, sx, sy) {
+  // C3/SECTIONS: a generalized drop-point chooser — rows = [{txt, on?, fn}]. The 2-button region prompt, the void-link
+  // menu, and the new section-DRILL menu all render through this (capped + a "more…" so a big section never makes an
+  // off-screen popup). Reuses the exact pxc-region-choice DOM/classes/dismissal of the old hardcoded menus.
+  _showNestingChoice(label, rows, sx, sy) {
     this._closeRegionChoice();
     const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
-    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Link to…'; box.appendChild(lab);
-    const mk = (txt, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
-    mk('Whole ' + what, () => { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; });
-    mk('Pick a region', () => { this._closeRegionChoice(); try { this.plugin.ui.addToaster({ title: 'Drag a box on the ' + what + ' to mark the region.', dismissible: true }); } catch (_e) {} this.dirty = true; }); // _pendingRegionLink stays armed → next drag on the element marks
+    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = label; box.appendChild(lab);
+    const add = (r) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn' + (r.on ? ' pxc-rc-on' : ''); b.textContent = r.txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); r.fn(); }); box.appendChild(b); };
+    const CAP = 8; (rows || []).slice(0, CAP).forEach(add);
+    if ((rows || []).length > CAP) { const more = rows.slice(CAP); let done = false; const mb = document.createElement('button'); mb.className = 'pxc-rc-btn'; mb.textContent = '+' + more.length + ' more…'; mb.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); if (done) return; done = true; mb.remove(); more.forEach(add); }); box.appendChild(mb); }
     this.wrap.appendChild(box);
-    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 150, bh = box.offsetHeight || 78;
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 160, bh = box.offsetHeight || 78;
     box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
     box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
+  }
+  _showRegionChoice(what, sx, sy) {
+    this._showNestingChoice('Link to…', [
+      { txt: 'Whole ' + what, fn: () => { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } },
+      { txt: 'Pick a region', fn: () => { this._closeRegionChoice(); try { this.plugin.ui.addToaster({ title: 'Drag a box on the ' + what + ' to mark the region.', dismissible: true }); } catch (_e) {} this.dirty = true; } }, // _pendingRegionLink stays armed → next drag on the element marks
+    ], sx, sy);
   }
   _closeRegionChoice() { if (this._regionChoiceEl) { try { this._regionChoiceEl.remove(); } catch (_e) {} this._regionChoiceEl = null; } }
   // round-5 D: an arrow dropped in the VOID → choose how to link its end. Pen/Lasso draw a precise REGION (over an image →
   // tracks it; empty space → a fixed world area); the third button keeps the existing element-group lasso. Clone of _showRegionChoice.
   _showRegionLinkChoice(arrow, key, sx, sy) {
-    this._closeRegionChoice();
-    const box = document.createElement('div'); box.className = 'pxc-region-choice'; this._regionChoiceEl = box;
-    const lab = document.createElement('div'); lab.className = 'pxc-rc-label'; lab.textContent = 'Link this end to…'; box.appendChild(lab);
-    const mk = (txt, fn) => { const b = document.createElement('button'); b.className = 'pxc-rc-btn'; b.textContent = txt; b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); }); box.appendChild(b); };
-    mk('✎ Pen a region', () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'pen'); });
-    mk('▢ Box a region', () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'lasso'); });
-    mk('⬚ Lasso elements (group)', () => { this._closeRegionChoice(); const a = this._byId(arrow.id); if (a && !a.isDeleted) { this._pendingGroupLink = { arrowId: a.id, key }; try { this.plugin.ui.addToaster({ title: 'Lasso a group of elements to connect to.', dismissible: true }); } catch (_e) {} } });
-    this.wrap.appendChild(box);
-    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600, bw = box.offsetWidth || 170, bh = box.offsetHeight || 96;
-    box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 10)) + 'px';
-    box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - bh / 2)) + 'px';
+    this._showNestingChoice('Link this end to…', [
+      { txt: '✎ Pen a region', fn: () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'pen'); } },
+      { txt: '▢ Box a region', fn: () => { this._closeRegionChoice(); this._armRegionDraw(arrow, key, 'lasso'); } },
+      { txt: '⬚ Lasso elements (group)', fn: () => { this._closeRegionChoice(); const a = this._byId(arrow.id); if (a && !a.isDeleted) { this._pendingGroupLink = { arrowId: a.id, key }; try { this.plugin.ui.addToaster({ title: 'Lasso a group of elements to connect to.', dismissible: true }); } catch (_e) {} } } },
+    ], sx, sy);
   }
   // round-5 F: "Connect from a region" — a centered Pen/Box chooser; the chosen tool draws a SOURCE region (arrow=null), then
   // green nubs appear on it and the next nub-drag starts a connection FROM the region.
@@ -2634,6 +2638,25 @@ class CanvasView {
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
+  // SECTIONS nesting: a short display name for an element (used in the drill menu rows).
+  _elShortName(e) {
+    if (!e) return 'item';
+    if (e.type === 'record') { try { const r = this._recFor(e.recordGuid); if (r && r.title) return String(r.title).slice(0, 24) || 'card'; } catch (_e) {} return 'card'; }
+    if (e.type === 'text') { const t = String(e.text || '').trim().replace(/\s+/g, ' '); return t ? t.slice(0, 20) : 'text'; }
+    if (e.type === 'image') return 'image';
+    return e.type || 'item';
+  }
+  // SECTIONS nesting: the deepest sub-target under (wx,wy) within a section → {sectionId, elementId, ...leaf} (the child's
+  // leaf-locator is delegated to the existing _bindingFor), or {elementId: frame.id} for the whole section. Shared by the
+  // cite/reference parity (Phase 2) so connections + references drill identically.
+  _drillTarget(frame, wx, wy) {
+    const tol = 8 / this.camera.zoom;
+    for (const c of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2)) {
+      if (c.isDeleted || c.secHidden || c.id === frame.id || c.type === 'frame' || c.type === 'arrow' || c.type === 'line') continue;
+      if (this._centerIn(c, frame) && hitElement(c, wx, wy, tol)) { const b = this._bindingFor(c, wx, wy); b.sectionId = frame.id; return b; }
+    }
+    return { elementId: frame.id };
+  }
   // SECTIONS (iter 3): collapse a section to its title bar — hide its contents (mark each child `secHidden` → skipped from
   // the grid → not rendered/hit), stash the full height + shrink to a title-bar box. Expand restores. Children stay OWNED
   // via secHidden (not geometry), so move/expand work after the shrink; the grid self-heals orphans if the section is deleted.
@@ -2723,6 +2746,8 @@ class CanvasView {
       if (b && b.group && ((b.group.ids && b.group.ids.length) || (b.group.regions && b.group.regions.length))) { groupT.push(b.group); for (const id of (b.group.ids || [])) { let s = byEl.get(id); if (!s) byEl.set(id, s = new Set()); s.add(a.id); } for (const rg of (b.group.regions || [])) { if (!rg.elId) continue; let s = byEl.get(rg.elId); if (!s) byEl.set(rg.elId, s = new Set()); s.add(a.id); } continue; } // round-5 B/D: a group target has no single elementId — index each MEMBER + region-image (free-space regions have no elId) for the select→highlight + outline
       if (!b || !b.elementId) continue;
       { let s = byEl.get(b.elementId); if (!s) byEl.set(b.elementId, s = new Set()); s.add(a.id); }
+      if (b.sectionId) { let s = byEl.get(b.sectionId); if (!s) byEl.set(b.sectionId, s = new Set()); s.add(a.id); } // SECTIONS nesting: a nested-child binding ALSO highlights the owning section
+
       if (b.lineGuid) { let s = lineT.get(b.elementId); if (!s) lineT.set(b.elementId, s = new Set()); s.add(b.lineGuid); }
       else if (b.refGuidTarget) { let s = refT.get(b.elementId); if (!s) refT.set(b.elementId, s = new Set()); s.add(b.refGuidTarget); } // round-5 A: a connection targeting a specific inline ref → flag that run
       else if (b.frac) { let r = regionT.get(b.elementId); if (!r) regionT.set(b.elementId, r = []); r.push({ frac: b.frac, fracPoly: b.fracPoly }); }
@@ -3071,6 +3096,7 @@ class CanvasView {
           if (s1) created.endBinding = this._bindingFor(s1, lp[0], lp[1]);
           // round-5 B/F: a group/source-region arrow (start = a group of ids OR image regions) must not snap its END back onto a start MEMBER or a start REGION's image (self-loop). Drop such an end-bind → free endpoint.
           if (created.endBinding && created.endBinding.elementId && created.startBinding && created.startBinding.group) { const g = created.startBinding.group, eid = created.endBinding.elementId; if ((g.ids && g.ids.indexOf(eid) >= 0) || (g.regions && g.regions.some((r) => r.elId === eid))) created.endBinding = null; }
+          if (created.endBinding && created.startBinding) { const sb = created.startBinding, eb = created.endBinding; if ((eb.sectionId && eb.sectionId === sb.elementId) || (sb.sectionId && sb.sectionId === eb.elementId)) created.endBinding = null; } // SECTIONS: a section can't connect to a card INSIDE itself (section ↔ its own child = self-loop)
           this._updateBindings();
           // F2 drop-to-mark + C3: dropped on an image/shape with NO region → offer WHOLE vs a region via a two-button prompt.
           if (s1 && (s1.type === 'image' || isRoughShape(s1.type)) && created.endBinding && !created.endBinding.frac && !created.endBinding.lineGuid) {
@@ -3083,6 +3109,20 @@ class CanvasView {
             this._pendingRegionLink = { arrowId: created.id, elId: s1.id, key: 'endBinding', refOnly: true };
             const sp2 = this.camera.worldToScreen(lp[0], lp[1]);
             this._showRefChoice(created, s1, 'endBinding', sp2.x, sp2.y);
+          }
+          // SECTIONS nesting: dropped on a SECTION (frame border/title) → a menu — Whole section / drill to a card / a REGION
+          // of an image inside it. Child rows set {sectionId, elementId}; the region row arms the existing region flow scoped
+          // to the child. Backward-compatible: a drop INSIDE the section on a card binds that card directly (child-wins).
+          else if (s1 && s1.type === 'frame' && this._frameChildren(s1).some((c) => !c.secHidden)) {
+            const sp2 = this.camera.worldToScreen(lp[0], lp[1]), kids = this._frameChildren(s1).filter((c) => !c.secHidden);
+            const rows = [{ txt: 'Whole section · ' + (s1.name || 'Section'), fn: () => { const a = this._byId(created.id); if (a) a.endBinding = { elementId: s1.id }; this._closeRegionChoice(); this._updateBindings(); this.dirty = true; this.scheduleSave(); } }];
+            for (const c of kids) {
+              const kind = c.type === 'record' ? 'Card' : c.type === 'image' ? 'Image' : c.type === 'text' ? 'Text' : 'Item';
+              // self-loop guard (parity with the auto-path at the nub-drop guard above): if the arrow STARTED on this same section, a card INSIDE it is a section↔own-child self-loop → refuse the end-bind (free endpoint).
+              rows.push({ txt: kind + ' · ' + this._elShortName(c), fn: () => { const a = this._byId(created.id); if (a) { const sbId = a.startBinding && a.startBinding.elementId; a.endBinding = (sbId === s1.id) ? null : { sectionId: s1.id, elementId: c.id }; } this._closeRegionChoice(); this._updateBindings(); this.dirty = true; this.scheduleSave(); } });
+              if (c.type === 'image' || isRoughShape(c.type)) rows.push({ txt: '   ↳ Region of ' + this._elShortName(c), fn: () => { const a = this._byId(created.id); if (!a) { this._closeRegionChoice(); return; } const sbId = a.startBinding && a.startBinding.elementId; if (sbId === s1.id) { a.endBinding = null; this._closeRegionChoice(); this._updateBindings(); this.dirty = true; this.scheduleSave(); return; } a.endBinding = { sectionId: s1.id, elementId: c.id }; this._pendingRegionLink = { arrowId: created.id, elId: c.id, key: 'endBinding', sectionId: s1.id }; this._closeRegionChoice(); this._updateBindings(); try { this.plugin.ui.addToaster({ title: 'Drag a box on the image to mark the region.', dismissible: true }); } catch (_e) {} this.dirty = true; this.scheduleSave(); } });
+            }
+            this._showNestingChoice('Link to section…', rows, sp2.x, sp2.y);
           }
           // round-5 D (drop-in-void): released on EMPTY canvas while the START is anchored → a menu to link the end: Pen / Box a
           // REGION (drawn target), or Lasso elements (group). Replaces the old auto-arm of the element-group lasso.
@@ -3104,7 +3144,7 @@ class CanvasView {
         const rel = prl && this._byId(prl.elId), arrow = prl && this._byId(prl.arrowId);
         if (rect && rect.w > 3 && rect.h > 3 && rel && !rel.isDeleted && arrow && !arrow.isDeleted && arrow[prl.key]) {
           const frac = this._imgRegionFrac(rel, rect);
-          if (frac) { arrow[prl.key] = { elementId: rel.id, frac }; this._updateBindings(); this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Linked to the marked region.', dismissible: true }); } catch (_e) {} }
+          if (frac) { const nb = { elementId: rel.id, frac }; if (prl.sectionId && this._byId(prl.sectionId)) nb.sectionId = prl.sectionId; arrow[prl.key] = nb; this._updateBindings(); this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Linked to the marked region.', dismissible: true }); } catch (_e) {} } // SECTIONS: a region-of-image-child drill carries the section CONTEXT through the region detour (so the section still highlights + breadcrumb survives)
         }
         this.dirty = true;
       }

@@ -1,5 +1,33 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.90.0 — NESTED/DRILL-DOWN TARGET Phase 0+1: drop an arrow on a section → drill into it (2026-06-23)
+Backlog A (design: `NESTED-TARGET-DESIGN.md`). Target a Section as a WHOLE, then drill DEEPER — a card inside,
+or a REGION of an image inside — unified on ONE optional `sectionId` CONTEXT field. Additive + backward-compatible
+by construction: the flat `elementId` stays the geometry resolution source of truth; `_bindTargetShape` gains NO
+new resolver branch; pre-existing flat bindings/refs round-trip byte-identically (no migration, no auto-promote).
+- **Model (3 states):** whole section `{elementId:frameId}` (today, unchanged) · child-in-section
+  `{sectionId:frameId, elementId:childId}` · region-in-child `{sectionId, elementId:childId, frac/fracPoly}`.
+  `sectionId` is pure context (highlight/collapse/breadcrumb), NEVER used in geometry resolution.
+- **Helpers:** `_drillTarget(frame,wx,wy)` (topmost child under point via `_gridTopFirst`+`_centerIn`+`hitElement`,
+  delegates the leaf-locator to the EXISTING `_bindingFor`, stamps `sectionId`; no child → whole section) ·
+  `_elShortName(e)` (record→title, text→snippet, image→'image'). `_showRegionChoice`/`_showRegionLinkChoice`
+  generalized onto a shared `_showNestingChoice(label, rows, sx, sy)` (rows `[{txt,on?,fn}]`, capped ≤8 + "more…",
+  same `pxc-region-choice` DOM) — the 3 existing menus become thin callers, zero behavior change.
+- **Phase 1 — connection drill:** onUp, dropping an arrow on a section WITH visible children opens a menu —
+  Whole section · per child (Card/Image/Text · name) · for image/shape children "↳ Region of name" (re-arms the
+  existing `_pendingRegionLink` region flow scoped to the child). `_updateBindings` indexes the arrow under
+  `byEl[b.sectionId]` too (section highlights when a drilled child is bound).
+- **MUST-haves (both verified):** collapse-clamp in `_bindTargetShape` — a child hidden by collapse (`el.secHidden`)
+  routes the endpoint to its section title-bar (not the off-screen child); falls through gracefully if the section
+  was deleted. Self-loop guard on BOTH the auto-resolved path AND the menu-commit path — a section can't connect to
+  a card inside itself (`sbId === sectionId` → refuse the end-bind).
+- **Adversarial review: §1–7 clean (refactor identical-output, binding backward-compat, collapse-clamp, sectionId
+  index, persistence all solid); fixed §8 (high — region-of-image-child drill dropped `sectionId` at the regionmark
+  finalizer; now carried on the pending link + re-stamped) + §9 (medium — self-loop guard bypassed the menu path;
+  now re-checked in each child/region row's commit).** Node `pxc_nesting` 23/23 + all regressions green.
+- **Next (Phase 2, re-armed loop):** cite/reference parity — `sec?` on cite targets via the SAME `_drillTarget`,
+  the `S<frameId>` filename segment (strip-first), breadcrumb through xref/backref; same `_showNestingChoice` on Cite.
+
 ## ✅ v1.89.0 — FEATURE LOOP iter 6 (final): arrowhead styles — arrow / triangle / dot / bar (2026-06-23)
 Backlog C. The head value (`endArrowhead`/`startArrowhead`) now carries a STYLE, not just truthiness.
 - `drawArrowhead(...,style)`: dot (●, filled circle) · bar (│, perpendicular) · triangle (▶, filled) · arrow (open V,
