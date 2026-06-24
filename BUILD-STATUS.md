@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.86.0 — FEATURE LOOP iter 3: Sections collapse / expand (Heptabase) (2026-06-23)
+A Section now folds to its title bar, hiding its contents (command "Plexus: Collapse / expand section" on the selected
+section; a ▸ marks a collapsed one).
+- **Hide via the spatial grid, not scattered skip-sites:** collapse marks each child `secHidden = sectionId`; `_ensureGrid`
+  skips those elements (a pre-pass collects collapsed-section ids) — the single index every render + hit-test path flows
+  through. Self-healing: a child whose owner is deleted/expanded gets un-hidden on the next grid rebuild. Collapse stashes
+  `_fullH` + shrinks to a title bar; children stay OWNED by `secHidden` (not geometry) so move/expand work after the shrink;
+  moving a collapsed section drags its hidden children. State (`collapsed`/`_fullH`/`secHidden`) is plain element fields →
+  persists through save + chunking (children are chunked, never lost).
+- **Adversarial review found the grid was NOT the only path — all fixed:** **SEVERE** Select-All / the render selected-
+  force-push (6118) revealed hidden children → gated on `!secHidden` (+ `_selectAll` skips them). **HIGH** lasso/marquee
+  (`_elsInLoop`, scans the full scene) selected hidden children → skip added. Cosmetic export/minimap leaks (PNG/SVG/region-
+  snapshot/free `sceneBounds`/minimap dots all iterate `scene.elements` directly) → `secHidden` skip for screen/export
+  parity. Resize-while-collapsed preserved via `max()` on expand. Delete-a-section → un-hides its cards to their original
+  spots (intentional, non-destructive); a bound arrow to a card inside a collapsed section still points to its hidden
+  location (v2 could re-route). Node `pxc_collapse` 13/13 + all regressions green.
+- 3 of up to 6 loop iterations shipped. Sections feature A is now rich (bind to/from whole · color · collapse). REMAINING:
+  section→Thymer-record relation (ASK the user — ambiguous UX). NEXT loop: backlog B (backgrounds/fills) or C (arrowheads).
+
 ## ✅ v1.85.0 — FEATURE LOOP iter 2: connect FROM a whole section (bidirectional) (2026-06-23)
 Completes iter 1's binding: you could point an arrow AT a section; now you can drag a connection FROM one.
 - `_connHover` (the hover that shows connect-nubs) previously excluded frames; now it only excludes arrow/line.

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.85.0';
+const PLEXUS_VERSION = '1.86.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1121,7 +1121,7 @@ function normRect(el) {
 function sceneBounds(scene) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const el of scene.elements) {
-    if (el.isDeleted) continue;
+    if (el.isDeleted || el.secHidden) continue;
     // approximate rotated bbox via the 4 rotated corners
     const cx = el.x + el.width / 2, cy = el.y + el.height / 2, a = el.angle || 0, c = Math.cos(a), s = Math.sin(a);
     for (const [lx, ly] of [[el.x, el.y], [el.x + el.width, el.y], [el.x + el.width, el.y + el.height], [el.x, el.y + el.height]]) {
@@ -1299,7 +1299,7 @@ function exportPng(scene, maxPx = 1024, opts) {
         if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
         ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
         const _pd = PXC_DARK; PXC_DARK = false; // UX-6: export is always TRUE colour (the dark treatment is display-only)
-        try { for (const el of scene.elements) if (!el.isDeleted) drawElement(ctx, el); } finally { PXC_DARK = _pd; }
+        try { for (const el of scene.elements) if (!el.isDeleted && !el.secHidden) drawElement(ctx, el); } finally { PXC_DARK = _pd; }
         cv.toBlob((blob) => resolve(blob), 'image/png');
       } catch (_e) { resolve(null); }
     };
@@ -1321,7 +1321,7 @@ function exportSvg(scene) {
   p.push(`<rect width="100%" height="100%" fill="${svgEsc((scene.appState && scene.appState.viewBackgroundColor) || '#ffffff')}"/>`);
   p.push(`<g transform="translate(${(-b.x + pad).toFixed(2)},${(-b.y + pad).toFixed(2)})">`);
   for (const el of scene.elements) {
-    if (el.isDeleted) continue;
+    if (el.isDeleted || el.secHidden) continue;
     const sw = el.strokeWidth || 2, sc = el.strokeColor || '#1e1e1e';
     const fillc = (el.backgroundColor && el.backgroundColor !== 'transparent') ? el.backgroundColor : 'none';
     const op = el.opacity == null ? 1 : el.opacity;
@@ -1802,8 +1802,12 @@ class CanvasView {
     if (this._grid && !this._gridDirty && this._gridLen === this.scene.elements.length) return this._grid;
     const g = new SpatialGrid(256), zi = new Map(), els = this.scene.elements;
     let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    // SECTIONS collapse: a child of a COLLAPSED section is hidden by being SKIPPED from the grid — the single choke point
+    // every render + hit-test path flows through. Self-healing: an element whose owning section is gone/expanded is un-hidden.
+    let collapsedFrames = null; for (let j = 0; j < els.length; j++) { const f = els[j]; if (!f.isDeleted && f.type === 'frame' && f.collapsed) (collapsedFrames || (collapsedFrames = new Set())).add(f.id); }
     for (let i = 0; i < els.length; i++) {
       const el = els[i]; zi.set(el.id, i); if (el.isDeleted) continue;
+      if (el.secHidden) { if (collapsedFrames && collapsedFrames.has(el.secHidden)) continue; delete el.secHidden; } // hidden child → skip; orphan → un-hide
       let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
       if (el.angle) bb = rotatedAABB(bb, el.angle); // index the rotated footprint so rotated shapes stay hittable
       g.insert(el, bb);
@@ -2185,7 +2189,7 @@ class CanvasView {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
     for (const el of this.scene.elements) {
-      if (el.isDeleted || el.type === 'frame' || el.id === excludeId) continue;
+      if (el.isDeleted || el.secHidden || el.type === 'frame' || el.id === excludeId) continue; // SECTIONS: lasso/marquee skips collapsed-section children (this path scans the full scene, not the grid)
       if (skipConnectors && (el.type === 'arrow' || el.type === 'line')) continue; // group-lasso skips connectors; the lasso SELECT tool keeps them (parity with the old grid path)
       if (el.type === 'text') { try { measureRuns(el); } catch (_e) {} } // ensure width/height are current → correct bbox (was the bug)
       let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
@@ -2523,7 +2527,7 @@ class CanvasView {
     ctx.setTransform(scale, 0, 0, scale, -b.x * scale, -b.y * scale);
     if (clipPoly && clipPoly.length >= 3) { ctx.beginPath(); ctx.moveTo(clipPoly[0].x, clipPoly[0].y); for (let i = 1; i < clipPoly.length; i++) ctx.lineTo(clipPoly[i].x, clipPoly[i].y); ctx.closePath(); ctx.clip(); }
     ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(b.x, b.y, b.w, b.h); // bg inside clip only
-    for (const el of this.scene.elements) { if (el.isDeleted || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images render; cards skipped (async)
+    for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images render; cards skipped (async)
     return cv.toDataURL('image/png');
   }
   // P1.5: Printable Layout — named frames become ordered pages; opens a print view (Save as PDF).
@@ -2606,6 +2610,23 @@ class CanvasView {
   }
   _centerIn(el, fr) { const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2; return cx >= fr.x && cx <= fr.x + fr.width && cy >= fr.y && cy <= fr.y + fr.height; }
   _frameChildren(fr) { return this.scene.elements.filter((e) => !e.isDeleted && e.type !== 'frame' && e.id !== fr.id && this._centerIn(e, fr)); } // P1.0
+  // SECTIONS (iter 3): collapse a section to its title bar — hide its contents (mark each child `secHidden` → skipped from
+  // the grid → not rendered/hit), stash the full height + shrink to a title-bar box. Expand restores. Children stay OWNED
+  // via secHidden (not geometry), so move/expand work after the shrink; the grid self-heals orphans if the section is deleted.
+  _toggleSectionCollapse(fr) {
+    if (!fr || fr.type !== 'frame') return;
+    if (!fr.collapsed) {
+      for (const c of this._frameChildren(fr)) c.secHidden = fr.id; // compute children from the FULL bounds, then shrink
+      fr._fullH = fr.height; fr.collapsed = true; fr.height = Math.min(fr.height, 28);
+    } else {
+      fr.collapsed = false; if (fr._fullH != null) { fr.height = Math.max(fr._fullH, fr.height); delete fr._fullH; } // max() so a resize WHILE collapsed isn't silently lost
+      for (const c of this.scene.elements) if (c.secHidden === fr.id) delete c.secHidden;
+    }
+    // NOTE (intentional): deleting a collapsed section un-hides its children (the grid self-heals on the next rebuild) — i.e.
+    // deleting the section removes only the BOUNDARY and returns its cards to their original spots (non-destructive). An arrow
+    // bound to a card INSIDE a collapsed section still routes to that card's (now-hidden) original position — a v2 could re-route it to the section.
+    this._gridDirty = true; this._cacheValid = false; this.dirty = true; this.scheduleSave();
+  }
   _bindableAt(wx, wy, excludeId, excludeId2) {
     const tol = 8 / this.camera.zoom, labelH = 16 / this.camera.zoom;
     // CONNECTIONS: bind an endpoint to ANY content element (card / linecard / image / text-label / shape / board / …) so you
@@ -2720,7 +2741,7 @@ class CanvasView {
     }
   }
   _duplicate() { if (!this.selected.size) return; const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean); this.selected.clear(); for (const c of this._cloneBatch(els, 24, 24)) { this.scene.elements.push(c); this.selected.add(c.id); } this.dirty = true; this.scheduleSave(); }
-  _selectAll() { this.selected = new Set(this.scene.elements.filter((x) => !x.isDeleted).map((x) => x.id)); this.dirty = true; }
+  _selectAll() { this.selected = new Set(this.scene.elements.filter((x) => !x.isDeleted && !x.secHidden).map((x) => x.id)); this.dirty = true; } // SECTIONS: don't select hidden (collapsed-section) children
   _topGroup(el) { return el.groupIds && el.groupIds.length ? el.groupIds[el.groupIds.length - 1] : null; }
   _groupMembers(gid) { return gid ? this.scene.elements.filter((e) => !e.isDeleted && e.groupIds && e.groupIds.includes(gid)).map((e) => e.id) : []; }
   _cloneBatch(els, dx, dy) { const gmap = {}; return els.map((el) => { const c = this._cloneEl(el, dx, dy); if (c.groupIds && c.groupIds.length) c.groupIds = c.groupIds.map((g) => (gmap[g] || (gmap[g] = 'g' + newId()))); return c; }); }
@@ -2925,7 +2946,8 @@ class CanvasView {
           this._elDrag = true; this._dragLayerValid = false; // PERF: drag a static-layer cache (build once, then blit + draw only the movers)
           // P1.0: moving a frame carries the elements inside it.
           const seen = new Set(this.selected);
-          for (const m of [...moveEls]) { if (m.el.type === 'frame') for (const c of this._frameChildren(m.el)) if (!seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } }
+          for (const m of [...moveEls]) { if (m.el.type === 'frame') { for (const c of this._frameChildren(m.el)) if (!seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } if (m.el.collapsed) for (const c of this.scene.elements) if (c.secHidden === m.el.id && !c.isDeleted && !seen.has(c.id)) { seen.add(c.id); moveEls.push(mk(c)); } } } // a COLLAPSED section is shrunk to its title bar, so _frameChildren (center-in) misses its now-outside children → also drag the hidden ones it owns
+
           // S10: press-and-hold a record/board card to open it (cancelled by any drag or release).
           const lpMs = (this.plugin._settings && this.plugin._settings.longPressMs) || 0;
           if (lpMs && (hit.type === 'record' || hit.type === 'board')) { const tgt = hit; lpTimer = setTimeout(() => { lpTimer = null; if (!moved && mode === 'move') this._openCard(tgt); }, lpMs); }
@@ -4571,10 +4593,11 @@ class CanvasView {
     ctx.save();
     const r = 6 / z;
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(el.x, el.y, el.width, el.height, r); else ctx.rect(el.x, el.y, el.width, el.height);
-    if (el.backgroundColor && el.backgroundColor !== 'transparent') { ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.12; ctx.fillStyle = el.backgroundColor; ctx.fill(); ctx.restore(); } // SECTION tint — low alpha so the contents inside stay readable
+    if (el.collapsed) { ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.18; ctx.fillStyle = (el.backgroundColor && el.backgroundColor !== 'transparent') ? el.backgroundColor : (PXC_DARK ? '#2a2e3a' : '#eef0f4'); ctx.fill(); ctx.restore(); } // collapsed → a solid title bar
+    else if (el.backgroundColor && el.backgroundColor !== 'transparent') { ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.12; ctx.fillStyle = el.backgroundColor; ctx.fill(); ctx.restore(); } // SECTION tint — low alpha so the contents inside stay readable
     ctx.strokeStyle = el.strokeColor || '#9aa0a6'; ctx.lineWidth = 1.4 / z; ctx.stroke();
     ctx.font = (12 / z) + 'px system-ui, sans-serif'; ctx.fillStyle = el.strokeColor || '#9aa0a6'; ctx.textBaseline = 'bottom'; ctx.textAlign = 'left';
-    ctx.fillText(el.name || 'Section', el.x + 2 / z, el.y - 4 / z);
+    ctx.fillText((el.collapsed ? '▸ ' : '') + (el.name || 'Section'), el.x + 2 / z, el.y - 4 / z);
     ctx.restore();
   }
   _drawBoardCard(ctx, el) {
@@ -6095,7 +6118,7 @@ class CanvasView {
       const inView = (el) => { const x0 = Math.min(el.x, el.x + (el.width || 0)), y0 = Math.min(el.y, el.y + (el.height || 0)), x1 = Math.max(el.x, el.x + (el.width || 0)), y1 = Math.max(el.y, el.y + (el.height || 0)); return x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1; };
       this._ensureGrid();
       const cand = this._grid.query(vx0, vy0, vx1 - vx0, vy1 - vy0); // O(visible) — independent of total scene size, so the re-raster stays cheap at 100K
-      if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !have.has(e.id)) cand.push(e); } }
+      if (this.selected.size) { const have = new Set(); for (const e of cand) have.add(e.id); for (const id of this.selected) { const e = this._byId(id); if (e && !e.secHidden && !have.has(e.id)) cand.push(e); } } // SECTIONS: never force-push a collapsed-section child past the cull (else Select-All would reveal hidden contents)
       const zi = this._zIndex; cand.sort((a, b) => (zi.get(a.id) || 0) - (zi.get(b.id) || 0));
       const ex = dragIds; let drawn = 0;
       for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // frames behind everything
@@ -6388,7 +6411,7 @@ class CanvasView {
     cv.width = Math.max(1, Math.ceil(r.w * d)); cv.height = Math.max(1, Math.ceil(r.h * d));
     const c = cv.getContext('2d'); c.setTransform(d, 0, 0, d, 0, 0); c.clearRect(0, 0, r.w, r.h); c.globalAlpha = 0.62;
     let n = 0; const cap = 4000;
-    for (const el of this.scene.elements) { if (el.isDeleted) continue; if (++n > cap) break;
+    for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden) continue; if (++n > cap) break;
       const x = mapp.ox + (el.x || 0) * mapp.scale, y = mapp.oy + (el.y || 0) * mapp.scale;
       const w = Math.max(1.4, Math.abs(el.width || 0) * mapp.scale), h = Math.max(1.4, Math.abs(el.height || 0) * mapp.scale);
       c.fillStyle = el.type === 'frame' ? 'rgba(154,160,166,0.7)' : (el.strokeColor || '#7c5cff');
@@ -6572,6 +6595,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Bulk set property (selected cards)', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._bulkBrush(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Quick-capture (new record card)', icon: 'ti-plus', onSelected: () => { const v = this._activeView(); if (v) v._quickCapture(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New record card (here)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._newRecordCardAt(c.x, c.y); } } }); // EDIT-2
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Collapse / expand section', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (!v) return; const f = v._singleSel(); if (f && f.type === 'frame') v._toggleSectionCollapse(f); else { try { this.ui.addToaster({ title: 'Plexus: select a single section first.', dismissible: true }); } catch (_e) {} } } }); // SECTIONS iter 3
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Datacore card (here)', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._insertQueryNode('dc: @task', c.x, c.y); } } }); // EDIT-4
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
