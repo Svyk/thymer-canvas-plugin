@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.92.0 — FEATURE LOOP: curved + multi-point arrow ROUTING (Excalidraw) (2026-06-23)
+Backlog B. Connections already stored an N-point `points[]` + an `elbowed` orthogonal route (`routedPoints`); this adds
+the curved render mode + interactive waypoint editing the model already supported but had no UI for.
+- **Curved mode** — `el.curved` (peer of `elbowed`, mutually exclusive). `drawLinear` strokes a smooth midpoint-quadratic
+  path (`pxcSmoothPath`) THROUGH the points when `curved && pts.length>=3` (clean, not rough — rough+curve is messy;
+  respects dash). Endpoints are exact, so arrowheads still anchor on the last/first raw chord (tangent matches).
+- **Waypoint editing** on a single selected connection: drag a real point handle; press a **ghost mid-dot** to insert a
+  bend and drag it out (clears `elbowed` → custom route); **dblclick** an interior waypoint to delete it (endpoints can't
+  be deleted; a 2-pt arrow's dblclick still edits its label). New `editpt` pointer mode. Grabbing an endpoint detaches its
+  binding (no snap-back) and re-binds on drop if released on an element (small snap); interior drags leave bindings intact.
+- **Routing picker** (／ straight · ⌐ elbow · ∿ curved) added to the connection-style panel via `_setConnRouting`.
+- **SVG export** now honours routing (`routedPoints` + a curved `<path>`) — elbow/curved/waypoints export faithfully
+  (was a flat 2-pt polyline).
+- **Adversarial review: clean on all 6 axes** (visibility/hittability sweep of every scene.elements path — render/hit/
+  export/minimap; onDown ordering; binding integrity; insert/delete; mutual-exclusion+persistence; `_editPt` lifecycle).
+  Fixed the one low-sev finding: `onPtrCancel` now resets `_editPt` (a mid-drag cancel left a detached endpoint). Node
+  `pxc_curvedarrow` 21/21 + all regressions green. Known minor: hit-test uses the raw straight segments, so clicking a
+  curved arrow's bulge can miss by a few px (benign).
+
 ## ✅ v1.91.0 — NESTED/DRILL-DOWN TARGET Phase 2: cite/reference parity (section breadcrumb) (2026-06-23)
 Backlog A, final nested-target phase. A citation made from inside a section now records WHICH section as pure
 breadcrumb CONTEXT — symmetric with the connection drill's `sectionId` (v1.90.0). Additive + backward-compatible

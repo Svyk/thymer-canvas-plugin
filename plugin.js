@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.91.0';
+const PLEXUS_VERSION = '1.92.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -847,11 +847,22 @@ function pxcPolyMidpoint(pts) {
   for (let i = 0; i < seg.length; i++) { if (half <= seg[i] || i === seg.length - 1) { const t = seg[i] > 0 ? half / seg[i] : 0; return { x: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, y: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t }; } half -= seg[i]; }
   return { x: pts[0][0], y: pts[0][1] };
 }
+// B (curved routing): a smooth path THROUGH the points — midpoint-quadratic (Catmull-Rom-ish). Endpoints are exact (so
+// arrowheads still anchor on the last/first chord); interior points become the bend controls. Pure geometry, world coords.
+function pxcSmoothPath(ctx, p) {
+  const n = p.length; ctx.moveTo(p[0][0], p[0][1]);
+  if (n === 2) { ctx.lineTo(p[1][0], p[1][1]); return; }
+  for (let i = 1; i < n - 2; i++) { const xc = (p[i][0] + p[i + 1][0]) / 2, yc = (p[i][1] + p[i + 1][1]) / 2; ctx.quadraticCurveTo(p[i][0], p[i][1], xc, yc); }
+  ctx.quadraticCurveTo(p[n - 2][0], p[n - 2][1], p[n - 1][0], p[n - 1][1]);
+}
 function drawLinear(ctx, el) {
   const pts = routedPoints(el); if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
   ctx.save(); applyStroke(ctx, { stroke: el.strokeColor, strokeWidth: el.strokeWidth, opacity: el.opacity });
   const ls = el.lineStyle; // round-5 C: dashed/dotted draw a CLEAN poly-line (rough + dash = messy); solid keeps the rough double-pass
-  if (ls === 'dashed' || ls === 'dotted') {
+  if (el.curved && pts.length >= 3) { // B: a curved connection — clean smooth stroke (rough + curve = messy), respects dash
+    if (ls === 'dashed' || ls === 'dotted') { const sw = el.strokeWidth || 2; ctx.setLineDash(ls === 'dotted' ? [Math.max(0.5, sw * 0.2), sw * 2 + 3] : [sw * 4 + 6, sw * 3 + 4]); }
+    ctx.beginPath(); pxcSmoothPath(ctx, pts); ctx.stroke(); ctx.setLineDash([]);
+  } else if (ls === 'dashed' || ls === 'dotted') {
     const sw = el.strokeWidth || 2; ctx.setLineDash(ls === 'dotted' ? [Math.max(0.5, sw * 0.2), sw * 2 + 3] : [sw * 4 + 6, sw * 3 + 4]);
     ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
     ctx.setLineDash([]); // arrowheads always solid
@@ -1340,7 +1351,9 @@ function exportSvg(scene) {
     else if (el.type === 'cylinder') { const e = Math.min(Math.abs(el.height) * 0.18, 18), rx = el.width / 2, ry = e / 2, cx = el.x + el.width / 2; p.push(`<g${rot}><path d="M${el.x},${(el.y + ry).toFixed(1)} L${el.x},${(el.y + el.height - ry).toFixed(1)} A${rx.toFixed(1)},${ry.toFixed(1)} 0 0 0 ${el.x + el.width},${(el.y + el.height - ry).toFixed(1)} L${el.x + el.width},${(el.y + ry).toFixed(1)}" fill="${fillc}" stroke="${sc}" stroke-width="${sw}" opacity="${op}"/><ellipse cx="${cx}" cy="${(el.y + ry).toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="${fillc}" stroke="${sc}" stroke-width="${sw}" opacity="${op}"/></g>`); }
     else if (el.type === 'icon') { const sz = Math.min(Math.abs(el.width), Math.abs(el.height)) || el.fontSize || 24; p.push(`<text x="${(el.x + el.width / 2).toFixed(1)}" y="${(el.y + el.height / 2).toFixed(1)}" font-family="tabler-icons" font-size="${sz}" fill="${sc}" text-anchor="middle" dominant-baseline="central" opacity="${op}"${rot}>${svgEsc(el.glyph || '')}</text>`); }
     else if (el.type === 'text') { const fs = el.fontSize || 24, ff = svgEsc((el.fontFamily && el.fontFamily !== 'system-ui, sans-serif') ? el.fontFamily : PLEXUS_DEFAULT_FONT), lines = String(el.text || '').split('\n'); const ts = lines.map((ln, i) => `<tspan x="${el.x}" dy="${i === 0 ? fs : (fs * 1.25).toFixed(1)}">${svgEsc(ln)}</tspan>`).join(''); p.push(`<text font-family="${ff}" font-size="${fs}" fill="${sc}" opacity="${op}">${ts}</text>`); }
-    else if (el.type === 'arrow' || el.type === 'line') { const pts = (el.points || []).map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
+    else if (el.type === 'arrow' || el.type === 'line') { const rp = routedPoints(el) || el.points || []; const f = (n) => n.toFixed(1); // B: export honours routing — elbow's derived path + curved as a smooth <path> (was a flat 2-pt polyline)
+      if (el.curved && rp.length >= 3) { let d = 'M' + f(rp[0][0]) + ',' + f(rp[0][1]); for (let i = 1; i < rp.length - 2; i++) d += ' Q' + f(rp[i][0]) + ',' + f(rp[i][1]) + ' ' + f((rp[i][0] + rp[i + 1][0]) / 2) + ',' + f((rp[i][1] + rp[i + 1][1]) / 2); d += ' Q' + f(rp[rp.length - 2][0]) + ',' + f(rp[rp.length - 2][1]) + ' ' + f(rp[rp.length - 1][0]) + ',' + f(rp[rp.length - 1][1]); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
+      else { const pts = rp.map((q) => q.map((n) => f(n)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); } }
     else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
     else if (el.type === 'image') { const f = scene.files && scene.files[el.fileId]; if (f && f.dataURL) p.push(`<image x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" href="${svgEsc(f.dataURL)}" opacity="${op}" preserveAspectRatio="none"/>`); }
   }
@@ -1833,7 +1846,18 @@ class CanvasView {
   _gridStyle() { return (this.scene.appState && this.scene.appState.gridStyle) || 'dots'; } // B: 'dots' (default) | 'lines'
   _setGridStyle(s) { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridStyle = (s === 'lines' ? 'lines' : 'dots'); if (!this._gridOn()) this.scene.appState.gridModeEnabled = true; this.dirty = true; this.scheduleSave(); return this.scene.appState.gridStyle; } // setting a style turns the grid ON if it was off
   // Phase 8: elbow-arrow toggle on the selected arrow/line elements.
-  _toggleElbow() { let ch = false, on = null; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = !el.elbowed; on = el.elbowed; ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); } return on; }
+  _toggleElbow() { let ch = false, on = null; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = !el.elbowed; if (el.elbowed) el.curved = false; on = el.elbowed; ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); this._connStyleId = null; } return on; } // B: elbow + curved are mutually-exclusive routing modes
+  // B (curved/multi-point routing): set a connection's routing mode — straight | elbow | curved (mutually exclusive). Curved
+  // bends THROUGH the points; the user adds bends by dragging a ghost mid-dot into a real waypoint (see _linePointAt).
+  _setConnRouting(mode) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && (el.type === 'arrow' || el.type === 'line')) { el.elbowed = (mode === 'elbow'); el.curved = (mode === 'curved'); ch = true; } } if (ch) { this._updateBindings(); this.dirty = true; this.scheduleSave(); this._connStyleId = null; } }
+  // B: hit-test a selected connection's editable points (screen space). A REAL point wins over a segment-midpoint ghost.
+  // Operates on the RAW el.points (what you edit) — NOT routedPoints (elbow's 4 derived points aren't individually stored).
+  _linePointAt(el, sp) {
+    const pts = el && el.points; if (!pts || pts.length < 2) return null;
+    for (let i = 0; i < pts.length; i++) { const s = this.camera.worldToScreen(pts[i][0], pts[i][1]); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 9) return { kind: 'pt', i }; }
+    for (let i = 0; i < pts.length - 1; i++) { const s = this.camera.worldToScreen((pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 8) return { kind: 'mid', i }; }
+    return null;
+  }
   // Phase 8: presentation/view mode — hide chrome, fit the scene, read-only until Esc.
   _fitToBounds(b, pad) {
     pad = pad || 60;
@@ -2131,6 +2155,13 @@ class CanvasView {
     mk(sg2, '→', heads === 'single', () => this._setConnHeads('single'), 'Single');
     mk(sg2, '↔', heads === 'double', () => this._setConnHeads('double'), 'Double');
     r2.appendChild(sg2);
+    // B: routing mode — straight | elbow (right-angle) | curved (drag a point to bend). Mutually exclusive.
+    const curRoute = arrow.elbowed ? 'elbow' : arrow.curved ? 'curved' : 'straight';
+    const sg4 = seg('pxc-cs-route');
+    mk(sg4, '／', curRoute === 'straight', () => this._setConnRouting('straight'), 'Straight');
+    mk(sg4, '⌐', curRoute === 'elbow', () => this._setConnRouting('elbow'), 'Elbow (right-angle)');
+    mk(sg4, '∿', curRoute === 'curved', () => this._setConnRouting('curved'), 'Curved — drag the dot on a segment to add a bend');
+    r2.appendChild(sg4);
     box.appendChild(r2);
     // Row 2b: arrowhead STYLE (applies to the present head(s); picking one adds an end head if there is none).
     const r2b = document.createElement('div'); r2b.className = 'pxc-cs-row';
@@ -2985,6 +3016,17 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
+        // B (curved/multi-point): a single selected connection shows draggable point handles + ghost mid-dots. Press a REAL
+        // point → drag it (an endpoint detaches its binding so it won't snap back); press a ghost MID-dot → insert a real
+        // waypoint there and drag it out (a custom waypoint clears orthogonal elbow auto-routing). Before the body-move hit.
+        if (sel && (sel.type === 'arrow' || sel.type === 'line') && sel.points && sel.points.length >= 2) {
+          const ph = this._linePointAt(sel, sp);
+          if (ph) {
+            if (ph.kind === 'mid') { const a = sel.points[ph.i], b = sel.points[ph.i + 1]; sel.points.splice(ph.i + 1, 0, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); sel.elbowed = false; this._editPt = { el: sel, i: ph.i + 1 }; }
+            else { this._editPt = { el: sel, i: ph.i }; if (ph.i === 0) sel.startBinding = null; else if (ph.i === sel.points.length - 1) sel.endBinding = null; }
+            mode = 'editpt'; this._elDrag = true; this._dragLayerValid = false; linearBBox(sel); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return;
+          }
+        }
         // round-5 F (connect-from-region): pressing a SOURCE-region nub draws an arrow whose START is the drawn region.
         const srNub = this._sourceNubAt(sp);
         if (srNub) { mode = 'connect'; created = makeLinear(srNub.x, srNub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { group: { ids: [], regions: [srNub.region] } }; created._srcRegion = srNub.region; this.scene.elements.push(created); this._pendingSourceRegion = null; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } // _srcRegion marker → a tiny tap re-arms the pending source region in onUp
@@ -3087,6 +3129,7 @@ class CanvasView {
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
     };
     const onUp = (e) => {
       if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
@@ -3193,11 +3236,21 @@ class CanvasView {
         }
       }
       else if ((mode === 'resize' || mode === 'rotate') && moved) { this.scheduleSave(); }
+      else if (mode === 'editpt' && this._editPt) { // B: a dropped ENDPOINT re-binds if released ON an element (small snap radius); a moved waypoint just commits
+        const ep = this._editPt, el = ep.el;
+        if (el && !el.isDeleted && el.points && (ep.i === 0 || ep.i === el.points.length - 1)) {
+          const p = el.points[ep.i], otherB = ep.i === 0 ? el.endBinding : el.startBinding, exId = otherB && otherB.elementId;
+          const t = this._bindableAt(p[0], p[1], el.id, exId) || this._nearestBindable(p[0], p[1], 18, el.id, exId);
+          if (t) { const b = this._bindingFor(t, p[0], p[1]); if (ep.i === 0) el.startBinding = b; else el.endBinding = b; this._updateBindings(); }
+        }
+        if (el) linearBBox(el);
+        this.scheduleSave();
+      }
       else if (mode === 'pan' && moved) { this._saveCamera(); this._panMode = false; } // pan ended → next render full-rasters the oversized layer at the new camera + resets the CSS transform
       this.wrap.classList.remove('pxc-panning'); this.wrap.classList.remove('pxc-pencursor'); // S4
       if (this._penForced) { this._penForced = false; this.tool = 'select'; this._syncToolbar(); } // S4: restore the user's tool after a pen stroke
       try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
-      mode = null; moveEls = null; rsEl = null; rotEl = null; this._bindHover = null; this._bindHoverSub = null; this._connHover = null; // clear the connect-nub hover so it re-resolves on the next hover
+      mode = null; moveEls = null; rsEl = null; rotEl = null; this._editPt = null; this._bindHover = null; this._bindHoverSub = null; this._connHover = null; // clear the connect-nub hover so it re-resolves on the next hover
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // drag ended → crisp re-render + rebuild caches
       this.dirty = true;
     };
@@ -3249,6 +3302,13 @@ class CanvasView {
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
+      // B (curved/multi-point): dblclick an INTERIOR waypoint handle of a selected connection → delete it (endpoints can't be
+      // deleted). Only fires when there's a waypoint to remove (>2 pts), so a plain 2-pt arrow still dblclicks to its label.
+      const cse = this._singleSel();
+      if (cse && (cse.type === 'arrow' || cse.type === 'line') && cse.points && cse.points.length > 2) {
+        const r = this.wrap.getBoundingClientRect(); const ph = this._linePointAt(cse, { x: e.clientX - r.left, y: e.clientY - r.top });
+        if (ph && ph.kind === 'pt' && ph.i > 0 && ph.i < cse.points.length - 1) { cse.points.splice(ph.i, 1); linearBBox(cse); this._updateBindings(); this.dirty = true; this.scheduleSave(); return; }
+      }
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
@@ -3266,7 +3326,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + any pending group-lasso (round-5 B), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -6445,6 +6505,13 @@ class CanvasView {
       const _edgeOnly = (_st === 'ellipse' || _st === 'diamond' || _st === 'triangle' || _st === 'parallelogram' || _st === 'hexagon' || _st === 'cloud');
       for (const k of (_edgeOnly ? ['n', 'e', 's', 'w'] : HANDLE_KEYS)) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
       ictx.beginPath(); ictx.arc(H.rot.x, H.rot.y, hs / 1.5, 0, 7); ictx.fill(); ictx.stroke();
+    } else if (single && (single.type === 'arrow' || single.type === 'line') && single.points && single.points.length >= 2) {
+      // B (curved/multi-point): a selected connection shows its editable points. Ghost mid-dots (drag → insert a bend),
+      // endpoints (violet, drag → move/detach-rebind), interior waypoints (white ring, drag → move · dblclick → delete).
+      const pts = single.points; ictx.setLineDash([]);
+      ictx.fillStyle = 'rgba(124,92,255,0.4)';
+      for (let i = 0; i < pts.length - 1; i++) { ictx.beginPath(); ictx.arc((pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2, 3.5 / z, 0, 7); ictx.fill(); }
+      for (let i = 0; i < pts.length; i++) { const isEnd = (i === 0 || i === pts.length - 1); ictx.beginPath(); ictx.arc(pts[i][0], pts[i][1], 5 / z, 0, 7); ictx.fillStyle = isEnd ? '#7c5cff' : '#fff'; ictx.fill(); ictx.lineWidth = 1.5 / z; ictx.strokeStyle = isEnd ? '#fff' : '#7c5cff'; ictx.stroke(); }
     } else {
       ictx.setLineDash([6 / z, 4 / z]); const pad = 4 / z;
       for (const id of this.selected) { if (id === this.editingId) continue; const el = this._byId(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); ictx.strokeRect(x - pad, y - pad, Math.abs(el.width) + pad * 2, Math.abs(el.height) + pad * 2); } // #6: don't double the textarea outline while editing
