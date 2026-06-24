@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.93.0 — FEATURE LOOP: section AUTO-LAYOUT — grid / stack / row (Heptabase) (2026-06-23)
+Backlog C. Arrange a section's child cards into a clean pack. Relational + non-destructive — repositions x/y only
+(translates arrow points too), GROWS the frame to contain the pack so every card stays owned (center-in), undoable
+via the snapshot history. The underlying Thymer records are untouched; only canvas positions change.
+- **`_layoutSection(mode)`** — uniform-cell pack of `_frameChildren` in reading order (top→bottom, then left→right with
+  a row tolerance). `grid` fits columns to the section width; `stack` = 1 column; `row` = 1 row. Skips collapsed-hidden
+  children, connectors (they follow their bound endpoints via `_updateBindings`), and nested frames. `<2 cards` / collapsed
+  → toaster + no-op. Grows `fr.width/height` to contain (never shrinks).
+- **`_targetSectionForLayout`** — a selected frame, the owning section of a selected card (`_ownerSection`), or one frame
+  in a multi-selection. Reuses `_align`'s `box`/`moveTo` geometry helpers.
+- Three command-palette entries (Arrange section: grid / stack / row).
+- **Adversarial review: clean on all 6 axes** — ownership-preservation (the rightmost/bottom card's center clears the
+  grown frame because cells = MAX card size), visibility/hittability sweep (reposition-only; grid+cache invalidated;
+  bindings re-routed), what-moves (connectors/frames excluded), sort/column math (no div-by-0 / NaN; cols,rows ≥ 1),
+  undo/data-safety (pure geometry through scheduleSave; no record writes), target resolver (null-safe). Node
+  `pxc_sectlayout` 15/15 + all regressions green.
+
 ## ✅ v1.92.0 — FEATURE LOOP: curved + multi-point arrow ROUTING (Excalidraw) (2026-06-23)
 Backlog B. Connections already stored an N-point `points[]` + an `elbowed` orthogonal route (`routedPoints`); this adds
 the curved render mode + interactive waypoint editing the model already supported but had no UI for.

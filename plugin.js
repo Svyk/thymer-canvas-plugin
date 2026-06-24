@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.92.0';
+const PLEXUS_VERSION = '1.93.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2878,6 +2878,43 @@ class CanvasView {
       }
     }
     this._updateBindings && this._updateBindings(); this.dirty = true; this.scheduleSave();
+  }
+  // SECTIONS auto-layout (Heptabase): arrange a section's child cards into a clean grid (or single-column stack / single
+  // row). Relational + non-destructive — only repositions x/y (translates arrow points too), GROWS the frame to contain the
+  // pack (so every card stays OWNED via center-in), skips a collapsed section's hidden children + connectors (which follow
+  // their bound endpoints). Undoable: routes through scheduleSave (the snapshot-on-commit history).
+  _targetSectionForLayout() {
+    const sel = this._singleSel();
+    if (sel && sel.type === 'frame') return sel;
+    if (sel) { const o = this._ownerSection(sel); if (o) return o; }
+    const frames = [...this.selected].map((id) => this._byId(id)).filter((e) => e && e.type === 'frame');
+    return frames.length === 1 ? frames[0] : null;
+  }
+  _layoutSection(mode) {
+    const fr = this._targetSectionForLayout();
+    if (!fr) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a section (or a card inside one) to arrange.', dismissible: true }); } catch (_e) {} return; }
+    if (fr.collapsed) { try { this.plugin.ui.addToaster({ title: 'Plexus: expand the section first, then arrange.', dismissible: true }); } catch (_e) {} return; }
+    const kids = this._frameChildren(fr).filter((e) => !e.secHidden && e.type !== 'arrow' && e.type !== 'line' && e.type !== 'frame');
+    if (kids.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: the section needs 2+ cards to arrange.', dismissible: true }); } catch (_e) {} return; }
+    const box = (el) => ({ x: Math.min(el.x, el.x + (el.width || 0)), y: Math.min(el.y, el.y + (el.height || 0)), w: Math.abs(el.width || 0), h: Math.abs(el.height || 0) });
+    const moveTo = (el, nx, ny) => { const b = box(el); const dx = nx - b.x, dy = ny - b.y; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); };
+    const boxes = new Map(kids.map((e) => [e, box(e)]));
+    // reading order: top-to-bottom, then left-to-right within a row (row tolerance = half the tallest card).
+    const tol = Math.max(...kids.map((e) => boxes.get(e).h)) / 2;
+    const ordered = kids.slice().sort((a, b) => { const ba = boxes.get(a), bb = boxes.get(b); return Math.abs(ba.y - bb.y) > tol ? ba.y - bb.y : ba.x - bb.x; });
+    const G = 24, P = 22; // gap between cells + inner padding
+    const cellW = Math.max(...kids.map((e) => boxes.get(e).w)), cellH = Math.max(...kids.map((e) => boxes.get(e).h)); // uniform cells = clean alignment
+    let cols;
+    if (mode === 'stack') cols = 1;
+    else if (mode === 'row') cols = ordered.length;
+    else { const fit = Math.floor((Math.max(fr.width, cellW + 2 * P) - 2 * P + G) / (cellW + G)); cols = Math.max(1, Math.min(ordered.length, fit || 1)); } // grid: fit columns to the section's current width
+    const rows = Math.ceil(ordered.length / cols);
+    const x0 = fr.x + P, y0 = fr.y + P; // pack from the inner top-left (the name label sits ABOVE fr.y)
+    for (let i = 0; i < ordered.length; i++) { const r = Math.floor(i / cols), c = i % cols; moveTo(ordered[i], x0 + c * (cellW + G), y0 + r * (cellH + G)); }
+    fr.width = Math.max(fr.width, 2 * P + cols * cellW + (cols - 1) * G); // grow to contain (never shrink below current)
+    fr.height = Math.max(fr.height, 2 * P + rows * cellH + (rows - 1) * G);
+    this._gridDirty = true; this._cacheValid = false; this._updateBindings(); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Arranged ' + ordered.length + ' cards (' + (mode === 'stack' ? 'stack' : mode === 'row' ? 'row' : cols + '×' + rows + ' grid') + ').', dismissible: true }); } catch (_e) {}
   }
   // CP-4: selection stats — count + bounding box (x/y/w/h) + single-element angle, shown as a toaster.
   _selectionStats() {
@@ -6685,6 +6722,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Outline to canvas (mind-map a note)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); const g = this._lastRecordGuid; if (v && g) v._outlineToCanvas(g); else if (v) { try { this.ui.addToaster({ title: 'Plexus: open a note first, then map its outline.', dismissible: true }); } catch (_e) {} } } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Link selected cards (write relations)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._linkSelectedCards(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle elbow arrow', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._toggleElbow(); } });
+    for (const a of [['Arrange section: grid', 'grid'], ['Arrange section: stack', 'stack'], ['Arrange section: row', 'row']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._layoutSection(a[1]); } }); } // SECTIONS auto-layout (select a section or a card inside it)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Present drawing', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._enterPresent(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open Canvas (blank panel)', icon: 'ti-pencil', onSelected: () => this._openPanelFor(null) });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Gallery (all drawings)', icon: 'ti-layout-grid', onSelected: () => this._openGallery() });
