@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.80.0 — SCALE Phase 2: sharded image-asset anchoring (bounded per-insert, unlimited images) (2026-06-23)
+Images anchor to the backing drawing's `Assets` property. A single unbounded many-file property risks O(array) cost per
+`addValue`. Phase 2 shards anchoring across `Assets` / `Assets 2` / `Assets 3` / `Assets 4` (all created on Plexus Drawings
+via MCP), cap 500/shard → each `addValue` array stays bounded → ~constant per-insert cost regardless of total image count.
+- **Write-side only.** Reads resolve a blob by its GLOBAL guid (`getBlobFromPropertyFileValue`) — shard-agnostic, unchanged.
+- `pxcPickAssetShard(rec)` → lowest non-full shard, else the last (graceful degradation); `pxcAssetGuidsOn(rec)` → union
+  of all shards' guids (read-back). `_assetPut` appends to the active shard + confirms across shards. `_reanchorAssets`
+  (which gates the BD-1 migration's host-line deletion) distributes a batch fill-and-roll, then confirms across ALL shards
+  — a guid enters the confirmed Set ONLY if physically present in some shard's `files()` (data-safe deletion gate).
+- Per-drawing distribution (each canvas is its own backing drawing) + 4×500 = 2000 images/drawing bounded; add more
+  `Assets N` props to extend. `Assets 2-4` + `Source Note` hidden from the record panel.
+- **Adversarial review: clean, data-safe, ship.** Deletion gate can't be tricked into confirming an unstored guid; router
+  math off-by-one-clean; degrades correctly to 1 shard; reads guid-based + untouched. Only a LOW bulk-paste latency note
+  (pre-existing shape, optimization not a bug). Node `pxc_shard` 12/12 + `pxc_backing` 22/22 + `pxc_scale_p1` 21/21.
+
 ## ✅ v1.79.0 — SCALE BD-1: backing-drawing storage (all canvas data off note bodies, fully relational) (2026-06-22)
 Problem: a canvas can open on ANY record. On a non-"Plexus Drawings" record (Journal/Notes) the plugin can't create
 properties, so the scene — and (since v1.78) each image — fell back to BODY `file` line-items (`plexus-scene.json`,

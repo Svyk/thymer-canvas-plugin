@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.79.0';
+const PLEXUS_VERSION = '1.80.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -19,6 +19,13 @@ const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
+// SCALE Phase 2: image-asset anchoring is SHARDED across these many-file properties on the backing drawing. This is a
+// WRITE-side concern only — reads resolve a blob by its global guid (getBlobFromPropertyFileValue), shard-agnostic. A soft
+// cap per shard bounds each addValue's array size (so per-insert cost stays ~constant even if addValue is O(array)); the
+// router fills shards in order and degrades gracefully to the last shard. Per-drawing distribution makes this effectively
+// unlimited; add more `Assets N` properties (and extend the list) if a single drawing ever needs more.
+const PXC_ASSET_SHARDS = ['Assets', 'Assets 2', 'Assets 3', 'Assets 4'];
+const PXC_ASSET_SHARD_CAP = 500;
 const PLEXUS_SETTINGS_KEY = 'plexus_settings';
 const PLEXUS_SETTINGS_DEFAULTS = {
   // S1 General
@@ -953,6 +960,10 @@ function pxcRelValues(p) {
   }
   return out;
 }
+// SCALE Phase 2 asset-shard helpers (write-side). `rec` is the backing Plexus Drawings record.
+function pxcAssetShardProps(rec) { const out = []; for (const label of PXC_ASSET_SHARDS) { let p = null; try { p = rec.prop(label); } catch (_e) {} if (p && typeof p.addValue === 'function' && typeof p.files === 'function') out.push({ label, p }); } return out; }
+function pxcPickAssetShard(rec) { const shards = pxcAssetShardProps(rec); for (const s of shards) { let n = Infinity; try { n = (s.p.files() || []).length; } catch (_e) {} if (n < PXC_ASSET_SHARD_CAP) return s.p; } return shards.length ? shards[shards.length - 1].p : null; } // lowest non-full shard, else the last (graceful degradation)
+function pxcAssetGuidsOn(rec) { const have = new Set(); for (const s of pxcAssetShardProps(rec)) { try { for (const v of (s.p.files() || [])) if (v && v.guid) have.add(v.guid); } catch (_e) {} } return have; } // every asset guid anchored on rec, across ALL shards (for read-back)
 function makeImage(x, y, w, h, fileId, style) {
   return {
     id: newId(), type: 'image', x, y, width: w, height: h, angle: 0, fileId,
@@ -3542,12 +3553,12 @@ class CanvasView {
     if (!up || !up.guid) return null;
     const ref = { blobGuid: up.guid, name: up.fileName || name || 'asset.webp', mimeType: blob.type || 'image/webp' };
     let anchored = false;
-    // Anchor #1: an `Assets` many file-property (if the collection has one). Verify it stuck — a phantom prop no-ops silently.
+    // Anchor #1 (SHARDED): append to the active `Assets` shard on the backing drawing; verify via read-back across shards.
     try {
-      const ap = this.rec.prop('Assets');
-      if (ap && typeof ap.addValue === 'function' && typeof ap.files === 'function') {
+      const ap = pxcPickAssetShard(this.rec);
+      if (ap) {
         try { ap.addValue({ name: ref.name, error: null, guid: up.guid, imgData: null, imgUrl: null, imgClass: null }); } catch (_e) {}
-        for (let i = 0; i < 3 && !anchored; i++) { try { const vs = ap.files() || []; if (vs.some((v) => v && v.guid === up.guid)) anchored = true; } catch (_e) {} if (!anchored) await sleep(100); }
+        for (let i = 0; i < 3 && !anchored; i++) { try { if (pxcAssetGuidsOn(this.rec).has(up.guid)) anchored = true; } catch (_e) {} if (!anchored) await sleep(100); }
       }
     } catch (_e) {}
     // SCALE/backing (BD-1): the body `file` line-item fallback was REMOVED — `this.rec` is always a backing Plexus Drawings
@@ -3565,19 +3576,21 @@ class CanvasView {
   async _reanchorAssets(rec, scene) {
     const confirmed = new Set();
     if (!rec || !scene || !scene.files) return confirmed;
-    let ap = null; try { ap = rec.prop('Assets'); } catch (_e) {}
-    if (!ap || typeof ap.addValue !== 'function' || typeof ap.files !== 'function') return confirmed; // no Assets prop → nothing anchored here (blob stays on its source anchor)
-    const wanted = [];
-    for (const fid of Object.keys(scene.files)) {
-      const f = scene.files[fid]; if (!f || !f.blobGuid) continue;
-      wanted.push(f.blobGuid);
-      try { ap.addValue({ name: f.name || 'asset.webp', error: null, guid: f.blobGuid, imgData: null, imgUrl: null, imgClass: null }); } catch (_e) {}
+    const items = []; for (const fid of Object.keys(scene.files)) { const f = scene.files[fid]; if (f && f.blobGuid) items.push({ g: f.blobGuid, name: f.name || 'asset.webp' }); }
+    if (!items.length) return confirmed;
+    const shards = pxcAssetShardProps(rec); if (!shards.length) return confirmed; // no Assets prop → nothing anchored here (blob stays on its source anchor)
+    // distribute across shards (fill each to the cap); track the count locally so we don't re-read files() per add
+    let si = 0, scount = 0; try { scount = (shards[0].p.files() || []).length; } catch (_e) {}
+    const wanted = new Set();
+    for (const { g, name } of items) {
+      while (scount >= PXC_ASSET_SHARD_CAP && si < shards.length - 1) { si++; try { scount = (shards[si].p.files() || []).length; } catch (_e) { scount = 0; } }
+      wanted.add(g);
+      try { shards[si].p.addValue({ name, error: null, guid: g, imgData: null, imgUrl: null, imgClass: null }); scount++; } catch (_e) {}
     }
-    if (!wanted.length) return confirmed;
-    for (let i = 0; i < 4 && confirmed.size < wanted.length; i++) { // DATA-SAFETY: read back which guids actually landed
-      let have = null; try { have = ap.files() || []; } catch (_e) {}
-      if (have) { const hs = new Set(have.map((v) => v && v.guid).filter(Boolean)); for (const g of wanted) if (hs.has(g)) confirmed.add(g); }
-      if (confirmed.size < wanted.length) await sleep(120);
+    for (let i = 0; i < 4 && confirmed.size < wanted.size; i++) { // DATA-SAFETY: read back which guids actually landed (across ALL shards)
+      const have = pxcAssetGuidsOn(rec);
+      for (const g of wanted) if (have.has(g)) confirmed.add(g);
+      if (confirmed.size < wanted.size) await sleep(120);
     }
     return confirmed;
   }
@@ -3674,7 +3687,7 @@ class CanvasView {
   // Enumerate the EDITABLE typed properties of a record (skip system/Plexus-internal). Type inferred from the live shape:
   // choices()→choice, date()→date, linkedRecords()→relation, number()→number, else text. Empty props default to text (v1).
   _recPanelFields(rec) {
-    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text', 'Assets', 'Scene Rev', 'Scene Schema']);
+    const SKIP = new Set(['Created', 'Modified', 'Banner', 'Icon', 'Scene', 'Canvas Text', 'Assets', 'Assets 2', 'Assets 3', 'Assets 4', 'Scene Rev', 'Scene Schema', 'Source Note']);
     const out = []; let props = [];
     try { props = (rec.getAllProperties && rec.getAllProperties()) || []; } catch (_e) {}
     for (const p of props) {
