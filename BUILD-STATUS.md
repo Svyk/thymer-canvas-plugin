@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ B7 audit-resolved + B8 platform-blocked, NO SHIP (Tier-B loop, items 13–14/26) (2026-06-24)
+**B7 (auto-export banner keep-in-sync + light/dark variants) — AUDIT-RESOLVED.** Banner keep-in-sync already ships:
+`_scheduleBannerText`@7175 (debounced OFF the durable-save hot path) → `_writeBannerTextInline`@1692 → `exportPng(scene)` →
+`setBannerFromBlob`, fired on every save@7170 (toggle: `bannerPreview` setting). `exportPng` fills the bg with the canvas's
+actual `viewBackgroundColor`, so the banner already MATCHES the user's canvas → a separate light/dark variant is moot for
+Thymer's single banner slot. Blob is record-owned (no orphan body siblings). Optional Scene-SVG-in-sync = low-value (no
+consumer). No code change.
+**B8 (render drawing inline in notes) — PROBED → PLATFORM-BLOCKED.** "A post-render hook swaps a drawing-ref for its banner
+inline in a note" needs a Thymer markdown/inline-render API. Probe: NONE exists — plugin.js has no such hook and the SDK
+(`thymer-types.d.ts`) exposes no `MarkdownPostProcessor`/`registerMarkdown`/`renderMarkdown`/`inlineRender`/`decorateLine`/
+`registerRenderer`. Same class as the C-tier editor-API gaps → deferred to the Thymer backlog (consolidate into the C1
+editor-API feature request). No code change.
+- **Streak note:** B3–B8 were six consecutive no-ships (3 audit-resolved, 3 deferred) — the worklist's back third is mostly
+  already-covered / not-parity / platform-blocked. The GENUINE remaining builds: B9 deep-link anchors · B10 Settings modal ·
+  B11 IndexedDB cache · B13 jspdf PDF · B14 connector ergonomics · B16 export fidelity · B18 dead-code. Next: B9 (real build).
+
 ## ⏭ B6 — PROBED → DEFERRED-pending-hands-on-session, NO SHIP: restored-panel auto-reopen (Tier-B loop, item 12/26) (2026-06-24)
 The most-felt papercut (a Plexus panel saved in the layout reopens BLANK on reload — the drawing guid lives in an in-memory
 pending queue, lost on reload, not the panel's persisted nav state). **SDK probe (types.d.ts):** `navigateTo` DOES accept
