@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ B9 + B10 — both AUDIT-RESOLVED (already shipped), NO SHIP (Tier-B loop, items 15–16/26) (2026-06-24)
+The two items the run-prompt expected as "genuine builds" turned out **already shipped** — the plugin is even more mature
+than the deferred-audit indicated.
+- **B9 (sub-drawing deep-link anchors)** — shipped (reimagined) as the **Cite/xref** system. `_copyImageRefToClip`@6514
+  ("Cite selection" cmd@7254) deep-links ANY selection (pending region · every selected element/shape/text/image/frame via
+  bbox · composites) → snapshot + drawing-ref + a `plexus_xref` anchor index@7619. Clicking the cite → `_navToCanvasAnchor`
+  @7963 opens the drawing + `_flashAnchor`@2493 fits the camera to the anchored-items **union bbox** + establish-then-zoom
+  flight + spotlight. The literal `#group=`/`#area=` URL grammar is the reimagined form the roadmap specified.
+- **B10 (in-panel Settings modal)** — already a FULL multi-section modal `_openSettings`@7991 (cmd "Plexus: Settings"@7344):
+  General / Canvas-behavior / Pen-Stylus / Interaction / … with toggle/color/range/select/text/action controls, persisted.
+- **Tier-B reality check:** of B3–B10, only **B1+B2 needed real builds** (shipped v1.110/v1.111); B4/B5/B7/B9/B10 were
+  already shipped, B6/B8 are platform-blocked, B3 is low-value. The deferred-audit over-scoped the Tier-B polish list against
+  a mature plugin. The only plausibly-genuine remaining builds: **B16 export fidelity (grid/snap decouple + SVG hachure +
+  arrowhead-none memory)** and **B18 dead-code cleanup**; B11 IndexedDB cache + B13 jspdf PDF are lower-value perf/format;
+  B12/B14/B17/B19 are low-value/partial. No code change for B9/B10.
+- Next (worklist B11): IndexedDB LocalCache (audit-first; lower-value perf — likely defer unless a clean small win).
+
 ## ℹ️ B7 audit-resolved + B8 platform-blocked, NO SHIP (Tier-B loop, items 13–14/26) (2026-06-24)
 **B7 (auto-export banner keep-in-sync + light/dark variants) — AUDIT-RESOLVED.** Banner keep-in-sync already ships:
 `_scheduleBannerText`@7175 (debounced OFF the durable-save hot path) → `_writeBannerTextInline`@1692 → `exportPng(scene)` →
