@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.108.0 — A3: AI image-edit works on EXTERNALIZED (blob-backed) images (Tier-A loop, ship 3/26) (2026-06-24)
+`_aiEditImage` previously BAILED ("isn't supported for externalized images yet") whenever the selected image was
+externalized — it read `file.dataURL`, but a blob-backed image stores only `file.blobGuid`. So AI-edit silently failed on
+exactly the large images users externalize.
+- **Fix**: resolve the source to a PNG dataURL before the existing OpenAI-edits pipeline — INLINE images use `file.dataURL`
+  directly (byte-for-byte unchanged); EXTERNALIZED images `_assetGet(file)` → `Image` → `canvas.toDataURL('image/png')` (the
+  proven `_sceneWithInlineImages` resolve-and-revoke pattern). Resolution runs AFTER prompt+key (no download on cancel) and
+  the objectURL is revoked exactly once (after draw, safe on load-failure). Entry guard widened to allow blobGuid-only
+  images, backstopped by a post-resolve `if (!dataURL) return`.
+- **Data-safety**: read-only resolution; the edit result is still INSERTED as a NEW image beside the source (`_addImageFromFile`
+  at offset coords) — the source element/blob is never overwritten or deleted. No render/select/export/minimap surface.
+- **Adversarial review: SHIP** — all 7 axes confirmed (inline no-regression, single-revoke + no use-after-revoke, guard
+  backstop, async ordering reads the local `dataURL` not stale `file.dataURL`, missing-blob/decode-failure bail cleanly).
+  Two pre-existing NITs (canvas-taint already-safe via same-origin objectURL; skips the decode-cache — fine on a rare
+  network-bound op). Node `pxc_aiedit` 10/10 + regressions green.
+- Next (worklist A4): templates clone the full appState.colorPalette.
+
 ## ✅ v1.107.0 — A2: CONCURRENCY REV-CHECK — detect + back up a multi-device overwrite (Tier-A loop, ship 2/26) (2026-06-24)
 A single user on multiple devices (or a reopened stale tab) could SILENTLY clobber a newer remote save (last-write-wins, no
 detection = data loss). Now `saveScene` detects it and preserves both versions.

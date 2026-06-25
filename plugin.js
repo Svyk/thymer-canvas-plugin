@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.107.0';
+const PLEXUS_VERSION = '1.108.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6097,12 +6097,18 @@ class CanvasView {
     const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
     if (provider !== 'openai') { try { this.plugin.ui.addToaster({ title: 'Plexus: image edit needs the OpenAI provider.', dismissible: true }); } catch (_e) {} return; }
     const file = this.scene.files && this.scene.files[img.fileId];
-    if (!file || !file.dataURL || !/,/.test(file.dataURL)) { if (file && file.blobGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI image-edit isn’t supported for externalized images yet.', dismissible: true }); } catch (_e) {} } return; }
+    if (!file || (!file.dataURL && !file.blobGuid)) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image first.', dismissible: true }); } catch (_e) {} return; }
     const prompt = await this._promptText('How should the AI edit this image?', 'add a soft gradient background'); if (!prompt) return;
     const key = await this._aiKey('openai'); if (!key) return;
     try { this.plugin.ui.addToaster({ title: 'Plexus: editing image (needs a square PNG)…', dismissible: true }); } catch (_e) {}
     try {
-      const bin = atob(file.dataURL.split(',')[1]); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      // A3: resolve the source image to a PNG dataURL — INLINE images use file.dataURL directly; EXTERNALIZED (blobGuid)
+      // images are downloaded + canvas-encoded (the same path _sceneWithInlineImages uses for SVG export), so AI-edit works on
+      // large/externalized images, not just inline-dataURL ones. Done AFTER the prompt+key so we don't download on a cancel.
+      let dataURL = (file.dataURL && /,/.test(file.dataURL)) ? file.dataURL : null;
+      if (!dataURL && file.blobGuid) { const url = await this.plugin._assetGet(file); if (url) { const im = await new Promise((res) => { const x = new Image(); x.onload = () => res(x); x.onerror = () => res(null); x.src = url; }); if (im && im.naturalWidth) { const cv = document.createElement('canvas'); cv.width = im.naturalWidth; cv.height = im.naturalHeight; cv.getContext('2d').drawImage(im, 0, 0); dataURL = cv.toDataURL('image/png'); } try { URL.revokeObjectURL(url); } catch (_e) {} } }
+      if (!dataURL) { try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t load this image to edit.', dismissible: true }); } catch (_e) {} return; }
+      const bin = atob(dataURL.split(',')[1]); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
       const fd = new FormData(); fd.append('image', new Blob([arr], { type: 'image/png' }), 'image.png'); fd.append('prompt', String(prompt)); fd.append('n', '1'); fd.append('size', '1024x1024'); fd.append('response_format', 'b64_json'); fd.append('model', 'dall-e-2');
       const res = await fetch('https://api.openai.com/v1/images/edits', { method: 'POST', headers: { 'Authorization': 'Bearer ' + key }, body: fd });
       const data = await res.json(); const b64 = data && data.data && data.data[0] && data.data[0].b64_json;

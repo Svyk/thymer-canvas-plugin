@@ -17,7 +17,7 @@ backlog and check it off as "deferred" rather than forcing a broken build.
 ## Tier A — real wins (something is broken or lossy today)
 - [x] A1 Live cards (record/query/linecard/rollup/table/board/task) in PNG/SVG/print/cite export — SHIPPED v1.106.0
 - [x] A2 Concurrency rev-check — re-read Scene Rev before overwrite + conflict guard — SHIPPED v1.107.0
-- [ ] A3 AI image-edit on externalized (blob-backed) images — resolve blob→dataURL before the existing edit pipeline (today the guard bails)
+- [x] A3 AI image-edit on externalized (blob-backed) images — resolve blob→dataURL before the existing edit pipeline — SHIPPED v1.108.0
 - [ ] A4 Templates: clone the full appState.colorPalette on "New from template" (today silently drops the palette)
 - [ ] A5 Backlinks panel — "drawings referencing this record" via getBackReferenceRecords()
 - [ ] A6 Elbow / orthogonal arrows — right-angle connector routing (no AI dep; mis-tagged in the audit)
