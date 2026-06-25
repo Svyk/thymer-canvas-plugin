@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.102.0';
+const PLEXUS_VERSION = '1.103.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5836,9 +5836,32 @@ class CanvasView {
   }
   _drawGhosts(ctx) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
-    const z = this.camera.zoom; ctx.save(); ctx.strokeStyle = '#f59e0b'; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.4 / z; ctx.setLineDash([5 / z, 5 / z]);
-    for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); }
+    const z = this.camera.zoom; ctx.save(); ctx.globalAlpha = 0.5; ctx.lineWidth = 1.4 / z; ctx.setLineDash([5 / z, 5 / z]);
+    for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; ctx.strokeStyle = ge.rel ? '#0ea5e9' : '#f59e0b'; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); } // rel (ref/backref) edges blue, semantic edges amber
     ctx.setLineDash([]); ctx.restore();
+  }
+  // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
+  // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
+  // Read-only; reuses the existing _ghostEdges/_showGhosts/_drawGhosts machinery (marked rel:true → drawn blue, not amber).
+  async _buildRelationalGhosts() {
+    const cards = this.scene.elements.filter((e) => !e.isDeleted && e.type === 'record' && e.recordGuid);
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: add 2+ record cards first.', dismissible: true }); } catch (_e) {} return; }
+    const guid2el = new Map(); for (const c of cards) if (!guid2el.has(c.recordGuid)) guid2el.set(c.recordGuid, c.id); // first card per record guid
+    const onCanvas = new Set(guid2el.keys());
+    const explicit = new Set(); // pairs already joined by a bound connector ("elA|elB" sorted)
+    for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const a = e.startBinding && e.startBinding.elementId, b = e.endBinding && e.endBinding.elementId; if (a && b) explicit.add(a < b ? a + '|' + b : b + '|' + a); }
+    const pairs = new Set(); // related record-guid pairs ("gA|gB" sorted), both on-canvas
+    for (const c of cards) {
+      let rec = null; try { rec = await this.plugin.data.getRecord(c.recordGuid); } catch (_e) {}
+      if (!rec) continue; const rel = new Set();
+      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) rel.add(s.text.guid); } catch (_e) {} // forward refs
+      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) rel.add(r.guid); } } catch (_e) {} // backrefs
+      for (const g of rel) { if (g === c.recordGuid) continue; pairs.add(c.recordGuid < g ? c.recordGuid + '|' + g : g + '|' + c.recordGuid); }
+    }
+    const edges = [];
+    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true }); } // skip pairs already explicitly connected
+    this._ghostEdges = edges; this._showGhosts = true; this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {}
   }
   // P0.0: fetch the OpenAI key from the ENCRYPTED store (unlock once per session; migrate + delete any legacy
   // plaintext copy). The key never persists in plaintext and is wiped from memory on pagehide.
@@ -7084,6 +7107,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Promote cause-effect to records (Brain)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._promoteCauseEffect(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Relational ghost-edges (inferred ref/backref links)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._buildRelationalGhosts(); } }); // Obsidian/ExcaliBrain "show inferred links" — blue dashes between related-but-unconnected cards
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI suggest relations (writes refs)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiRelationSuggest(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI auto-cluster into named frames', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAutoCluster(); } });

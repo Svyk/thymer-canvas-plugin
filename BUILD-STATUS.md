@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.103.0 — RELATIONAL GHOST-EDGES: inferred ref/backref links (Obsidian/ExcaliBrain) (2026-06-24)
+PARITY LOOP iter 4. "Relational ghost-edges (inferred ref/backref links)" surfaces hidden connections: faint BLUE dashes
+between on-canvas record cards that ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound
+connector. EXTENDS the existing semantic-ghost system (didn't duplicate it).
+- **`_buildRelationalGhosts()`** (read-only): on-canvas record cards → `guid→firstCardElId`; reads each record's forward `ref`
+  segments + `getBackReferences()`; an undirected pair when the related record is ALSO on-canvas (sorted-guid dedup, self-ref
+  skipped); EXCLUDES pairs already joined by a bound arrow/line (sorted-elId key set). Sets `_ghostEdges = [{a,b,rel:true}]` +
+  `_showGhosts`. `_drawGhosts` now colours `rel` edges blue (`#0ea5e9`), semantic edges stay amber.
+- Reuses `_ghostEdges`/`_showGhosts`/`_drawGhosts`/`_byId` — NOT scene elements (drawn via the renderer `ghosts()` hook), so
+  zero render/select/export/minimap/lasso surface; non-interactive; no record writes.
+- **Adversarial review: clean, no defects on all 6 axes** (read-only, pair-building incl. undirected dedup + on-canvas gate +
+  explicit-exclusion key consistency, no semantic regression, shared-`_ghostEdges` full-replace, visibility, edge cases). Node
+  `pxc_relghosts` 11/11 + all regressions green.
+- Next: graph drag-to-restructure (drag a card onto another → write a real ref link), outline⇄canvas gaps.
+
 ## ✅ v1.102.0 — GRAPH AUTO-LAYOUT: force-directed (Fruchterman-Reingold) (2026-06-24)
 PARITY LOOP iter 3. "Arrange graph (force-directed layout)" untangles the on-canvas record-card mind-map into an organic
 graph (Obsidian/NotebookLM graph-view parity), using the bound CONNECTORS as edges.
