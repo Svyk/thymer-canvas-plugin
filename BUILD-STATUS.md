@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ TIER A COMPLETE (7/7) — A7: TEST_HOOKS documented as the release toggle (Tier-A loop, item 7/26) (2026-06-24)
+The `TEST_HOOKS` gate already existed (`const TEST_HOOKS = true`@270 + the single `if (TEST_HOOKS) this._installTestHooks()`
+gate@7329 — the worklist's "gate behind a build flag" was already satisfied). Made it **self-documenting as the release
+toggle**: a clear comment that flipping the one flag to `false` strips the entire `window.__plexusCanvas.test.*` debug
+surface, and that it's kept `true` during active development because the live chrome-devtools verification path (and this
+build loop) drives those hooks. **Comment-only — zero behavior change, no version bump.** Heavyweight adversarial review
+skipped by judgment (nothing to find: no scene/render/select/export/write/logic surface; `node --check` + a 3-assertion gate
+test are the relevant gates, both green).
+
+— **TIER A DONE (7/7):** A1 live-cards-in-export (v1.106) · A2 concurrency rev-check (v1.107) · A3 AI-edit-on-externalized
+(v1.108) · A4 palette-inheritance (audit-resolved, already covered) · A5 backlinks list (v1.109) · A6 elbow/orthogonal
+arrows (audit-resolved, already shipped) · A7 TEST_HOOKS release-toggle doc (this). **4 code ships + 3 audit-resolved.**
+NEXT: Tier B (19 polish items, B1 first — interactive image-crop handles).
+
 ## ℹ️ A6 — AUDIT-RESOLVED, NO SHIP: elbow/orthogonal arrows already shipped (Tier-A loop, item 6/26) (2026-06-24)
 Worklist A6 ("elbow / orthogonal arrows — right-angle connector routing") is ALREADY shipped + fully wired (the worklist
 even self-noted the audit mis-tagged it under later-AI). Grep-audit of plugin.js:

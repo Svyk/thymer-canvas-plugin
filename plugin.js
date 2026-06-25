@@ -263,6 +263,10 @@ async function pxDecryptSecret(blob, passphrase) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: pxUnb64(blob.iv) }, key, pxUnb64(blob.ct)); // throws (GCM tag) on wrong passphrase
   return pxDec.decode(pt);
 }
+// RELEASE TOGGLE (A7): the SINGLE gate for window.__plexusCanvas.test.* — the _installTestHooks debug surface (see the
+// `if (TEST_HOOKS) this._installTestHooks()` gate below). Kept TRUE during active development because the live
+// chrome-devtools verification path (and this build loop) drives those hooks. Flip to FALSE for any public/shared release
+// to strip the entire debug surface — no other change needed; this one flag controls it.
 const TEST_HOOKS = true;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
