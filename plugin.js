@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.97.0';
+const PLEXUS_VERSION = '1.98.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -107,6 +107,16 @@ function _cssLum(css) {
   else { m = css.match(/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i); if (m) { r = +m[1]; g = +m[2]; b = +m[3]; } else return null; }
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
+// Elevate a surface OFF a backdrop so a card reads as a card: mix the colour toward white by `amt` (0..1). Returns a hex.
+function pxcElevate(css, amt) {
+  if (!css) return null;
+  let r, g, b; const s = String(css).trim();
+  let m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) { let h = m[1]; if (h.length === 3) h = h.split('').map((c) => c + c).join(''); r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16); }
+  else { m = s.match(/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i); if (!m) return null; r = +m[1]; g = +m[2]; b = +m[3]; }
+  const a = Math.max(0, Math.min(1, amt || 0)), mix = (c) => Math.round(c + (255 - c) * a), hx = (c) => Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0');
+  return '#' + hx(mix(r)) + hx(mix(g)) + hx(mix(b));
+}
 // UX-6 dark mode: when PXC_DARK, lighten an INK colour (stroke/text/icon) that's too dark to read on a dark canvas.
 // Only touches near-dark inks (L<0.4) — vivid colours and white pass through unchanged, so it adapts, not inverts.
 // (Excalidraw/zsviczian-style luminance-aware ink; refine the curve once the NotebookLM research lands.)
@@ -163,7 +173,7 @@ const CE_CONNECTOR_COLOR = '#f97316';
    transformers.js — keeps plugin.js lean, cold start untouched). */
 const _libCache = {};
 async function loadLib(url) { if (_libCache[url]) return _libCache[url]; _libCache[url] = await import(url); return _libCache[url]; }
-const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs' };
+const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs', heic2any: 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/+esm' };
 function shapePolygon(el) {
   const x = el.x, y = el.y, w = el.width, h = el.height, t = el.type;
   if (t === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]];
@@ -592,6 +602,24 @@ function pxcFmtThymerDate(d) {
     return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   } catch (_e) { return String(d); }
 }
+// Natural-date parsing for the @ picker: 'today'/'tomorrow'/'yesterday'/'now', a weekday ('friday', 'next monday',
+// 'last fri'), 'in N days', or ANY Date()-parseable string ('Jan 1 2015', '2015-01-01', '1/1/2015'). Returns a Date or
+// null. Self-contained (no SDK dependency) so a date entered via @ shows as a real date instead of searching records.
+function pxcParseNaturalDate(query) {
+  const q = String(query || '').trim().toLowerCase(); if (!q) return null;
+  const now = new Date(), at = (d) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + d);
+  if (q === 'today' || q === 'now' || q === 'tod') return at(0);
+  if (q === 'tomorrow' || q === 'tmrw' || q === 'tmr') return at(1);
+  if (q === 'yesterday' || q === 'yest') return at(-1);
+  const mw = q.match(/^(next |last |this )?(sun|mon|tue|wed|thu|fri|sat)(?:day|nesday|rsday|urday|s?day)?$/);
+  if (mw) { const tgt = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(mw[2]), mod = (mw[1] || '').trim(); let diff = (tgt - now.getDay() + 7) % 7; if (mod === 'last') diff = diff === 0 ? -7 : diff - 7; else if (diff === 0 && mod !== 'this') diff = 7; return at(diff); }
+  const mn = q.match(/^in (\d{1,3}) days?$/); if (mn) return at(+mn[1]);
+  if (/\d/.test(q)) { // absolute (require a digit so a bare word never matches)
+    const iso = q.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); if (iso) return new Date(+iso[1], +iso[2] - 1, +iso[3]); // LOCAL midnight (new Date('YYYY-MM-DD') is UTC → off-by-one in negative-offset zones)
+    const d = new Date(query); if (!isNaN(+d)) return d;
+  }
+  return null;
+}
 // Display text for ONE line-item segment: plain text, a ref's title, or a datetime's formatted/derived date. Previously a
 // datetime (and any non-text/non-titled segment) returned '' → dates VANISHED from cards + the card editor (the bug).
 function pxcSegText(s) {
@@ -607,7 +635,7 @@ function runDisplay(run) { if (!run) return ''; if (run.t === 'ref') return Stri
 function runsOf(el) { return (el && el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: (el && el.text) || '' }]; }
 function flattenRuns(runs) { let o = ''; for (const r of runs) o += runDisplay(r); return o; }
 function hasRefRun(runs) { for (const r of runs) if (r.t === 'ref') return true; return false; }
-function normalizeRuns(runs) { const out = []; for (const r of runs) { if (r.t === 'ref') { out.push(r); continue; } if (!r.s) continue; const last = out[out.length - 1]; if (last && last.t === 'text') last.s += r.s; else out.push({ t: 'text', s: r.s }); } return out; }
+function normalizeRuns(runs) { const out = []; for (const r of runs) { if (r.t === 'ref' || r.t === 'datetime') { out.push(r); continue; } if (!r.s) continue; const last = out[out.length - 1]; if (last && last.t === 'text') last.s += r.s; else out.push({ t: 'text', s: r.s }); } return out; }
 function _runOffsets(runs) { let off = 0; const out = []; for (const run of runs) { const txt = runDisplay(run); out.push({ run, txt, start: off, end: off + txt.length, isRef: run.t === 'ref' }); off += txt.length; } return out; }
 // Map a single contiguous textarea edit (oldFlat → newFlat) back onto runs: runs fully outside the edit survive; any run
 // (incl. a ref) overlapping the deleted span dissolves to plain text, keeping its untouched fragments. Deterministic — no
@@ -3584,7 +3612,7 @@ class CanvasView {
     const syncRuns = () => { // map the latest flat edit onto el.runs (dissolving any edited-over ref); fall back to plain
       if (el.runs && el.runs.length) {
         el.runs = applyFlatEdit(el.runs, prevFlat, ta.value);
-        if (!hasRefRun(el.runs)) delete el.runs;
+        if (!hasRefRun(el.runs) && !el.runs.some((r) => r && r.t === 'datetime')) delete el.runs;
       }
       prevFlat = ta.value; el.text = ta.value;
       if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
@@ -3641,6 +3669,8 @@ class CanvasView {
     const rows = [];
     if (mode === 'record') { for (const r of (res && res.records || []).slice(0, 8)) rows.push({ kind: 'record', guid: r.guid, label: (r.getName && r.getName()) || 'Untitled', sub: 'record' }); }
     else { for (const li of (res && res.lines || []).slice(0, 8)) { let recGuid = null, parent = ''; try { const pr = li.getRecord && li.getRecord(); recGuid = pr && pr.guid; parent = (pr && pr.getName && pr.getName()) || ''; } catch (_e) {} rows.push({ kind: 'line', lineGuid: li.guid, guid: recGuid, label: lineTextOf(li) || '(line)', sub: parent || 'line', _li: li }); } } // _li (transient) → image probe
+    // NATURAL DATE: @today / @tomorrow / @"Jan 1 2015" / @friday → a date row at the TOP (record mode; a date is a single-@ thing).
+    if (mode === 'record') { const dt = pxcParseNaturalDate(query); if (dt) rows.unshift({ kind: 'date', date: dt, label: dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }), sub: 'date' }); }
     // SEARCH-CREATE: no exact-title record? offer a "Create" row (record mode only — a line can't exist without a record).
     if (mode === 'record' && query && query.trim() && !pxcHasExactTitle(rows, query)) rows.push({ kind: 'record', create: true, label: query.trim(), sub: 'Create new record' });
     rp.rows = rows; rp.idx = 0; this._renderRefPicker(this._ta);
@@ -3665,10 +3695,10 @@ class CanvasView {
     if (!rp.rows.length) { const e = document.createElement('div'); e.className = 'pxc-refempty'; e.textContent = rp.query ? 'No matches' : (rp.mode === 'line' ? 'Type to find a line…' : 'Type to find a record…'); dom.appendChild(e); }
     rp.rows.forEach((row, i) => {
       const r = document.createElement('div'); r.className = 'pxc-refrow' + (i === rp.idx ? ' active' : '') + (row.create ? ' pxc-create' : '');
-      const a = document.createElement('div'); a.className = 'r1'; a.textContent = row.create ? ('＋ Create “' + row.label + '”') : ((rp.mode === 'line' ? '@@ ' : '@ ') + row.label); r.appendChild(a);
+      const a = document.createElement('div'); a.className = 'r1'; a.textContent = row.kind === 'date' ? ('📅 ' + row.label) : row.create ? ('＋ Create “' + row.label + '”') : ((rp.mode === 'line' ? '@@ ' : '@ ') + row.label); r.appendChild(a);
       const b = document.createElement('div'); b.className = 'r2'; b.textContent = row.sub; r.appendChild(b);
       if (row.image) { const ib = document.createElement('button'); ib.className = 'pxc-refembed pxc-imgbtn'; ib.textContent = '🖼'; ib.title = 'Insert image reference (opens a lightbox)'; ib.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.imageRef = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(ib); } // IMG-REF
-      else if (!row.create) { const emb = document.createElement('button'); emb.className = 'pxc-refembed'; emb.textContent = '⧉'; emb.title = 'Transclude (live embed) — or Shift+Enter'; emb.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.transclude = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(emb); } // TRANSCLUDE
+      else if (!row.create && row.kind !== 'date') { const emb = document.createElement('button'); emb.className = 'pxc-refembed'; emb.textContent = '⧉'; emb.title = 'Transclude (live embed) — or Shift+Enter'; emb.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); rp.idx = i; row.transclude = true; this._refChoose(ta, this._byId(this.editingId)); }); r.appendChild(emb); } // TRANSCLUDE (not for date rows)
       r.addEventListener('mousedown', (ev) => { ev.preventDefault(); rp.idx = i; this._refChoose(ta, this._byId(this.editingId)); });
       dom.appendChild(r);
     });
@@ -3679,6 +3709,7 @@ class CanvasView {
   _refChoose(ta, el) { const rp = this._refPick; const row = rp.rows[rp.idx]; if (!row || !el) { this._closeRefPicker(); return; } this._applyRefChip(ta, el, row); }
   _closeRefPicker() { const rp = this._refPick; if (!rp) return; if (rp.timer) clearTimeout(rp.timer); if (rp.dom) { try { rp.dom.remove(); } catch (_e) {} } rp.dom = null; rp.open = false; rp.rows = []; }
   _applyRefChip(ta, el, row) {
+    if (row && row.kind === 'date') { this._applyDateRun(ta, el, row); return; } // NATURAL DATE → an inline datetime run
     if (row && row.create) { this._applyCreateRef(ta, el, row); return; } // SEARCH-CREATE
     if (row && row.imageRef) { this._applyImageRefRow(ta, el, row); return; } // IMG-REF
     if (row && row.transclude) { this._applyTranscludeRow(ta, el, row); return; } // TRANSCLUDE
@@ -3703,6 +3734,23 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Reference added — keep typing, or click it to open.', dismissible: true }); } catch (_e) {}
   }
+  // NATURAL DATE: the user picked the 📅 date row → splice an inline DATETIME run over the just-typed @token (renders the
+  // formatted date via runDisplay's datetime branch; you can keep typing text around it). Mirrors _applyRefChip's splice.
+  _applyDateRun(ta, el, row) {
+    const rp = this._refPick; rp.alias = '';
+    const _trig = pxcParseRefTrigger(ta.value, ta.selectionStart), start = (_trig ? _trig.triggerStart : rp.triggerStart), end = ta.selectionStart;
+    this._closeRefPicker();
+    const d = row.date, ymd = d ? (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')) : '';
+    const run = { t: 'datetime', d: ymd, formatted: row.label || ymd };
+    const baseRuns = (el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: ta.value }];
+    el.runs = spliceRunRange(baseRuns, start, end, run);
+    el.text = flattenRuns(el.runs); measureRuns(el); ta.value = el.text;
+    const caret = start + runDisplay(run).length; try { ta.selectionStart = ta.selectionEnd = caret; } catch (_e) {}
+    if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value);
+    if (this._refRefresh) this._refRefresh();
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Date added — “' + (row.label || ymd) + '”.', dismissible: true }); } catch (_e) {}
+  }
   // TRANSCLUDE: the user chose "embed" (⧉ button / Shift+Enter). Strip the @token from the host text, then drop a LIVE
   // read-only card below the editing element — a record target reuses the existing record card (already live), a line
   // target uses the new linecard. Forward-nav-only (dblclick jumps to source); no note-side badge by design.
@@ -3711,7 +3759,7 @@ class CanvasView {
     const rp = this._refPick; const start = rp.triggerStart, flat = ta.value, before = flat.slice(0, start), after = flat.slice(ta.selectionStart);
     this._closeRefPicker();
     ta.value = before + after; // transclude is a separate card, not inline text → remove the @token
-    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs)) delete el.runs; }
+    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs) && !el.runs.some((r) => r && r.t === 'datetime')) delete el.runs; }
     el.text = ta.value; if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
     if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value);
     if (this._refRefresh) this._refRefresh();
@@ -3731,7 +3779,7 @@ class CanvasView {
     const start = rp.triggerStart, flat = ta.value, before = flat.slice(0, start), after = flat.slice(ta.selectionStart);
     this._closeRefPicker();
     ta.value = before + after; // an image ref is a standalone chip, not inline text → remove the @token
-    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs)) delete el.runs; }
+    if (el.runs && el.runs.length) { el.runs = applyFlatEdit(el.runs, this._refPrevFlat ? this._refPrevFlat() : flat, ta.value); if (!hasRefRun(el.runs) && !el.runs.some((r) => r && r.t === 'datetime')) delete el.runs; }
     el.text = ta.value; if (el.runs && el.runs.length) measureRuns(el); else measureText(el);
     if (this._refSetPrevFlat) this._refSetPrevFlat(ta.value);
     if (this._refRefresh) this._refRefresh();
@@ -3889,8 +3937,20 @@ class CanvasView {
       bmp = await new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = url; });
       try { URL.revokeObjectURL(url); } catch (_e) {}
     }
-    if (!bmp) { // truly undecodable (e.g. HEIC on a non-Apple web client)
-      try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t decode that image (HEIC may need converting to JPEG on this device).', dismissible: true }); } catch (_e) {}
+    if (!bmp) {
+      // HEIC (or other) undecodable natively (Chrome-web can't decode HEIC) → lazy-load a HEIC→JPEG decoder (jsdelivr ESM,
+      // CSP-allowed like mermaid/pdfjs) and retry. Only for HEIC/HEIF inputs so non-HEIC failures fall straight through.
+      const looksHeic = /image\/hei[cf]/i.test(file.type || '') || /\.hei[cf]$/i.test(file.name || '');
+      if (looksHeic) {
+        try {
+          const mod = await loadLib(LIB.heic2any); const heic2any = mod.default || mod;
+          let jpeg = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 }); jpeg = Array.isArray(jpeg) ? jpeg[0] : jpeg;
+          if (jpeg) { try { bmp = await createImageBitmap(jpeg); } catch (_e) { const u = URL.createObjectURL(jpeg); bmp = await new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = u; }); try { URL.revokeObjectURL(u); } catch (_e2) {} } }
+        } catch (_e) {}
+      }
+    }
+    if (!bmp) { // still undecodable (decoder load blocked, or a non-HEIC corrupt image)
+      try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t decode that image — try converting it to JPEG/PNG.', dismissible: true }); } catch (_e) {}
       return null;
     }
     const iw = bmp.naturalWidth || bmp.width || 0, ih = bmp.naturalHeight || bmp.height || 0;
@@ -4041,7 +4101,7 @@ class CanvasView {
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
         try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // [{text, depth, lineGuid}] — depth from parent_guid chain (getChildren() returns [] on the flat load); lineGuid → line-level connection targeting (Phase 4)
-        try { entry.props = this._recPanelFields(rec).filter((p) => p && p.value !== '' && p.value != null).slice(0, 4); } catch (_e) {} // INLINE PROPERTIES: the record's typed property values (non-empty, capped) for a read-only chip row under the title
+        try { entry.props = this._recPanelFields(rec).filter((p) => p && p.name && p.name !== 'Title').slice(0, 8); } catch (_e) {} // INLINE PROPERTIES: ALL typed properties (incl. empty — schema-visible, like the side panel) EXCEPT the redundant Title (it repeats the card title)
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -4335,7 +4395,7 @@ class CanvasView {
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
     const sk = (this._recCache && this._recCache.get(el.recordGuid) || {}).skin || {}; // CS-8: property-conditional style
     if (sk.urgent) { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x - 3, y - 3, w + 6, h + 6, rad + 3); else ctx.rect(x - 3, y - 3, w + 6, h + 6); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ef4444'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.8; ctx.stroke(); ctx.restore(); } // Due-past urgency ring
-    const dark = PXC_DARK, accent = sk.color || el.strokeColor || '#7c5cff'; // dark-mode-aware surface/ink + a live-transclusion glow
+    const dark = this._canvasDark(), accent = sk.color || el.strokeColor || '#7c5cff'; // surface + ink follow the EFFECTIVE backdrop (theme/force-dark OR a dark viewBackgroundColor), not PXC_DARK alone
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: an explicit bg (any value, incl. white) wins; else a luminance-gated surface that MATCHES the canvas backdrop (dark on a dark/force-dark canvas, light otherwise)
@@ -4348,19 +4408,24 @@ class CanvasView {
     ctx.textBaseline = 'top';
     if (!rec) { ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = dark ? '#8b9096' : '#9aa0a6'; ctx.fillText('Loading…', tx, ty); ctx.restore(); ctx.restore(); return; }
     ctx.font = '600 15px system-ui, sans-serif'; ctx.fillStyle = titleCol; ctx.fillText(this._clipText(ctx, rec.title, maxW), tx, ty); ty += 23;
-    // INLINE PROPERTIES (read-only): a compact "Label  value" row per typed property under the title (Thymer record-header
-    // parity). Height is tracked in _cardPropsH so the dblclick open-band + the inline editor's titleH stay in sync.
+    // INLINE PROPERTIES (read-only): a DISTINCT two-column "Label  value" block under the title — a faint divider, an aligned
+    // label column, empty fields shown as a muted "—" (schema-visible, like the side panel). Height tracked in _cardPropsH so
+    // the dblclick open-band + the inline editor's titleH stay in sync.
     let _propsH = 0;
     if (rec.props && rec.props.length) {
-      const pTop = ty; ctx.font = '11px system-ui, sans-serif';
+      const pTop = ty;
+      ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.45; ctx.strokeStyle = dark ? '#3a4150' : '#e3e6ea'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tx, ty + 1.5); ctx.lineTo(tx + maxW, ty + 1.5); ctx.stroke(); ctx.restore(); // section divider
+      ty += 7;
+      const labW = Math.min(98, Math.max(48, maxW * 0.4)); // aligned label column → values line up (record-header look)
       for (const p of rec.props) {
-        if (ty > y + h - 30) break;
-        const lab = p.name + '  '; ctx.fillStyle = dark ? '#6f7681' : '#9aa0a6'; ctx.fillText(this._clipText(ctx, lab, maxW), tx, ty);
-        const lw = Math.min(ctx.measureText(lab).width, maxW - 24); ctx.fillStyle = dark ? '#c3c9d1' : '#3c4043';
-        ctx.fillText(this._clipText(ctx, String(p.value), Math.max(20, maxW - lw)), tx + lw, ty);
+        if (ty > y + h - 26) break;
+        ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = dark ? '#7b8492' : '#9aa0a6'; ctx.fillText(this._clipText(ctx, p.name, labW - 6), tx, ty + 1); // muted label
+        const empty = (p.value === '' || p.value == null); const val = empty ? '—' : String(p.value);
+        ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = empty ? (dark ? '#5b626e' : '#c2c7cf') : (dark ? '#c9cfd7' : '#3c4043');
+        ctx.fillText(this._clipText(ctx, val, Math.max(20, maxW - labW)), tx + labW, ty);
         ty += 15;
       }
-      ty += 3; _propsH = ty - pTop;
+      ty += 4; _propsH = ty - pTop;
     }
     (this._cardPropsH || (this._cardPropsH = new Map())).set(el.id, _propsH);
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
@@ -4947,7 +5012,7 @@ class CanvasView {
     // guides (matching the rendered card's _drawOutlineRow) + editable text. Tab/Shift+Tab re-indent; Enter appends a sibling
     // row; commit reuses pxcWriteCardTree + the SAME data-safety guards. The box is built UNSCALED + transform:scale(z) for zoom.
     const box = document.createElement('div');
-    const _edk = PXC_DARK, _ebg = this._cardSurfaceColor(_edk), _efg = _edk ? '#e6e7ea' : '#1e1e1e'; // editor popup matches the card surface (dark editor on a dark card, not a jarring white box)
+    const _edk = this._canvasDark(), _ebg = this._cardSurfaceColor(_edk), _efg = _edk ? '#e6e7ea' : '#1e1e1e'; // editor popup matches the card surface (dark editor on a dark card) — follows the EFFECTIVE backdrop, not PXC_DARK alone
     box.style.cssText = 'position:absolute;z-index:25;box-sizing:border-box;border:2px solid #7c5cff;border-radius:6px;background:' + _ebg + ';color:' + _efg + ';padding:5px 6px;font:12px system-ui,sans-serif;overflow:auto;outline:none;box-shadow:0 6px 22px rgba(0,0,0,.28);transform-origin:0 0';
     box.style.left = (s.x + 8 * z) + 'px'; box.style.top = (s.y + titleH * z) + 'px';
     box.style.width = Math.max(80, Math.abs(card.width) - 16) + 'px';
@@ -5076,7 +5141,7 @@ class CanvasView {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
-    const dark = PXC_DARK, accent = el.strokeColor || '#0ea5e9'; // dark-mode-aware surface/ink + a live-transclusion glow
+    const dark = this._canvasDark(), accent = el.strokeColor || '#0ea5e9'; // surface + ink follow the EFFECTIVE backdrop (incl. a dark viewBackgroundColor), not PXC_DARK alone
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: explicit bg wins; else a luminance-gated surface matching the canvas backdrop
@@ -6388,13 +6453,19 @@ class CanvasView {
     } catch (_e) {}
     this._darkCache = dark; this._darkCacheT = t; return dark;
   }
-  // The card body surface that MATCHES the live canvas backdrop. KEY FIX: `_cardSurface` is captured from the theme's
-  // --cards-bg REGARDLESS of luminance, so force-dark (settings.darkMode) over a LIGHT theme left it light → a white card on
-  // the dark (#0f1117) backdrop. Gate by luminance: when dark, only use _cardSurface if it's itself dark, else an elevated
-  // dark surface; when light, only if light, else white. An explicit el.backgroundColor still wins (handled at the call site).
+  // The ACTUAL painted canvas backdrop (mirrors the render fill at render()): #0f1117 in dark mode, else the per-canvas
+  // viewBackgroundColor (the user's chosen canvas colour). Cards must match THIS, not just the theme.
+  _canvasBgColor() { return PXC_DARK ? '#0f1117' : ((this.scene && this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'); }
+  // Is the EFFECTIVE canvas dark? Not just PXC_DARK (theme/force-dark) — ALSO a dark viewBackgroundColor (2026-06-24 bug:
+  // a LIGHT theme + a dark canvas bg left the card WHITE because it keyed off PXC_DARK only).
+  _canvasDark() { const L = _cssLum(this._canvasBgColor()); return (L != null) ? L < 0.5 : PXC_DARK; }
+  // The card body surface that MATCHES the live canvas backdrop. When the canvas is dark: the theme card colour if it's
+  // ITSELF dark (a real dark theme), else ELEVATE the actual backdrop so a card on a custom-dark canvas reads as a card
+  // (not a fixed navy that clashes). When light: the theme card colour if light, else white. Explicit el.backgroundColor
+  // still wins (handled at the call site).
   _cardSurfaceColor(dark) {
     const s = this._cardSurface, L = s ? _cssLum(s) : null;
-    if (dark) return (L != null && L < 0.5) ? s : '#1b1d24';
+    if (dark) { if (L != null && L < 0.5) return s; return pxcElevate(this._canvasBgColor(), 0.1) || '#1b1d24'; }
     return (L != null && L >= 0.5) ? s : '#ffffff';
   }
   render() {

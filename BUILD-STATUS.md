@@ -1,5 +1,30 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.98.0 — dark-canvas card match · natural dates in @ · HEIC images · properties v2 (2026-06-24)
+Four follow-up fixes from the user's transclusion pass.
+- **Card STILL white on a dark canvas** — v1.95 keyed the card off `PXC_DARK` (theme/force-dark), but the user's canvas is
+  dark via a dark `scene.appState.viewBackgroundColor` while `PXC_DARK` is FALSE → white card on a dark backdrop. New
+  `_canvasBgColor()` (mirrors the render fill) + `_canvasDark()` (luminance of the EFFECTIVE backdrop) + `pxcElevate`; both
+  card renderers now `const dark = this._canvasDark()` so surface AND text follow the real backdrop; `_cardSurfaceColor`
+  returns the theme card colour if dark, else an elevated backdrop. The inline editor popup follows `_canvasDark()` too
+  (review fix — was `PXC_DARK`, a white box on a dark card).
+- **Natural dates in the @ picker** — `@today`/`@tomorrow`/`@friday`/`@"Jan 1 2015"`/`@in 3 days` previously only searched
+  records. New `pxcParseNaturalDate` (keywords + weekday + `in N days` + `Date()`-parseable; `YYYY-MM-DD` parsed LOCAL to dodge
+  a UTC off-by-one). A 📅 date row is unshifted onto the record-mode picker; selecting it splices an inline `{t:'datetime'}`
+  run (renders the formatted date via `runDisplay`). Review fix: `normalizeRuns` now preserves `datetime` runs (HIGH — they
+  were dropped on the next keystroke, losing the date).
+- **HEIC images** — `_normalizeImageForInsert`: when native decode fails AND the file is HEIC/HEIF, lazy-load `heic2any`
+  (jsdelivr ESM via the existing `loadLib`, CSP-allowed like mermaid/pdfjs), convert to JPEG, retry. Non-HEIC failures fall
+  straight to the (reworded) toaster.
+- **Inline properties v2** (per the user: hide redundant Title · show empty fields · style distinctly) — `_recFor` now caches
+  ALL editable properties except `Title` (cap 8, incl. empty); `_drawRecordCard` renders a DISTINCT block: a faint divider, an
+  aligned label column, empty fields as a muted "—" (schema-visible like the side panel). Height still tracked in `_cardPropsH`
+  (open-band + editor offset stay in sync).
+- **Adversarial review: clean except 2 defects, BOTH FIXED** (normalizeRuns datetime drop — HIGH; editor popup PXC_DARK —
+  low-med). White-card render mirror, existing-case no-regression, date hijack/line-mode, HEIC no-regression all verified.
+  Node `pxc_canvasfix` 28/28 + `pxc_transclusion` 24/24 (props v2) + all regressions green. (HEIC decode itself is
+  browser-only, not node-testable; the non-HEIC path is provably unaffected.)
+
 ## ✅ v1.97.0 — HOT-RELOAD GUARD: clear "reload to continue" instead of a dead canvas after reinstall (2026-06-24)
 User report: "this update broke things — the toolbar isn't there and I can't pan." **Diagnosed live via chrome-devtools (NOT a
 code regression):** opened the user's EXACT "Mon Jun 22 — canvas" (`1NZE16...`) fresh under v1.96.0 → mounted clean, toolbar
