@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.110.0 — B1: INTERACTIVE in-place image crop (Tier-B loop, ship 5/26) (2026-06-24)
+The crop tool only did region-REFERENCE (drag a box → spawn a NEW cropped element). New: crop an image IN PLACE.
+- Command **"Plexus: Crop selected image (in place)"** → `_startCropInPlace` arms a one-shot `_cropInPlaceTarget` on the
+  single selected image; the next crop-marquee drag calls **`_cropInPlace`** which sets that image's own `el.crop` (natural
+  px, composes with any existing crop) + resizes its box to the cropped region. Refactored the crop math out of
+  `_referenceRegion` into a shared **`_computeCropRect`** (both paths now share the proven, cropTest-covered mapping).
+- **Non-destructive** (source `fileId`/bytes never touched — crop is only a `_drawImage` source rect) + **undoable**
+  (scheduleSave commits a history snapshot, like every mutation). Re-routes bound arrows via `_updateBindings`.
+- **Adversarial review: FIX-FIRST → both fixed.** (HIGH) the one-shot target leaked through `onPtrCancel`
+  (pointercancel/lostpointercapture never reaches the crop pointer-up that clears it) → now cleared there too (+ the
+  in-flight marquee), so a cancelled in-place crop can't hijack the next region-reference. (MED) the crop math is
+  axis-aligned/angle-blind → in-place crop now BLOCKED on a rotated image (toaster) until it's at 0°. Refactor equivalence,
+  non-destructiveness, undo, render/export/hit-test, crop-of-crop composition, and all OTHER leak surfaces confirmed clean.
+  Node `pxc_cropinplace` 20/20 + regressions green.
+- Next (worklist B2): 7 pen profiles.
+
 ## ✅ TIER A COMPLETE (7/7) — A7: TEST_HOOKS documented as the release toggle (Tier-A loop, item 7/26) (2026-06-24)
 The `TEST_HOOKS` gate already existed (`const TEST_HOOKS = true`@270 + the single `if (TEST_HOOKS) this._installTestHooks()`
 gate@7329 — the worklist's "gate behind a build flag" was already satisfied). Made it **self-documenting as the release

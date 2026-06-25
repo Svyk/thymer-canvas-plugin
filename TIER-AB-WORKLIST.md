@@ -24,7 +24,7 @@ backlog and check it off as "deferred" rather than forcing a broken build.
 - [x] A7 TEST_HOOKS strip — gate ALREADY EXISTED (`TEST_HOOKS` const@270 + single `if (TEST_HOOKS) this._installTestHooks()`@7329). Made it self-documenting as the release toggle (flip to false → strips the whole window.__plexusCanvas.test.* debug surface; kept TRUE for the live chrome-devtools verification this loop relies on). Comment-only, no behavior change, no version bump. Review-agent skipped (zero behavior risk; node --check + gate test green).
 
 ## Tier B — polish (lower value; probe-gated → if platform-blocked, log to backlog + check off as deferred)
-- [ ] B1 Interactive image crop handles (el.crop data model exists; needs the handle-drag UI)
+- [x] B1 Interactive image crop handles — SHIPPED v1.110.0 (in-place crop: command arms a one-shot crop marquee on the selected image → drag a box → crops it in place via el.crop; non-destructive, undoable; reuses the proven region-reference math)
 - [ ] B2 7 pen profiles (highlighter/finetip/fountain/marker/thick-thin…) + custom pen buttons
 - [ ] B3 Layer-manager panel (named layers: show/hide/lock/reorder)
 - [ ] B4 Frame settings dialog + clip-on-render + marker frames

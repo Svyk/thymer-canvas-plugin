@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.109.0';
+const PLEXUS_VERSION = '1.110.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1913,7 +1913,7 @@ class CanvasView {
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
   // region-draw never self-cancels.
-  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); }
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -3407,7 +3407,11 @@ class CanvasView {
       } else if (mode === 'pen' && created) { freedrawBBox(created); if (this._pendingRegionDraw && this._pendingRegionDraw.mode === 'pen') { const pts = created.points.slice(); created.isDeleted = true; created = null; this._finishRegionDraw(pts); this.scheduleSave(); } else { this.scheduleSave(); this._lastFreedraw = created; created = null; } } // round-5 D: a region-draw pen stroke binds the arrow + discards the stroke (it's a gesture, not a kept shape)
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
-        if (rect && rect.w > 3 && rect.h > 3) { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
+        const ipTarget = this._cropInPlaceTarget; this._cropInPlaceTarget = null; // B1: consume the one-shot in-place target — ALWAYS cleared so it can't leak into the next region-reference crop
+        if (rect && rect.w > 3 && rect.h > 3) {
+          if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
+          else { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
+        } else if (ipTarget) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
       }
       else if (mode === 'regionmark') { // F2: finalize the drop-to-mark region → write frac into the connection's binding (else keep the whole-element link)
         const rect = this._cropRect; this._cropRect = null; const prl = this._pendingRegionLink; this._pendingRegionLink = null;
@@ -3518,8 +3522,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region (round-5 F)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -3547,7 +3551,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -6416,7 +6420,10 @@ class CanvasView {
   // "Reference PART of an image": create a NEW image element showing just the world-rect region of
   // imgEl. Shares the same fileId (no data copy) + carries a `crop` in natural pixels. Handles
   // crop-of-crop (referencing a region of an already-cropped element).
-  _referenceRegion(imgEl, rect) {
+  // B1: shared crop-rect math — intersect a world `rect` with the image box, compose with any EXISTING crop (crop-of-crop),
+  // map to NATURAL pixels. Returns {crop:{x,y,w,h}, ix0,iy0, nw,nh} (world-space region) or null. Used by region-reference
+  // (new element) AND in-place crop, so both share the proven mapping (covered by cropTest).
+  _computeCropRect(imgEl, rect) {
     if (!imgEl || imgEl.type !== 'image' || !imgEl.width || !imgEl.height) return null;
     const file = this.scene.files && this.scene.files[imgEl.fileId];
     const natW = (file && file.w) || Math.abs(imgEl.width), natH = (file && file.h) || Math.abs(imgEl.height);
@@ -6428,11 +6435,33 @@ class CanvasView {
     const ix1 = Math.min(rect.x + rect.w, ex1), iy1 = Math.min(rect.y + rect.h, ey1);
     if (ix1 - ix0 < 2 || iy1 - iy0 < 2) return null;
     const sx = baseW / Math.abs(imgEl.width), sy = baseH / Math.abs(imgEl.height);
-    const crop = { x: baseX + (ix0 - ex0) * sx, y: baseY + (iy0 - ey0) * sy, w: (ix1 - ix0) * sx, h: (iy1 - iy0) * sy };
-    const nw = ix1 - ix0, nh = iy1 - iy0;
-    const el = makeImage(ex1 + 24, ey0, nw, nh, imgEl.fileId, { crop, cropOf: imgEl.id });
+    return { crop: { x: baseX + (ix0 - ex0) * sx, y: baseY + (iy0 - ey0) * sy, w: (ix1 - ix0) * sx, h: (iy1 - iy0) * sy }, ix0, iy0, nw: ix1 - ix0, nh: iy1 - iy0 };
+  }
+  _referenceRegion(imgEl, rect) {
+    const r = this._computeCropRect(imgEl, rect); if (!r) return null;
+    const ex1 = Math.max(imgEl.x, imgEl.x + imgEl.width), ey0 = Math.min(imgEl.y, imgEl.y + imgEl.height);
+    const el = makeImage(ex1 + 24, ey0, r.nw, r.nh, imgEl.fileId, { crop: r.crop, cropOf: imgEl.id });
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id);
     this.dirty = true; this.scheduleSave(); return el;
+  }
+  // B1: crop the image IN PLACE — set el.crop (natural px, composes with any existing crop) + resize the element to the
+  // cropped region at the box's position. NON-DESTRUCTIVE: the source fileId/bytes are NEVER touched (crop is only a source
+  // rect for _drawImage), and it's undoable (scheduleSave commits a history snapshot, like every other mutation).
+  _cropInPlace(imgEl, rect) {
+    const r = this._computeCropRect(imgEl, rect); if (!r) return null;
+    imgEl.crop = r.crop; imgEl.x = r.ix0; imgEl.y = r.iy0; imgEl.width = r.nw; imgEl.height = r.nh;
+    this.selected.clear(); this.selected.add(imgEl.id);
+    this._updateBindings(); // the element moved/resized → re-route any bound arrows (matches the resize-commit convention)
+    this.dirty = true; this.scheduleSave(); return imgEl;
+  }
+  // B1: arm a one-shot in-place crop on the single selected image — the next box drawn with the crop tool crops it in place
+  // (vs the default region-reference, which spawns a new cropped element). Consumed + cleared in the crop pointer-up branch.
+  _startCropInPlace() {
+    const img = this._singleSel();
+    if (!img || img.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image to crop.', dismissible: true }); } catch (_e) {} return; }
+    if (img.angle) { try { this.plugin.ui.addToaster({ title: 'Plexus: rotate the image back to 0° before cropping in place.', dismissible: true }); } catch (_e) {} return; } // B1: the crop math is axis-aligned (ignores el.angle) — block in-place crop on a rotated image rather than crop the wrong region
+    this._cropInPlaceTarget = img; this.tool = 'crop'; this._syncToolbar();
+    try { this.plugin.ui.addToaster({ title: 'Crop: drag a box over the image to crop it in place (Esc cancels).', dismissible: true }); } catch (_e) {}
   }
   // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
   _snapshotElement(el) {
@@ -7258,6 +7287,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Crop selected image (in place)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._startCropInPlace(); } }); // B1 — arms a one-shot crop marquee on the selected image; drag a box → crops it in place (non-destructive, undoable)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI edit selected image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiEditImage(); } }); // Phase 6: image edit
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI wireframe → live app', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiWireframe(); } }); // Phase 6: wireframe→code
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });
