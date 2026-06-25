@@ -1,5 +1,28 @@
 # Plexus Canvas — build status (resumable)
 
+## ⏸ PARITY LOOP iter 7 — AUDIT-ONLY: parity effectively reached, loop PAUSED (no ship) (2026-06-24)
+Per the loop's own exit rule ("if the next several roadmap basics are ALL already shipped, say so and pause
+rather than invent low-value features"). Grep-audited every basic the loop named against plugin.js — ALL present:
+- **Basics shipped:** laser pointer (S6 `_laser`), eraser, frame/section + **frame→slide ordering**
+  (`_slideFrames`/`_gotoSlide`/present-mode stepping), image **crop** (`_referenceRegion`/`crop`), **align &
+  distribute** (`_align` incl. disth/distv), **stats panel** (`_selectionStats`), **eyedropper** (`_eyedropper`),
+  **per-element external link** (`el.link`+`window.open`), **format painter** (`_copyStyles`/`_pasteStyles`),
+  relationship presets (`PXC_REL_PRESETS`), **SVG import/export** (`importSvg`/`exportSvg`), **drag-drop**
+  (img/SVG/PDF), Mermaid/LaTeX/PDF (lazy `loadLib`), templates+palette (`_applyTemplate`), grid/snap, property
+  panel, in-canvas search, **copy-as-PNG** (`ClipboardItem`), natural dates, HEIC, inline-editable properties.
+- **Elevation shipped:** E1 live cards · E2 query nodes · E3 outline⇄canvas (bidirectional v1.105) · E5
+  drag-to-restructure (v1.104) · E6 AI-diagram · E7/E8 (covered: query nodes + present + live cards) · E9
+  semantic + relational ghost-edges (v1.103) · E10 multi-canvas board embed · E11 property encoding
+  (Status→border, Priority→scale, Due→urgency) · E13 gallery + drawing-in-drawing · E14 timeline/Gantt re-date.
+- **Graph/mind-map family (v1.100–v1.105):** neighbour expansion · ⊕ nub · force-directed layout · ghost-edges
+  · drag-to-restructure · mind-map→note export.
+- **ONLY residuals = platform-blocked / deferred-by-design / cross-plugin** (NOT loop-buildable basics):
+  copy-as-SVG-to-clipboard (browsers reject `image/svg+xml` in ClipboardItem; file export works), Day-View DROP
+  UI (cross-plugin — re-date-in-place itself is done), opentype.js/CJK + full PDF export (deliberately lazy /
+  later, Scope #5), event-journal time-travel (E7 fidelity, later), AI mask-inpaint over image (E6, behind consent).
+- **Decision: PAUSED the self-paced loop** (no ScheduleWakeup re-arm). Resume only on an explicit user-picked
+  deferred item; do not invent low-value work.
+
 ## ✅ v1.105.0 — OUTLINE⇄CANVAS reverse: mind map → note (export outline) (2026-06-24)
 PARITY LOOP iter 6. The missing reverse of `_mmFromNote` (note→canvas): "Mind map → note (export outline)" turns a canvas
 mind-map into a NEW Thymer note whose nested outline mirrors the tree.
