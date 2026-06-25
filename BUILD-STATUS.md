@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ B5 — gallery AUDIT-RESOLVED + companion-plugin DEFERRED, NO SHIP (Tier-B loop, item 11/26) (2026-06-24)
+Worklist B5 ("companion Drawings CollectionPlugin declaring Scene/Assets fields + gallery view"). The **gallery already
+ships** — `GALLERY_PANEL_ID='plexus-gallery'`, `registerCustomPanelType`@7248, `_openGallery`/`_mountGallery`@8090 (grid of
+all drawings' banner thumbnails, click to open), command "Plexus: Gallery (all drawings)"@7277 (verified v0.26.0 `galleryTest`).
+- The **companion CollectionPlugin** half is deferred to the Thymer backlog: it's a SEPARATE plugin artifact (Canvas is a
+  `global_plugin`, this would be a `collection_plugin` declaring Scene/Assets/Scene Rev/Scene Schema/Source Note in its
+  config.fields); its only value is one-time setup hardening (auto-create the props on a fresh install) but those props
+  ALREADY exist on the live workspace via MCP; and declaring the same fields over existing properties on the LIVE drawings
+  collection carries conflict/duplication risk that only resolves on install → must be built + tested against a TEST
+  collection first, a deliberate user-gated task, not loop-autopilot. No code change, no version bump.
+- **Run note:** B3/B4/B5 were consecutive no-ships — expected, the worklist (from the deferred-audit) over-scoped a few
+  late items; the plugin is mature so several "polish" items are already covered or low-value. Genuine builds still ahead in
+  Tier B: B9 deep-link anchors · B10 in-panel Settings modal · B11 IndexedDB cache · B13 jspdf PDF · B14 connector ergonomics
+  · B16 export fidelity (SVG hatch + grid/snap decouple) · B18 dead-code cleanup.
+- Next (worklist B6): restored-panel auto-reopen (PROBE-gated — known platform-limited issue; probe first, defer if blocked).
+
 ## ℹ️ B4 — AUDIT-RESOLVED + residuals DEFERRED, NO SHIP: frame settings already ship (Tier-B loop, item 10/26) (2026-06-24)
 Worklist B4 ("frame settings dialog + clip-on-render + marker frames"). Audit of plugin.js: the useful frame settings are
 already shipped — **name** render (`_drawFrame`@5163, default "Section"), **rename** (double-click a frame → "Section name:"
