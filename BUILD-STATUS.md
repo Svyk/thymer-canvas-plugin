@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ A6 — AUDIT-RESOLVED, NO SHIP: elbow/orthogonal arrows already shipped (Tier-A loop, item 6/26) (2026-06-24)
+Worklist A6 ("elbow / orthogonal arrows — right-angle connector routing") is ALREADY shipped + fully wired (the worklist
+even self-noted the audit mis-tagged it under later-AI). Grep-audit of plugin.js:
+- **`routedPoints(el)`@912** routes a 2-pt connector as an orthogonal right-angle 4-pt path (H-V-H or V-H-V by dominant axis).
+- Toggle UI: **`_toggleElbow`@1977** + **`_setConnRouting('elbow')`@1980** (straight | elbow | curved, mutually exclusive);
+  the connector style flyout has a **"⌐ Elbow (right-angle)"** button@2290; command **"Plexus: Toggle elbow arrow"**@7209.
+- Fully integrated: render@938, hit-test@1248, **SVG export honours the routed path**@1452, `_updateBindings` re-routes
+  bound elbow arrows, and diagram generators use it (`arr.elbowed=true`@5900).
+- Right-angle routing is complete; obstacle-avoidance routing (Excalidraw's bound-shape avoidance) is a separate, more
+  advanced feature — NOT this worklist item. **No code change, no version bump.**
+- Next (worklist A7): TEST_HOOKS strip (gate the debug hooks behind a build flag).
+
 ## ✅ v1.109.0 — A5: BACKLINKS list — "what references this" (Tier-A loop, ship 4/26) (2026-06-24)
 The live ref/card model already produces backref data (used by the CS-4 graph pull-in + ghost-edges), but there was no
 LIST surface to answer "which records reference this drawing." New read-only command **"Plexus: Backlinks (what references
