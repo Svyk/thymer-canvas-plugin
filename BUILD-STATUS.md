@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.101.0 — MIND MAP: interactive ⊕ expand-on-click nub (2026-06-24)
+PARITY LOOP iter 2. The NotebookLM/Heptabase "click to grow the graph" UX: a single selected RECORD card now shows a ⊕ nub
+22 screen-px below it; clicking it runs `_pullInNeighbours` (the v1.100 direction-aware expansion) — so you grow the relational
+map node-by-node instead of only via the command palette.
+- `_expandNubScreen(card)` = `worldToScreen(card.cx, card.bottom + 22/zoom)` (constant 22px at any zoom), null for non-records.
+  Render (overlay, world coords under the z·d transform) + hit-test feed the SAME point → the drawn ⊕ is exactly where the
+  click lands. onDown hit-test sits AFTER rotate/resize handles (they win on overlap) + BEFORE body-move; a miss falls through
+  (no click theft); `mode=null; return` like the task-checkbox idiom.
+- Overlay-only affordance (drawn on `ictx`, save/restore-balanced) — NOT a scene element, so zero render/select/export/minimap/
+  lasso surface (verified). Reuses the read-only `_pullInNeighbours` (no record writes).
+- **Adversarial review: clean, no defects on all 5 axes** (hit-test ordering/no-theft, overlay state balance + no scene mutation,
+  render↔hit-test consistency at any zoom/pan, `_pullInNeighbours` re-entrancy = pre-existing+deduped, scope). Node
+  `pxc_expandnub` 16/16 + all regressions green. (Cosmetic-only: the ⊕ uses the unrotated bottom-center — fine since render +
+  hit stay aligned and record cards are rarely rotated.)
+- Next iters: semantic/backlink ghost-edges · graph auto-layout.
+
 ## ✅ v1.100.0 — MIND MAP: direction-aware relational neighbour expansion (ExcaliBrain relation-vector port) (2026-06-24)
 PARITY LOOP iter 1 (Heptabase/Excalidraw/ExcaliBrain → full parity). Upgraded `_pullInNeighbours` from a flat grey ring
 into a direction-aware relational mind-map, porting ExcaliBrain's relation-vector model (`~/excalidraw-port-research/excalibrain`)

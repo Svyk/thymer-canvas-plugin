@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.100.0';
+const PLEXUS_VERSION = '1.101.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2815,6 +2815,9 @@ class CanvasView {
     return nubs;
   }
   _nubAt(sp) { if (!this._connHover || this._connHover.isDeleted) return null; for (const n of this._connNubsFor(this._connHover)) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 11) return n; } return null; }
+  // MIND MAP: the screen position of the ⊕ "expand graph" nub shown below a selected RECORD card (22 screen-px under its
+  // bottom edge). Click it → _pullInNeighbours (grow the relational graph node-by-node). Render + hit-test use this same point.
+  _expandNubScreen(card) { if (!card || card.type !== 'record') return null; return this.camera.worldToScreen(card.x + card.width / 2, card.y + card.height + 22 / this.camera.zoom); }
   // round-5 B: a press on a multi-selection's group-connect nub (drawn last frame) → the nub world point + the member ids.
   _groupNubAt(sp) { if (!this._groupNubs || !this._groupNubIds) return null; for (const n of this._groupNubs) { const s = this.camera.worldToScreen(n.x, n.y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 12) return { x: n.x, y: n.y, ids: this._groupNubIds }; } return null; }
   // round-5 F: a press on a pending SOURCE-region nub (drawn last frame) → the nub world point + the region to start a connection FROM.
@@ -3143,6 +3146,9 @@ class CanvasView {
           if (near('rot')) { mode = 'rotate'; rotEl = sel; rotCenter = { x: sel.x + sel.width / 2, y: sel.y + sel.height / 2 }; rotStart = sel.angle || 0; rotPtr0 = Math.atan2(down.y - rotCenter.y, down.x - rotCenter.x); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
           for (const k of HANDLE_KEYS) if (near(k)) { mode = 'resize'; rsEl = sel; rsHandle = k; rs0 = { x: sel.x, y: sel.y, w: sel.width, h: sel.height, a: sel.angle || 0 }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         }
+        // MIND MAP: the ⊕ expand nub below a selected record card → grow its relational graph (parents/children/friends). After
+        // the resize handles (so a handle wins on overlap — the nub sits 22px BELOW the card, clear of them), before body-move.
+        if (sel && sel.type === 'record') { const en = this._expandNubScreen(sel); if (en && Math.hypot(en.x - sp.x, en.y - sp.y) < 13) { this._pullInNeighbours(); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
         // B (curved/multi-point): a single selected connection shows draggable point handles + ghost mid-dots. Press a REAL
         // point → drag it (an endpoint detaches its binding so it won't snap back); press a ghost MID-dot → insert a real
         // waypoint there and drag it out (a custom waypoint clears orthogonal elbow auto-routing). Before the body-move hit.
@@ -6808,6 +6814,12 @@ class CanvasView {
       const _edgeOnly = (_st === 'ellipse' || _st === 'diamond' || _st === 'triangle' || _st === 'parallelogram' || _st === 'hexagon' || _st === 'cloud');
       for (const k of (_edgeOnly ? ['n', 'e', 's', 'w'] : HANDLE_KEYS)) { const p = H[k]; ictx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs); ictx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs); }
       ictx.beginPath(); ictx.arc(H.rot.x, H.rot.y, hs / 1.5, 0, 7); ictx.fill(); ictx.stroke();
+      if (single.type === 'record') { // MIND MAP: a ⊕ "expand graph" nub below the card → grow its relational neighbours
+        ictx.save(); const ex = single.x + single.width / 2, ey = single.y + single.height + 22 / z, rr = 9 / z;
+        ictx.beginPath(); ictx.arc(ex, ey, rr, 0, 7); ictx.fillStyle = '#7c5cff'; ictx.fill(); ictx.lineWidth = 1.5 / z; ictx.strokeStyle = '#ffffff'; ictx.stroke();
+        ictx.lineWidth = 1.7 / z; ictx.beginPath(); ictx.moveTo(ex - rr * 0.48, ey); ictx.lineTo(ex + rr * 0.48, ey); ictx.moveTo(ex, ey - rr * 0.48); ictx.lineTo(ex, ey + rr * 0.48); ictx.stroke();
+        ictx.restore();
+      }
     } else if (single && (single.type === 'arrow' || single.type === 'line') && single.points && single.points.length >= 2) {
       // B (curved/multi-point): a selected connection shows its editable points. Ghost mid-dots (drag → insert a bend),
       // endpoints (violet, drag → move/detach-rebind), interior waypoints (white ring, drag → move · dblclick → delete).
