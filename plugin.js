@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.106.0';
+const PLEXUS_VERSION = '1.107.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1389,7 +1389,7 @@ async function saveSceneChunked(plugin, rec, scene, view) {
   try { const mp = rec.prop('Manifest'); if (mp && mp.set) { mp.set(JSON.stringify({ v: 1, rev, chunks: manifestChunks })); for (let i = 0; i < 4 && !okManifest; i++) { try { const m2 = JSON.parse((mp.text && mp.text()) || '{}'); okManifest = m2 && m2.rev === rev; } catch (_e) {} if (!okManifest) await sleep(120); } } } catch (_e) {}
   if (!okManifest) return { ok: false, reason: 'manifest write' }; // chunks anchored (union), OLD manifest still authoritative → no loss
   if (cp && cp.set) { try { cp.set(dedup(currentFvs)); } catch (_e) {} } // PRUNE: drop now-unreferenced old blobs → GC
-  try { if (rec.prop('Scene Rev')) { rec.prop('Scene Rev').set(rev); if (rec.prop('Scene Schema')) rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
+  try { if (rec.prop('Scene Rev')) { const curSR = rec.prop('Scene Rev').number() || 0; const nextSR = Math.max(curSR, rev) + 1; rec.prop('Scene Rev').set(nextSR); if (rec.prop('Scene Schema')) rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); if (view) view._sceneRev = nextSR; } } catch (_e) {} // A2: keep Scene Rev STRICTLY MONOTONIC across modes (= max(curSceneRev, manifestRev)+1, NOT the manifest rev) so a chunked↔single-blob switch can't make the counter go backwards → closes the missed-cross-device-conflict window. Manifest.rev (chunk reuse) is untouched.
   if (view) {
     view._chunkHashes = newHashes; view._wasChunked = true; view._chunkSaveCount = (view._chunkSaveCount || 0) + 1;
     if (view._chunkSaveCount % PXC_CHUNK_CHECKPOINT === 0) { try { const cf = new File([JSON.stringify(scene)], SCENE_FILENAME, { type: 'application/json' }); const cb = await plugin.data.uploadBlob(cf); if (cb && rec.prop('Scene') && rec.prop('Scene').setFileFromBlob) rec.prop('Scene').setFileFromBlob(cb); } catch (_e) {} } // periodic full-Scene checkpoint refreshes the coarse fallback
@@ -1584,8 +1584,37 @@ function elementsFromCauseEffect(chart, ox, oy, layout, chartId) {
     const mid = makeText((a.x + b.x) / 2 + a.w / 2, (a.y + b.y) / 2 + a.h + 4, { fontSize: 11, stroke: CE_CONNECTOR_COLOR }); mid.text = c.label || 'Connects to'; measureText(mid); out.push(mid); }
   return out;
 }
+// A2 (concurrency): copy the CURRENT remote scene (the one we're about to overwrite) to a NEW conflict `file` LINE on the
+// backing Drawings record — APPEND-ONLY: it never touches the live Scene blob/property or any existing line, and never
+// deletes. Best-effort: any failure just means the save still proceeds (we NEVER block the user's own save on the backup).
+// In chunked mode the Scene property holds a coarse full-scene checkpoint, so the backup is a near-latest copy, not exact.
+async function _backupConflictScene(plugin, rec, view, stored) {
+  let bytes = null;
+  try { const pb = await rec.prop('Scene').fileBlob(); if (pb) bytes = await pb.download(); } catch (_e) {}
+  if (!bytes) { try { const ln = (view && view._sceneLine) || await findSceneLine(rec); if (ln && ln.getBlob) { const lb = await ln.getBlob(); if (lb) bytes = await lb.download(); } } catch (_e) {} }
+  if (!bytes) return false;
+  let stamp = 'conflict'; try { stamp = new Date().toISOString().replace(/[:.]/g, '-'); } catch (_e) {}
+  const file = new File([bytes], 'plexus-scene-conflict-r' + (stored || 0) + '-' + stamp + '.json', { type: 'application/json' });
+  try { const line = await rec.createLineItem(null, null, 'file', null, null); if (line) { return (await line.setBlob(file)) !== false; } } catch (_e) {}
+  return false;
+}
 async function saveScene(plugin, rec, scene, camera, view) {
   scene.appState.scroll = { x: camera.x, y: camera.y }; scene.appState.zoom = camera.zoom;
+  // A2: concurrency rev-check — a single user on multiple devices (or a reopened stale tab) can silently clobber a NEWER
+  // remote save (last-write-wins, no detection). Before overwriting, compare the record's CURRENT `Scene Rev` to the rev THIS
+  // view last loaded/wrote (view._sceneRev). If a concurrent device bumped it past ours → back up the about-to-be-overwritten
+  // remote scene to a conflict copy (non-destructive) and WARN. We still save (continuity for the active editor), but the
+  // other version is preserved, not lost. Skipped when view._sceneRev is null (a view-less or never-loaded save).
+  try {
+    const rp = rec.prop('Scene Rev');
+    if (rp && view && view._sceneRev != null) {
+      const stored = rp.number() || 0;
+      if (stored > view._sceneRev) {
+        try { await _backupConflictScene(plugin, rec, view, stored); } catch (_e) {}
+        try { plugin.ui.addToaster({ title: 'Plexus: this drawing also changed on another device — that version was backed up as a conflict copy on the drawing record; saving your current version now.', dismissible: true }); } catch (_e) {}
+      }
+    }
+  } catch (_e) {}
   // CP-1: stamp a valid fractional z-index reflecting paint (array) order, so the persisted scene is
   // Excalidraw-export-valid (was a dead 'a0' constant). Lexicographically sortable, fixed-width base36.
   for (let i = 0; i < scene.elements.length; i++) scene.elements[i].index = 'a' + i.toString(36).padStart(8, '0');
@@ -1626,7 +1655,7 @@ async function saveScene(plugin, rec, scene, camera, view) {
     try { ok = await line.setBlob(blob); } catch (e) { return { ok: false, reason: 'setBlob ' + e }; }
   }
   // Best-effort metadata (Plexus Drawings + any collection with these props; silently skipped elsewhere).
-  try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); } } catch (_e) {}
+  try { if (rec.prop('Scene Rev')) { const cur = rec.prop('Scene Rev').number() || 0; rec.prop('Scene Rev').set(cur + 1); rec.prop('Scene Schema').set(scene.schema || SCENE_SCHEMA); if (view) view._sceneRev = cur + 1; } } catch (_e) {} // A2: adopt the new rev (= max(remote,ours)+1 after a conflict-overwrite) as our last-known
   // PERF: the O(n) `Canvas Text` rescan + banner PNG re-export used to run on EVERY save (write amplification).
   // They're now a DEBOUNCED idle pass (view._scheduleBannerText) — cosmetic + search-only, decoupled from the
   // durable scene write above. View-less saves (rare) still refresh them inline here so nothing is lost.
@@ -6572,6 +6601,8 @@ class CanvasView {
       // open (saveScene writes the property + deletes the body line). Auto-cleans existing flipped notes.
       if (!fresh && this._sceneLine && sceneProp && !this._pendingBacking) { setTimeout(() => { if (!this.destroyed) this.saveNow(); }, 500); }
     }
+    // A2: capture the rev we just loaded so a later save can detect a concurrent overwrite from another device (no store / fresh drawing → 0).
+    try { this._sceneRev = (this.rec && this.rec.prop('Scene Rev')) ? (this.rec.prop('Scene Rev').number() || 0) : 0; } catch (_e) { this._sceneRev = 0; }
     // SCALE/backing: a LEGACY canvas on an arbitrary host (pending backing) with real content → create the backing, move
     // scene+assets onto its properties, and clean the host body. Once, shortly after load (≥ the 600ms inline migration so
     // scene.files are blobGuids). Later opens resolve the backing via the Source Note relation.

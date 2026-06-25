@@ -1,5 +1,26 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.107.0 — A2: CONCURRENCY REV-CHECK — detect + back up a multi-device overwrite (Tier-A loop, ship 2/26) (2026-06-24)
+A single user on multiple devices (or a reopened stale tab) could SILENTLY clobber a newer remote save (last-write-wins, no
+detection = data loss). Now `saveScene` detects it and preserves both versions.
+- **`view._sceneRev`** captured on load (`loadOrInit`) + after every write (chunked + single-blob, in lockstep with the
+  `Scene Rev` property). At the TOP of `saveScene` (before any overwrite), if the record's current `Scene Rev` > our
+  last-known → a concurrent device wrote after we loaded → **`_backupConflictScene`** copies the about-to-be-overwritten
+  REMOTE scene to a NEW `plexus-scene-conflict-r<rev>-<ts>.json` `file` LINE on the **backing Drawings record** (append-only:
+  never deletes/overwrites the live Scene, any line, or the user's note body), a toaster warns, and we STILL save
+  (last-write-wins for the active editor's continuity — but the other version is preserved, not lost).
+- **Data-safety**: backup is best-effort + fully try/caught → NEVER blocks the user's own save; conflict branch only fires
+  when `Scene Rev` exists AND `view._sceneRev != null` (no false-positive on fresh/first/view-less saves); single-flight
+  `saveNow` guard serializes saves so the rev read/compare/write can't race. Backup lands on the backing record only (the
+  one host-record window has no `Scene Rev` prop → branch skipped).
+- **Adversarial review: SHIP, all 7 data-safety axes confirmed clean.** Applied the one MED hardening: `Scene Rev` is now
+  STRICTLY MONOTONIC across modes (`max(curSceneRev, manifestRev)+1`, not the manifest rev) so a chunked↔single-blob switch
+  can't run the counter backwards → closes the only (false-NEGATIVE, never destructive) gap. Softened the toaster wording
+  (NIT). Node `pxc_revcheck` 27/27 + regressions green.
+- Known best-effort limits (acknowledged, not blocking): chunked-mode backup uses the coarse Scene checkpoint (≤4 saves
+  behind); repeated genuine concurrent bumps stack append-only conflict lines (no cap — self-limits in the common case).
+- Next (worklist A3): AI image-edit on externalized (blob-backed) images.
+
 ## ✅ v1.106.0 — A1: LIVE CARDS in PNG/SVG/print/cite export (Tier-A loop, ship 1/26) (2026-06-24)
 TIER-A/B build loop (worklist: `~/plexus-canvas/TIER-AB-WORKLIST.md`; Tier C+D logged as backlog on the Thymer
 "Plexus Canvas" project page `1ZD714PF7526KQTYQGRN3RK3MH`). Record/query/linecard/rollup/table/board/task cards were
