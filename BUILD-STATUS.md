@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.105.0 — OUTLINE⇄CANVAS reverse: mind map → note (export outline) (2026-06-24)
+PARITY LOOP iter 6. The missing reverse of `_mmFromNote` (note→canvas): "Mind map → note (export outline)" turns a canvas
+mind-map into a NEW Thymer note whose nested outline mirrors the tree.
+- **`_mindMapToNote(node)`** — resolves the map root (`node.mmRoot`); DFS-flattens (`_mmNodes` + `mmParent`, seen-set guarded)
+  to `[{text,depth}]`; prompts for a collection; `col.createRecord(rootText)` → the TITLE; APPENDS nested line items (depth-1 →
+  record top-level, deeper → under `lastAt[d-1]`, the depth stack pruned so a sibling after a deep branch re-parents correctly);
+  drops a live linked record card below the map. **NON-DESTRUCTIVE: a FRESH record only — never edits the source note or any
+  existing line** (even when the root carries `refGuid`/`isRef`, that's never a write target). Append-only; failed `createLineItem`
+  is caught + the honest `wrote` count reported.
+- **Adversarial DATA-SAFETY review: clean, NO defects** (new-record-only/never-touches-existing, append-only + parenting stack,
+  guards/edge cases, DFS correctness, visibility, cross-cutting). Applied the optional cycle-guard (seen-Set) so a corrupt
+  `mmParent` cycle can't hang. Node `pxc_mm2note` 12/12 + all regressions green.
+- OUTLINE⇄CANVAS is now bidirectional (note→canvas `_mmFromNote`/`_outlineToCanvas` + canvas→note `_mindMapToNote`).
+- Next: remaining Excalidraw/Obsidian basics on the CANVAS-ROADMAP (audit-before-build — the plugin is mature).
+
 ## ✅ v1.104.0 — GRAPH DRAG-TO-RESTRUCTURE: drop a card onto another → write a real ref link (2026-06-24)
 PARITY LOOP iter 5 — completes the graph/mind-map family. Drag a record card so its CENTER lands on ANOTHER record card →
 the target rings (ROLE_HEX.child) during the drag → on release a CONFIRM menu → writes a REAL relation. User chose the

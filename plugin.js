@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.104.0';
+const PLEXUS_VERSION = '1.105.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5430,6 +5430,30 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: made ? ('Mind map: ' + made + ' nodes from headings.') : 'Note has no headings — added a central node.', dismissible: true }); } catch (_e) {}
     return root.id;
   }
+  // OUTLINE⇄CANVAS (the reverse of _mmFromNote): export a canvas mind-map → a NEW note whose nested outline mirrors the tree.
+  // NON-DESTRUCTIVE: creates a FRESH record (never edits an existing note) + APPENDS line items (root text = title, children =
+  // nested ulist by depth). Drops a live card so the new note is on the canvas, linked. Reviewed for data-safety (new-record + append).
+  async _mindMapToNote(node) {
+    if (!node || !node.mmRoot) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} return; }
+    const root = this._byId(node.mmRoot); if (!root) return;
+    const all = this._mmNodes(root.mmRoot), rows = [], seen = new Set();
+    const visit = (n, depth) => { if (seen.has(n.id)) return; seen.add(n.id); rows.push({ text: String(n.text == null ? '' : n.text).trim(), depth }); for (const k of all.filter((e) => e.mmParent === n.id)) visit(k, depth + 1); }; // seen-set: never hang on a corrupt mmParent cycle
+    visit(root, 0);
+    if (rows.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: the mind map has no child nodes to export.', dismissible: true }); } catch (_e) {} return; }
+    const colName = await this._promptText('Export mind map → a NEW note in collection:', (this.plugin._ontology && this.plugin._ontology.entityCollections && this.plugin._ontology.entityCollections[0]) || 'Notes');
+    if (!colName) return;
+    let col = null; try { const cols = await this.plugin.data.getAllCollections(); col = (cols || []).find((c) => c.getName && c.getName().toLowerCase() === colName.trim().toLowerCase()); } catch (_e) {}
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no collection named “' + colName + '”.', dismissible: true }); } catch (_e) {} return; }
+    const title = rows[0].text || 'Mind map';
+    let guid = null; try { guid = col.createRecord(title); } catch (e) { console.error('[Plexus] mm→note', e); }
+    if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the note.', dismissible: true }); } catch (_e) {} return; }
+    let rec = null; try { rec = await getRecordPoll(this.plugin, guid); } catch (_e) {}
+    if (!rec) { this.plugin._lastRecordGuid = guid; try { this.plugin.ui.addToaster({ title: 'Note created — open it to add the outline.', dismissible: true }); } catch (_e) {} return; }
+    const lastAt = {}; let wrote = 0; // APPEND nested line items: depth 1 → record top-level (parent null), deeper → under lastAt[d-1]
+    for (let i = 1; i < rows.length; i++) { const d = rows[i].depth, parent = d <= 1 ? null : (lastAt[d - 1] || null); let li = null; try { li = await rec.createLineItem(parent, null, 'ulist', [{ type: 'text', text: rows[i].text }], null); } catch (_e) {} if (li) { lastAt[d] = li; for (const k in lastAt) if (+k > d) delete lastAt[k]; wrote++; } }
+    this.plugin._lastRecordGuid = guid; this._invalidateRec(guid); this._insertRecordCard(guid, root.x, root.y + Math.abs(root.height || 40) + 220); // drop a live linked card below the map
+    try { this.plugin.ui.addToaster({ title: 'Exported → note “' + title + '” (' + wrote + ' line' + (wrote === 1 ? '' : 's') + ').', dismissible: true }); } catch (_e) {}
+  }
   // CP-3 v3c: the subtree under a node (node + descendants), branch copy/cut/paste, boundary box, spatial nav.
   _mmSubtree(rootNode) {
     const all = this._mmNodes(rootNode.mmRoot), out = []; const visit = (id) => { const n = all.find((e) => e.id === id); if (!n) return; out.push(n); for (const k of all.filter((e) => e.mmParent === id)) visit(k.id); }; visit(rootNode.id); return out;
@@ -7121,6 +7145,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon Library (your #icon records)', icon: 'ti-stack', onSelected: () => this._openIconLibrary() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New mind map', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._newMindMap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map from note (import headings)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._mmFromNote(this._lastRecordGuid); } }); // CP-3 v3a
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Mind map → note (export outline)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) { const n = v._singleSel(); if (n && n.mmRoot) v._mindMapToNote(n); else try { this.ui.addToaster({ title: 'Plexus: select a mind-map node first.', dismissible: true }); } catch (_e) {} } } }); // OUTLINE⇄CANVAS reverse: canvas mind-map → a new note's nested outline
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Query pinboard (cards from a search)', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._queryPinboard(); } }); // CS-9
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards by property (kanban)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeByProperty(); } }); // CS-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange cards on a timeline (drag to re-date)', icon: 'ti-calendar', onSelected: () => { const v = this._activeView(); if (v) v._arrangeTimeline(); } });

@@ -1,6 +1,6 @@
 {
   "name": "Plexus Canvas",
-  "version": "1.104.0",
+  "version": "1.105.0",
   "type": "global_plugin",
   "icon": "ti-pencil",
   "description": "Native Thymer infinite-canvas whiteboard (no @excalidraw). A drawing is a record. Embedded in-image region references with freehand-shape lasso, cinematic establish-then-zoom flight + spotlight, and an offscreen render cache for 60fps pan/zoom on large boards. Web+desktop synced via blob filename.",
