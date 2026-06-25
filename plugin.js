@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.112.0';
+const PLEXUS_VERSION = '1.113.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4319,6 +4319,16 @@ class CanvasView {
     if (!rec) { this._recPanelId = null; return; } // fetch failed (record not synced yet) → clear the guard so a later frame retries (else the panel wedges null for this selection)
     this._closeRecPanel(); this._recPanelId = card.id;
     const box = document.createElement('div'); box.className = 'pxc-recpanel'; this._recPanelEl = box;
+    // THEME-MATCH (user): the panel CSS reads --cards-bg etc. which follow the THYMER theme (white on a light theme), but the
+    // CANVAS is dark via its viewBackgroundColor → mismatch. Override the tokens inline from the EFFECTIVE canvas backdrop
+    // (_canvasDark, the same signal the card surface uses) so the panel matches the card, not the Thymer theme.
+    { const dark = this._canvasDark();
+      box.style.setProperty('--cards-bg', this._cardSurfaceColor(dark));
+      box.style.setProperty('--cards-border-color', dark ? '#333a4a' : '#d6dae2');
+      box.style.setProperty('--input-bg-color', dark ? '#232838' : '#ffffff');
+      box.style.setProperty('--color-text-400', dark ? '#e6e8ee' : '#1e1e1e');
+      box.style.setProperty('--color-text-50', dark ? '#ffffff' : '#1e1e1e');
+      box.style.setProperty('--sidebar-bg-hover', dark ? 'rgba(255,255,255,.10)' : 'rgba(0,0,0,.06)'); }
     box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
     // header: title (editable) + buttons
     const head = document.createElement('div'); head.className = 'pxc-rp-head';
@@ -4331,26 +4341,8 @@ class CanvasView {
     mkb('Move…', 'Move this record to another collection (keeps its links)', async () => { const col = await this._pickCollection('Move this record to collection:'); if (col) { try { rec.moveToCollection(col.getGuid()); this._invalidateRec(guid); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Moved to “' + (col.getName && col.getName()) + '”.', dismissible: true }); } catch (_e) {} } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not move the record.', dismissible: true }); } catch (_e2) {} } } });
     mkb('Template', 'Apply a Templater template to this record', () => this._applyTemplate(rec, guid)); // EDIT-3
     head.appendChild(btns); box.appendChild(head);
-    // property rows
-    const list = document.createElement('div'); list.className = 'pxc-rp-list';
-    for (const f of this._recPanelFields(rec)) {
-      const row = document.createElement('div'); row.className = 'pxc-rp-row';
-      const lab = document.createElement('label'); lab.className = 'pxc-rp-lab'; lab.textContent = f.name; row.appendChild(lab);
-      let ctrl;
-      if (f.kind === 'choice') {
-        ctrl = document.createElement('select'); ctrl.className = 'pxc-rp-sel';
-        const blank = document.createElement('option'); blank.value = ''; blank.textContent = '—'; ctrl.appendChild(blank);
-        for (const c of (f.choices || [])) { const o = document.createElement('option'); o.value = c.label; o.textContent = c.label; if (c.label === f.value) o.selected = true; ctrl.appendChild(o); }
-        ctrl.addEventListener('change', () => this._writeRecProp(rec, guid, f.name, 'choice', ctrl.value));
-      } else if (f.kind === 'relation') {
-        ctrl = document.createElement('div'); ctrl.className = 'pxc-rp-rel'; ctrl.textContent = f.value || '—'; ctrl.title = 'Open the record to edit relations';
-      } else {
-        ctrl = document.createElement('input'); ctrl.className = 'pxc-rp-inp'; ctrl.type = f.kind === 'date' ? 'date' : (f.kind === 'number' ? 'number' : 'text'); ctrl.value = (f.value == null ? '' : f.value);
-        ctrl.addEventListener('change', () => this._writeRecProp(rec, guid, f.name, f.kind, ctrl.value));
-      }
-      row.appendChild(ctrl); list.appendChild(row);
-    }
-    box.appendChild(list);
+    // Property rows REMOVED (user): they duplicated the card's inline properties, which are now shown + EDITABLE INLINE on the
+    // card itself (dblclick a row → _editCardProp). The panel keeps only Title + Open/Move/Template + the Datacore field.
     // EDIT-4a: a Datacore query field on the panel — type a dc: query → live result rows (guarded if Datacore isn't installed).
     const dcw = document.createElement('div'); dcw.className = 'pxc-rp-dc';
     const dcl = document.createElement('div'); dcl.className = 'pxc-rp-dclab'; dcl.textContent = '⛁ Datacore'; dcw.appendChild(dcl);
