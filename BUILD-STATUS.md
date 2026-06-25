@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ⏭ B11–B15 — DEFERRED (lower-value Tier-B tail), NO SHIP (Tier-B loop, items 17–21/26) (2026-06-24)
+Batch-deferred the lower-value tail to reach the genuine builds (B16/B18). All audit-rated lower-value/partial/large, none a
+clean small win: **B11** IndexedDB LocalCache (0 indexedDB refs — genuinely unbuilt, but a cache layer + rev-keyed
+invalidation, not a small win; blob fetch is source-of-truth + acceptable for current sizes). **B12** re-editable
+Mermaid/LaTeX (shipped rasterized; re-edit = large store-source+re-render contract, rare workflow). **B13** jspdf vector PDF
+(`_printFrames`@2688 window.print→Save-as-PDF already covers daily PDF; jspdf = lazy lib for reliable page-sizes, low-freq).
+**B14** connector-label ergonomics (nudge-offset/z-order/labels-on-curve/lock — trivial grab-bag, opportunistic). **B15**
+curved-arrow exact hit-test + focus+gap binding (multi-point routing already works; curved hit-test benign few-px minor;
+focus+gap = large precision-binding lift). All logged to the Thymer backlog; build any on request. No code change.
+- Next: **B16 export fidelity — BUILDING the grid/snap decouple** (the genuine gap: `_snap`@1995 gates on `_gridOn()`, so the
+  grid can't show without snapping or vice-versa) + arrowhead-none memory; SVG-hachure-pattern deferred (more involved, low-value).
+
 ## ℹ️ B9 + B10 — both AUDIT-RESOLVED (already shipped), NO SHIP (Tier-B loop, items 15–16/26) (2026-06-24)
 The two items the run-prompt expected as "genuine builds" turned out **already shipped** — the plugin is even more mature
 than the deferred-audit indicated.
