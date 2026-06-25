@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ⏭ B6 — PROBED → DEFERRED-pending-hands-on-session, NO SHIP: restored-panel auto-reopen (Tier-B loop, item 12/26) (2026-06-24)
+The most-felt papercut (a Plexus panel saved in the layout reopens BLANK on reload — the drawing guid lives in an in-memory
+pending queue, lost on reload, not the panel's persisted nav state). **SDK probe (types.d.ts):** `navigateTo` DOES accept
+`{type, rootId, subId, workspaceGuid, state?}` (2736) + `getNavigation()` (2694); prior evidence: the Plugins-Manager panel's
+saved nav is `type:"custom", subId:"<ws>-<plugin>-<panelid>"` → custom-panel nav persists. So it's **likely buildable, NOT
+platform-blocked.**
+- **Why deferred from autopilot:** the fix swaps the CORE panel-mount call (`navigateToCustomType(PANEL_ID)`@7615 →
+  `navigateTo({type:'custom'?, subId: PANEL_ID+':'+guid, state:{recordGuid}})` + read it in `_mountPanel`@8075 as a fallback
+  before the pending queue). `navigateToCustomType` takes NO subId, and `navigateTo`'s documented `type`s are only
+  editor/overview — so the exact custom-type-with-subId shape is undocumented; a wrong `type` value would break ALL
+  canvas-panel mounting, and the reload-round-trip must be hands-on chrome-devtools-verified (navigate → reload → inspect
+  getNavigation). Not safely autopilot-shippable.
+- Logged to the Thymer backlog with a ~20-min hands-on recipe (the read side in `_mountPanel` is additive/zero-risk; only the
+  write swap needs the live probe). No code change, no version bump.
+- Next (worklist B7): auto-export banner keep-in-sync + light/dark variants (audit-first — banner export may already run on save).
+
 ## ℹ️ B5 — gallery AUDIT-RESOLVED + companion-plugin DEFERRED, NO SHIP (Tier-B loop, item 11/26) (2026-06-24)
 Worklist B5 ("companion Drawings CollectionPlugin declaring Scene/Assets fields + gallery view"). The **gallery already
 ships** — `GALLERY_PANEL_ID='plexus-gallery'`, `registerCustomPanelType`@7248, `_openGallery`/`_mountGallery`@8090 (grid of
