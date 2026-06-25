@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.109.0 — A5: BACKLINKS list — "what references this" (Tier-A loop, ship 4/26) (2026-06-24)
+The live ref/card model already produces backref data (used by the CS-4 graph pull-in + ghost-edges), but there was no
+LIST surface to answer "which records reference this drawing." New read-only command **"Plexus: Backlinks (what references
+this)"** → `_showBacklinks()`.
+- Resolves the target (a selected record card's record, else `this.hostGuid || this.recordGuid`), reads `getBackReferences()`,
+  dedups by referencing record (skips self/nulls/dupes), and shows a clickable `_pickFromList` picker → `_openRecord` opens
+  the chosen one in a side panel. Reuses the proven `getBackReferences` shape (`br.record`), `_pickFromList`, `_openRecord`.
+- **Read-only**: no record/line writes, no scene mutation, no render/select/export/minimap surface — just a transient DOM
+  picker + a side-panel open. Every async (getRecord/getBackReferences/getName) is try/caught → toaster/empty-list, no throw.
+- **Adversarial review: SHIP** — all 8 axes confirmed against live source (no writes, target-resolution admits no
+  undefined-guid leak, getBackReferences/`getName`/`_pickFromList`/`_openRecord` contracts correct, `ti-affiliate` bundled,
+  no uncaught throw). Zero HIGH/MED/LOW. Node `pxc_backlinks` 15/15 + regressions green.
+- Next (worklist A6): elbow / orthogonal arrows.
+
 ## ℹ️ A4 — AUDIT-RESOLVED, NO SHIP: palette inheritance already covered (reimagined) (Tier-A loop, item 4/26) (2026-06-24)
 The worklist's A4 ("templates clone the full `appState.colorPalette` on New-from-template") was based on an audit
 mischaracterization. Grep-audit of plugin.js: there is **NO `appState.colorPalette`/`topPicks` field** and **NO

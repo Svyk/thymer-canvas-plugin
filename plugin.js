@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.108.0';
+const PLEXUS_VERSION = '1.109.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4358,6 +4358,22 @@ class CanvasView {
       box.appendChild(lab); box.appendChild(inp); box.appendChild(list); ov.appendChild(box); this.wrap.appendChild(ov); render(); setTimeout(() => inp.focus(), 0);
     });
   }
+  // A5: Backlinks list — the records that REFERENCE this (a selected record card's record, else this drawing's HOST record).
+  // READ-ONLY: getBackReferences() → dedup by referencing record → a clickable picker → open the chosen one in a side panel.
+  // No writes, no scene mutation. The live ref/card model already produces the data; this is the missing list surface.
+  async _showBacklinks() {
+    const card = this._singleSel();
+    const guid = (card && card.type === 'record' && card.recordGuid) ? card.recordGuid : (this.hostGuid || this.recordGuid);
+    if (!guid) { try { this.plugin.ui.addToaster({ title: 'Plexus: open a drawing or select a record card first.', dismissible: true }); } catch (_e) {} return; }
+    let rec = null; try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
+    if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: record not found.', dismissible: true }); } catch (_e) {} return; }
+    let back = []; try { back = (await rec.getBackReferences()) || []; } catch (_e) {}
+    const seen = new Set(), rows = [];
+    for (const br of back) { const r = br && br.record; if (!r || !r.guid || r.guid === guid || seen.has(r.guid)) continue; seen.add(r.guid); let nm = 'record'; try { nm = (r.getName && r.getName()) || 'record'; } catch (_e) {} rows.push({ name: nm, value: r.guid }); }
+    if (!rows.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing references this yet.', dismissible: true }); } catch (_e) {} return; }
+    const pick = await this._pickFromList(rows.length + ' record' + (rows.length > 1 ? 's' : '') + ' reference this — open:', rows);
+    if (pick) this._openRecord(pick);
+  }
   _fmtTemplateDate(d, fmt) {
     if (!fmt) { const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()], mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()]; return `${dow} ${mon} ${d.getDate()}`; }
     const pad = (n, w) => String(n).padStart(w, '0');
@@ -7209,6 +7225,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Save milestone snapshot', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._saveMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Restore milestone (time-lapse)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._restoreMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Expand neighbours (relational mind-map)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4 — direction-aware: parents ↑ / children ↓ / friends ↔ (ExcaliBrain relation-vector)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Backlinks (what references this)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._showBacklinks(); } }); // A5 — read-only list of records that back-reference the selected card's record (else this drawing's host)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange graph (force-directed layout)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._layoutGraph(); } }); // graph auto-layout (Fruchterman-Reingold) — untangle the mind-map (Obsidian/NotebookLM graph-view)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).

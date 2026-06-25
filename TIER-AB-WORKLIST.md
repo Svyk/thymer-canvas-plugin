@@ -19,7 +19,7 @@ backlog and check it off as "deferred" rather than forcing a broken build.
 - [x] A2 Concurrency rev-check — re-read Scene Rev before overwrite + conflict guard — SHIPPED v1.107.0
 - [x] A3 AI image-edit on externalized (blob-backed) images — resolve blob→dataURL before the existing edit pipeline — SHIPPED v1.108.0
 - [x] A4 Templates: clone the full appState.colorPalette on "New from template" — COVERED (reimagined), NO SHIP. No `appState.colorPalette` field nor a drawing-template-clone exists in Plexus for the audit's premise to apply. Palette inheritance is already shipped + wired two ways, both inherited by every new drawing: (1) the localStorage `recentColors` shared palette (pushRecentColor@5841 on apply → "Recent (across drawings)" swatch row@5857), (2) the user-configurable toolbar palette (`c.palette`@352). Building a literal colorPalette-clone would mean first inventing a per-drawing palette object + a drawing-template system = low-value invention. Audit mischaracterized this item.
-- [ ] A5 Backlinks panel — "drawings referencing this record" via getBackReferenceRecords()
+- [x] A5 Backlinks panel — "drawings referencing this record" via getBackReferences() — SHIPPED v1.109.0
 - [ ] A6 Elbow / orthogonal arrows — right-angle connector routing (no AI dep; mis-tagged in the audit)
 - [ ] A7 TEST_HOOKS strip — gate window.__plexusCanvas.test.* behind a build flag
 
