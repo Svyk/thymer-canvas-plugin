@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.103.0';
+const PLEXUS_VERSION = '1.104.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3287,7 +3287,10 @@ class CanvasView {
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop' || mode === 'regionmark') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee
       if (mode === 'lasso' || mode === 'grouplasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; } // round-5 B: grouplasso reuses the lasso poly capture
-      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; } this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
+      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; }
+        this._dropLinkTarget = null; // DRAG-TO-RESTRUCTURE: a SINGLE record card dragged so its CENTER lands on ANOTHER record card → highlight it as a link target (the actual write is gated by a confirm on release)
+        if (moveEls.length === 1 && moveEls[0].el.type === 'record') { const m0 = moveEls[0].el, t = this._recordCardUnder(m0.x + m0.width / 2, m0.y + m0.height / 2, m0.id); if (t) this._dropLinkTarget = t.id; }
+        this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
       if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
@@ -3390,6 +3393,12 @@ class CanvasView {
         this.tool = 'select'; this._syncToolbar(); this.dirty = true;
       }
       else if (mode === 'move' && moveEls) {
+        // DRAG-TO-RESTRUCTURE: a single record card dropped ONTO another record card → confirm, then WRITE a real ref link.
+        if (moved && this._dropLinkTarget && moveEls.length === 1 && moveEls[0].el.type === 'record') {
+          const a = moveEls[0].el, b = this._byId(this._dropLinkTarget); this._dropLinkTarget = null;
+          if (b && b.type === 'record' && b.id !== a.id && a.recordGuid && b.recordGuid && a.recordGuid !== b.recordGuid) { this.scheduleSave(); this._confirmDropLink(a, b, moveEls[0].x0, moveEls[0].y0); this.dirty = true; return; } // scheduleSave first so a CANCEL leaves the card where dropped (a normal move, no loss); confirm→link snaps it back
+        }
+        this._dropLinkTarget = null;
         if (moved) { this.scheduleSave(); this._timelineRedateMoved(moveEls); } // TIMELINE: dragging a timeline card re-dates it
         else if (downRef && downRef.wasSelected) { // CANVAS-SEG: second click on an already-selected runs-text → navigate the ref under the cursor; deferred so a dblclick edits instead
           const el = this._byId(downRef.id), run = el && hitInlineRef(el, down.x, down.y);
@@ -3487,7 +3496,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4926,6 +4935,37 @@ class CanvasView {
     cards.forEach((c, i) => { c.x = this._snap(nodes[i].x - c.width / 2); c.y = this._snap(nodes[i].y - c.height / 2); });
     this._updateBindings(); this._gridDirty = true; this._cacheValid = false; this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Graph laid out (' + cards.length + ' cards, ' + edges.length + ' link' + (edges.length === 1 ? '' : 's') + ').', dismissible: true }); } catch (_e) {}
+  }
+  // DRAG-TO-RESTRUCTURE: the topmost record card whose bbox contains (wx,wy), excluding excludeId (the dragged card). Top-down.
+  _recordCardUnder(wx, wy, excludeId) {
+    for (let i = this.scene.elements.length - 1; i >= 0; i--) { const e = this.scene.elements[i]; if (e.isDeleted || e.type !== 'record' || e.id === excludeId) continue; if (wx >= e.x && wx <= e.x + Math.abs(e.width) && wy >= e.y && wy <= e.y + Math.abs(e.height)) return e; }
+    return null;
+  }
+  _cardsConnected(idA, idB) {
+    for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const s = e.startBinding && e.startBinding.elementId, t = e.endBinding && e.endBinding.elementId; if ((s === idA && t === idB) || (s === idB && t === idA)) return true; }
+    return false;
+  }
+  // DRAG-TO-RESTRUCTURE: a record card was dropped onto another → confirm, then WRITE a real relation (an APPEND-ONLY "→ related: @B"
+  // line item on A's record — the SAME tested {type:'ref',text:{guid,title}} write as _linkSelectedCards; idempotent: skipped if A
+  // already refs B). On confirm: snap A back to its origin (don't bury it) + drop a bound arrow A→B. On cancel: A stays dropped
+  // (a normal move, no write, no loss).
+  _confirmDropLink(a, b, origX, origY) {
+    const guidA = a.recordGuid, guidB = b.recordGuid;
+    const aName = ((this._recFor(guidA) || {}).title) || 'this card', bName = ((this._recFor(guidB) || {}).title) || 'that card';
+    const sp = this.camera.worldToScreen(a.x + Math.abs(a.width) / 2, a.y + Math.abs(a.height) / 2);
+    const doLink = async () => {
+      let rec = null; try { rec = await getRecordPoll(this.plugin, guidA); } catch (_e) {}
+      if (!rec) { try { this.plugin.ui.addToaster({ title: 'Plexus: source record not found.', dismissible: true }); } catch (_e) {} return; }
+      let already = false; // IDEMPOTENT: don't double-write if A's record already refs B
+      try { const items = await rec.getLineItems(); for (const li of (items || [])) { for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid === guidB) { already = true; break; } if (already) break; } } catch (_e) {}
+      let wrote = false;
+      if (!already) { try { const li = await rec.createLineItem(null, null, 'ulist', [{ type: 'text', text: '→ related: ' }, { type: 'ref', text: { guid: guidB, title: bName } }], null); if (li) { wrote = true; this._invalidateRec(guidA); } } catch (_e) {} } // APPEND a new line item — never edits/overwrites existing content
+      a.x = origX; a.y = origY; // snap the dragged card back (don't leave it buried in the target)
+      if (!this._cardsConnected(a.id, b.id)) { const ar = makeLinear(0, 0, 'arrow', { stroke: ROLE_HEX.child, strokeWidth: 1.5 }); ar.points = [[a.x + Math.abs(a.width) / 2, a.y + Math.abs(a.height) / 2], [b.x + Math.abs(b.width) / 2, b.y + Math.abs(b.height) / 2]]; ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; ar.endArrowhead = 'arrow'; linearBBox(ar); this.scene.elements.push(ar); }
+      this._updateBindings(); this.dirty = true; this.scheduleSave();
+      try { this.plugin.ui.addToaster({ title: wrote ? 'Linked “' + aName + '” → “' + bName + '” — relation written.' : (already ? 'Already linked — drew the connector.' : 'Plexus: couldn’t write the link (open the record to add it).'), dismissible: true }); } catch (_e) {}
+    };
+    this._showNestingChoice('Link “' + String(aName).slice(0, 22) + '” → “' + String(bName).slice(0, 22) + '”?', [{ txt: '🔗 Link — write a relation', fn: () => { this._closeRegionChoice(); doLink(); } }, { txt: 'Cancel (keep as a move)', fn: () => { this._closeRegionChoice(); } }], sp.x, sp.y);
   }
   // CS-6: milestone snapshots — save the current drawing state and restore an earlier one (replay its evolution).
   // Quota-safe: capped at 8 per drawing in localStorage, skipped if a scene is too large to store.
@@ -6861,6 +6901,8 @@ class CanvasView {
     this._groupNubs = null; this._groupNubIds = null; // round-5 B: recomputed below only for a ≥2 multi-selection
     if (!this.selected.size) return;
     ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
+    // DRAG-TO-RESTRUCTURE: while a record card is dragged over another, ring the target so the user SEES it'll link on release.
+    if (this._dropLinkTarget) { const t = this._byId(this._dropLinkTarget); if (t && t.type === 'record') { ictx.save(); ictx.setLineDash([]); ictx.strokeStyle = ROLE_HEX.child; ictx.globalAlpha = 0.95; ictx.lineWidth = 3 / z; const rad = Math.min(10, Math.abs(t.width) / 2); ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(t.x - 3 / z, t.y - 3 / z, Math.abs(t.width) + 6 / z, Math.abs(t.height) + 6 / z, rad); else ictx.rect(t.x - 3 / z, t.y - 3 / z, Math.abs(t.width) + 6 / z, Math.abs(t.height) + 6 / z); ictx.stroke(); ictx.restore(); } }
     ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = '#ffffff'; ictx.lineWidth = 1.2 / z;
     const single = this._singleSel();
     if (single && (isRoughShape(single.type) || single.type === 'icon' || single.type === 'record' || single.type === 'linecard' || single.type === 'task' || single.type === 'image' || single.type === 'query' || single.type === 'rollup' || single.type === 'table' || single.type === 'board')) {

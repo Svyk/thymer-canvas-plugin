@@ -1,5 +1,25 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.104.0 — GRAPH DRAG-TO-RESTRUCTURE: drop a card onto another → write a real ref link (2026-06-24)
+PARITY LOOP iter 5 — completes the graph/mind-map family. Drag a record card so its CENTER lands on ANOTHER record card →
+the target rings (ROLE_HEX.child) during the drag → on release a CONFIRM menu → writes a REAL relation. User chose the
+drop-onto-card→confirm gesture (asked, since it mutates notes; Alt/Shift were taken).
+- **Write = APPEND-ONLY + idempotent + confirm-gated** (`_confirmDropLink`): on "Link", `createLineItem` a NEW "→ related: @B"
+  line on A's record (the SAME tested `{type:'ref',text:{guid,title}}` shape as `_linkSelectedCards`); skipped if A already
+  refs B (full segment scan). B is strictly READ-ONLY (only its guid/title used). On confirm: snap A back to its pre-drag
+  origin (`moveEls[0].x0/y0`) so it isn't buried + drop a bound arrow A→B (deduped via `_cardsConnected`). On CANCEL: A stays
+  dropped = a normal committed move, NO write, no loss. `createLineItem` failure → honest toaster.
+- `_recordCardUnder` (topmost record card under a point, excl. the dragged one) sets `_dropLinkTarget` only for a SINGLE
+  record-card drag; cleared on link/fall-through/onPtrCancel. Overlay ring is `ictx`-only (not a scene element).
+- **Adversarial DATA-SAFETY review: clean, NO defects on all 6 axes** (append-only/B-read-only/failure-reported, confirm gates
+  every write, idempotency, no false writes on normal moves, snap-back+arrow, visibility+async-delete graceful). Node
+  `pxc_droplink` 16/16 + all regressions green. Removed one dead local the reviewer flagged.
+
+— **GRAPH / MIND-MAP FAMILY COMPLETE (v1.100–v1.104):** direction-aware neighbour expansion (ExcaliBrain relation-vector) ·
+interactive ⊕ expand-on-click · force-directed graph auto-layout (FR) · relational ghost-edges (inferred ref/backref links) ·
+drag-to-restructure (drop→write a real ref). All relational (live Thymer refs/backrefs), all adversarially reviewed.
+NEXT: outline⇄canvas gaps, then Excalidraw/Obsidian basics on the CANVAS-ROADMAP.
+
 ## ✅ v1.103.0 — RELATIONAL GHOST-EDGES: inferred ref/backref links (Obsidian/ExcaliBrain) (2026-06-24)
 PARITY LOOP iter 4. "Relational ghost-edges (inferred ref/backref links)" surfaces hidden connections: faint BLUE dashes
 between on-canvas record cards that ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound
