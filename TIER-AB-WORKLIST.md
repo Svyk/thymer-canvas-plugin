@@ -25,7 +25,7 @@ backlog and check it off as "deferred" rather than forcing a broken build.
 
 ## Tier B — polish (lower value; probe-gated → if platform-blocked, log to backlog + check off as deferred)
 - [x] B1 Interactive image crop handles — SHIPPED v1.110.0 (in-place crop: command arms a one-shot crop marquee on the selected image → drag a box → crops it in place via el.crop; non-destructive, undoable; reuses the proven region-reference math)
-- [ ] B2 7 pen profiles (highlighter/finetip/fountain/marker/thick-thin…) + custom pen buttons
+- [x] B2 7 pen profiles (highlighter/finetip/fountain/marker/thick-thin/thin-thick-thin + default) — SHIPPED v1.111.0 (profile table drives radius shape + width + opacity; default byte-identical; "Pen profile…" command, persisted). NOTE: per-profile *custom user-defined* pen buttons (10 slots) NOT built — the 7 fixed profiles cover the Excalidraw set; custom-pen-slot config is a deferrable enthusiast extra.
 - [ ] B3 Layer-manager panel (named layers: show/hide/lock/reorder)
 - [ ] B4 Frame settings dialog + clip-on-render + marker frames
 - [ ] B5 Companion Drawings CollectionPlugin (declare Scene/Assets fields in plugin.json) + gallery view

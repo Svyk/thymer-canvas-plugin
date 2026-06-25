@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.110.0';
+const PLEXUS_VERSION = '1.111.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -555,18 +555,36 @@ function roughCloud(ctx, x, y, w, h, opts, seed) {
   ctx.restore();
 }
 // Per-point stroke radius from local speed (point spacing): slow strokes go THICK, fast strokes go THIN —
-// the natural-ink look (perfect-freehand-lite). Lightly smoothed so width transitions don't stair-step.
-function freedrawRadii(pts, baseW) {
+// B2: the 7 pen profiles — each shapes the per-point radius (fat = slow-stroke fatten · thin = speed thinning · taper = tip
+// entry/exit · swell = position-based middle bulge) plus a base width + opacity. `default` is BYTE-IDENTICAL to the pre-B2
+// ink look (fat 1.25 / thin 0.85 / taper 1 / swell 0). Width + opacity are baked onto the element at create time (so render/
+// export/resize all work unchanged); only the radius SHAPE reads el.penProfile.
+const PXC_PEN_PROFILES = [
+  { id: 'default',       label: 'Default (ink)',        w: 3,   op: 1,   fat: 1.25, thin: 0.85, taper: 1,   swell: 0 },
+  { id: 'highlighter',   label: 'Highlighter',          w: 16,  op: 0.4, fat: 1.0,  thin: 0,    taper: 0,   swell: 0 },
+  { id: 'finetip',       label: 'Fine tip',             w: 1.5, op: 1,   fat: 1.1,  thin: 0.3,  taper: 0.5, swell: 0 },
+  { id: 'fountain',      label: 'Fountain (pressure)',  w: 4,   op: 1,   fat: 1.3,  thin: 1.0,  taper: 1,   swell: 0 },
+  { id: 'marker',        label: 'Marker (bold)',        w: 9,   op: 1,   fat: 1.0,  thin: 0,    taper: 0,   swell: 0 },
+  { id: 'thickthin',     label: 'Thick-thin',           w: 6,   op: 1,   fat: 1.3,  thin: 1.1,  taper: 1.2, swell: 0 },
+  { id: 'thinthickthin', label: 'Thin-thick-thin',      w: 5,   op: 1,   fat: 1.0,  thin: 0.3,  taper: 0,   swell: 0.7 },
+];
+const PXC_PEN_BY_ID = {}; for (const _pp of PXC_PEN_PROFILES) PXC_PEN_BY_ID[_pp.id] = _pp;
+// the natural-ink look (perfect-freehand-lite), profile-driven. Lightly smoothed so width transitions don't stair-step.
+function freedrawRadii(pts, baseW, profileId) {
+  const prof = (profileId && PXC_PEN_BY_ID[profileId]) || PXC_PEN_BY_ID.default;
+  const fat = prof.fat, thin = prof.thin, taper = prof.taper, swell = prof.swell;
   const n = pts.length, rad = new Array(n);
   for (let i = 0; i < n; i++) {
     const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
     const d = Math.hypot(b[0] - a[0], b[1] - a[1]) / 2;     // local spacing ≈ pen speed
     const t = Math.min(1, d / 22);                           // 0 (slow) … 1 (fast)
-    rad[i] = Math.max(0.4, (baseW * (1.25 - 0.85 * t)) / 2); // thick when slow, taper when fast
+    let w = baseW * (fat - thin * t);                        // fat when slow, thinner when fast (thin=0 → constant width)
+    if (swell) { const u = n > 1 ? i / (n - 1) : 0.5; w *= 1 + swell * Math.sin(Math.PI * u); } // thin-thick-thin: bulge in the middle, thin at both tips
+    rad[i] = Math.max(0.4, w / 2);
   }
   for (let k = 0; k < 2; k++) { const r2 = rad.slice(); for (let i = 1; i < n - 1; i++) rad[i] = (r2[i - 1] + 2 * r2[i] + r2[i + 1]) / 4; }
-  // taper the very tips for a pen-like entry/exit
-  if (n > 3) { rad[0] *= 0.6; rad[1] *= 0.85; rad[n - 1] *= 0.6; rad[n - 2] *= 0.85; }
+  // taper the very tips for a pen-like entry/exit (taper=1 → the original 0.6/0.85; taper=0 → flat caps for marker/highlighter)
+  if (n > 3 && taper > 0) { const k0 = 1 - 0.4 * taper, k1 = 1 - 0.15 * taper; rad[0] *= k0; rad[1] *= k1; rad[n - 1] *= k0; rad[n - 2] *= k1; }
   return rad;
 }
 function drawFreedraw(ctx, el) {
@@ -575,7 +593,7 @@ function drawFreedraw(ctx, el) {
   ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
   const baseW = el.strokeWidth || 3, n = pts.length;
   if (n === 1) { ctx.beginPath(); ctx.arc(pts[0][0], pts[0][1], baseW / 2, 0, 7); ctx.fill(); ctx.restore(); return; }
-  const rad = freedrawRadii(pts, baseW);
+  const rad = freedrawRadii(pts, baseW, el.penProfile);
   // Build ONE path: a filled trapezoid per segment + a round dot per point (rounded joins/caps), filled once.
   ctx.beginPath();
   for (let i = 0; i < n - 1; i++) {
@@ -1004,8 +1022,8 @@ function makeFreedraw(wx, wy, style) {
   return {
     id: newId(), type: 'freedraw', x: wx, y: wy, width: 0, height: 0, angle: 0,
     points: [[wx, wy]], pressures: [], strokeColor: style.stroke || '#1e1e1e', backgroundColor: 'transparent',
-    fillStyle: 'solid', strokeWidth: style.strokeWidth || 3, roughness: 0, opacity: 1, seed: newSeed(),
-    index: 'a0', isDeleted: false, groupIds: [],
+    fillStyle: 'solid', strokeWidth: style.strokeWidth || 3, roughness: 0, opacity: style.opacity == null ? 1 : style.opacity, seed: newSeed(),
+    index: 'a0', isDeleted: false, groupIds: [], penProfile: style.penProfile || null, // B2: profile drives the radius shape; null = default ink
   };
 }
 function freedrawBBox(el) {
@@ -1814,6 +1832,7 @@ class CanvasView {
     this.tool = 'select'; this.selected = new Set();
     this.strokeColor = '#7c5cff'; this.fillColor = FILLS['#7c5cff']; this.fillStyle = 'hachure';
     this._undo = []; this._redo = []; this._committed = undefined; // snapshot history
+    this._penProfile = (() => { try { return localStorage.getItem('plexus_pen_profile') || 'default'; } catch (_e) { return 'default'; } })(); // B2: active pen profile, persisted across drawings
     this._lineRects = new Map(); // CONNECTIONS Phase 4: cardId → [{lineGuid, dy, h}] body-line bands (relative to card top, captured each raster) — line-level connection targeting
     this._connLineTargets = new Map(); this._connRegionTargets = new Map(); this._connRefTargets = new Map(); this._connGroupTargets = []; this._connByEl = new Map(); // cardId → Set(lineGuid) / imgId → [{frac,fracPoly}] / textId → Set(refGuidTarget) / elId → Set(arrowId) — CURRENT connection targets (blue flag + region/ref highlight) + per-element connection index (select→highlight, Phase 5); rebuilt in _updateBindings
     this.renderer = makeRenderer(this); // pluggable draw backend (renderer seam — Canvas2D now, WebGL drop-in later)
@@ -3272,7 +3291,7 @@ class CanvasView {
       } else if (this.tool === 'laser') {
         mode = 'laser'; this._laser = [{ x: down.x, y: down.y, t: Date.now() }]; this.dirty = true; // S6: transient trail
       } else if (this.tool === 'pen') {
-        mode = 'pen'; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: 3 }); this._penSm = { x: down.x, y: down.y }; this.scene.elements.push(created); this._lassoPriorSel = null; // round-5 G: keep the selection (don't clear) so "select a text → circle a region with the pen → Cite" captures BOTH (the pen's current selection is preserved directly; don't inherit a stale lasso prior)
+        mode = 'pen'; const _pp = PXC_PEN_BY_ID[this._penProfile] || PXC_PEN_BY_ID.default; created = makeFreedraw(down.x, down.y, { stroke: this.strokeColor, strokeWidth: _pp.w, opacity: _pp.op, penProfile: _pp.id }); this._penSm = { x: down.x, y: down.y }; this.scene.elements.push(created); this._lassoPriorSel = null; // B2: stamp the active pen profile's width+opacity+shape · round-5 G: keep the selection (don't clear) so "select a text → circle a region with the pen → Cite" captures BOTH (the pen's current selection is preserved directly; don't inherit a stale lasso prior)
       } else if (this.tool === 'eraser') {
         mode = 'erase'; const hit = this._hitTopAt(down.x, down.y); if (hit) { hit.isDeleted = true; this.scheduleSave(); }
       } else if (this.tool === 'text') {
@@ -4381,6 +4400,18 @@ class CanvasView {
     if (!rows.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing references this yet.', dismissible: true }); } catch (_e) {} return; }
     const pick = await this._pickFromList(rows.length + ' record' + (rows.length > 1 ? 's' : '') + ' reference this — open:', rows);
     if (pick) this._openRecord(pick);
+  }
+  // B2: pick the active pen profile (default ink / highlighter / fine-tip / fountain / marker / thick-thin / thin-thick-thin).
+  // Persisted across drawings; the pen tool stamps the chosen width+opacity+shape onto each NEW stroke. Existing strokes
+  // (penProfile=null) keep the default ink look. Read-only on records; only the next freehand stroke's style changes.
+  async _pickPenProfile() {
+    const cur = this._penProfile || 'default';
+    const rows = PXC_PEN_PROFILES.map((p) => ({ name: p.label + (p.id === cur ? '  ✓' : ''), value: p.id }));
+    const pick = await this._pickFromList('Pen profile:', rows);
+    if (!pick) return;
+    this._penProfile = pick; try { localStorage.setItem('plexus_pen_profile', pick); } catch (_e) {}
+    if (this.tool !== 'pen') { this.tool = 'pen'; this._syncToolbar(); } // picking a profile means you want to draw
+    try { this.plugin.ui.addToaster({ title: 'Pen: ' + ((PXC_PEN_BY_ID[pick] || {}).label || pick) + '.', dismissible: true }); } catch (_e) {}
   }
   _fmtTemplateDate(d, fmt) {
     if (!fmt) { const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()], mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()]; return `${dow} ${mon} ${d.getDate()}`; }
@@ -7288,6 +7319,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Crop selected image (in place)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._startCropInPlace(); } }); // B1 — arms a one-shot crop marquee on the selected image; drag a box → crops it in place (non-destructive, undoable)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Pen profile (highlighter / marker / fine-tip …)', icon: 'ti-pencil', onSelected: () => { const v = this._activeView(); if (v) v._pickPenProfile(); } }); // B2 — pick the active pen profile; the pen tool stamps its width+opacity+shape onto new strokes
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI edit selected image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiEditImage(); } }); // Phase 6: image edit
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI wireframe → live app', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiWireframe(); } }); // Phase 6: wireframe→code
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Chart from CSV', icon: 'ti-chart-bar', onSelected: () => { const v = this._activeView(); if (v) v._chartFromCsv(); } });

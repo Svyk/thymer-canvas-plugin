@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.111.0 — B2: 7 PEN PROFILES (highlighter/marker/fine-tip/fountain/thick-thin/…) (Tier-B loop, ship 6/26) (2026-06-24)
+The pen had ONE freehand profile; now 7 (default · highlighter · finetip · fountain · marker · thickthin · thinthickthin).
+- **`PXC_PEN_PROFILES`** table: each profile shapes the per-point radius (`fat`=slow fatten · `thin`=speed thinning ·
+  `taper`=tip entry/exit · `swell`=position-based middle bulge) + a base width + opacity. `freedrawRadii(pts, baseW,
+  profileId)` is now profile-driven; **`default` is BYTE-IDENTICAL to the pre-B2 ink look** (Node-verified bit-exact across
+  200 widths × 1001 speeds). Width+opacity are baked onto the element at create (so render/export/resize work unchanged);
+  a new `el.penProfile` field drives only the radius SHAPE (null = default → every existing stroke is unchanged).
+- **`_pickPenProfile`** + command "Plexus: Pen profile (highlighter / marker / fine-tip …)" sets `this._penProfile`
+  (persisted in localStorage, restored in the ctor); the pen tool stamps the active profile's width/opacity/shape onto each
+  new stroke. Highlighter = wide + 0.4 opacity + flat caps; marker = bold constant; fine-tip = thin; fountain/thick-thin =
+  strong pressure variation; thin-thick-thin = middle swell.
+- **Adversarial review: SHIP.** Bit-exact default/null equivalence; the new field clones (`JSON` _cloneEl) + serializes
+  harmlessly; PNG/print export full-fidelity, SVG carries width+opacity (variable-width shape lost = pre-existing freedraw→SVG
+  limitation); property-panel width/opacity still override post-create; all edge cases (n=1/2/3, bad id, null) guarded. One
+  cosmetic NIT (width-button active-highlight doesn't match profile widths — no fix). Node `pxc_penprofiles` 12/12 + regressions green.
+- Scope notes (NOT built, deferrable enthusiast extras): custom user-defined pen-button slots; Excalidraw's highlighter-draws-
+  behind-content z-order (this draws translucent at normal paint order).
+- Next (worklist B3): layer-manager panel.
+
 ## ✅ v1.110.0 — B1: INTERACTIVE in-place image crop (Tier-B loop, ship 5/26) (2026-06-24)
 The crop tool only did region-REFERENCE (drag a box → spawn a NEW cropped element). New: crop an image IN PLACE.
 - Command **"Plexus: Crop selected image (in place)"** → `_startCropInPlace` arms a one-shot `_cropInPlaceTarget` on the
