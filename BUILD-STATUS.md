@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.102.0 — GRAPH AUTO-LAYOUT: force-directed (Fruchterman-Reingold) (2026-06-24)
+PARITY LOOP iter 3. "Arrange graph (force-directed layout)" untangles the on-canvas record-card mind-map into an organic
+graph (Obsidian/NotebookLM graph-view parity), using the bound CONNECTORS as edges.
+- **`pxcGraphLayout(nodes, edges, opts)`** — pure, DETERMINISTIC FR relax (no Math.random): edges attract (d²/K), all pairs
+  repel (K²/d, cut >1600px), cooled over `iter` steps, then recenters on the original centroid (graph stays in place).
+  Coincident nodes get a deterministic per-index nudge so stacked cards separate.
+- **`_layoutGraph()`** — nodes = on-canvas record-card centers (scoped to a ≥2 selection, else all); edges = arrows/lines bound
+  between two of those cards (null-safe, skips self-loops/free/foreign-bound); K scales with card size. Reposition-only (x/y),
+  bound arrows re-route via `_updateBindings`, grid+cache invalidated, undoable via scheduleSave. Read-only on records. Capped
+  at 400 cards (O(iter·N²) freeze guard).
+- **Adversarial review: clean — no data-safety/visibility defects** (FR stability/no-NaN/determinism/centroid, edge build
+  null-safety, bound re-route, frame-ownership lazy-recompute, selection scoping, reposition-only). Applied both optional
+  polish one-liners (N≤400 cap + coincident-node jitter). Node `pxc_graphlayout` 12/12 + all regressions green.
+- Next iters: semantic/backlink ghost-edges · graph drag-to-restructure · outline⇄canvas gaps.
+
 ## ✅ v1.101.0 — MIND MAP: interactive ⊕ expand-on-click nub (2026-06-24)
 PARITY LOOP iter 2. The NotebookLM/Heptabase "click to grow the graph" UX: a single selected RECORD card now shows a ⊕ nub
 22 screen-px below it; clicking it runs `_pullInNeighbours` (the v1.100 direction-aware expansion) — so you grow the relational

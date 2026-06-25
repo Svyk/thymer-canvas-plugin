@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.101.0';
+const PLEXUS_VERSION = '1.102.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -116,6 +116,34 @@ function pxcElevate(css, amt) {
   else { m = s.match(/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i); if (!m) return null; r = +m[1]; g = +m[2]; b = +m[3]; }
   const a = Math.max(0, Math.min(1, amt || 0)), mix = (c) => Math.round(c + (255 - c) * a), hx = (c) => Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0');
   return '#' + hx(mix(r)) + hx(mix(g)) + hx(mix(b));
+}
+// GRAPH LAYOUT (Fruchterman-Reingold, the canonical graph-view algorithm — Obsidian/NotebookLM-style). Pure + DETERMINISTIC
+// (starts from the given node positions, no randomness): edges pull connected nodes together (attraction d²/K), every pair
+// repels (K²/d), cooled over `iter` steps. Recenters on the original centroid so the relaxed graph stays roughly in place.
+// `nodes` = [{x,y}] (mutated + returned), `edges` = [[i,j]] index pairs. K = ideal edge length.
+function pxcGraphLayout(nodes, edges, opts) {
+  const N = nodes.length; if (N < 2) return nodes;
+  const K = (opts && opts.K) || 300, ITER = (opts && opts.iter) || 160; let temp = (opts && opts.temp) || 600;
+  const cen = () => [nodes.reduce((s, n) => s + n.x, 0) / N, nodes.reduce((s, n) => s + n.y, 0) / N];
+  const [cx0, cy0] = cen();
+  const disp = nodes.map(() => ({ x: 0, y: 0 }));
+  for (let it = 0; it < ITER; it++) {
+    for (let i = 0; i < N; i++) { disp[i].x = 0; disp[i].y = 0; }
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) { // repulsion (all pairs)
+      let dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, d = Math.hypot(dx, dy);
+      if (d < 0.01) { dx = ((i * 13 + 7) % 17) - 8; dy = ((j * 11 + 3) % 17) - 8; d = Math.hypot(dx, dy) || 0.01; } // coincident nodes → a deterministic (no-random) nudge so stacked cards still separate
+      if (d > 1600) continue;
+      const f = (K * K) / d, ux = dx / d, uy = dy / d; disp[i].x += ux * f; disp[i].y += uy * f; disp[j].x -= ux * f; disp[j].y -= uy * f;
+    }
+    for (const e of edges) { const i = e[0], j = e[1]; if (i === j || i < 0 || j < 0 || i >= N || j >= N) continue; // attraction (edges)
+      const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y, d = Math.hypot(dx, dy) || 0.01;
+      const f = (d * d) / K, ux = dx / d, uy = dy / d; disp[i].x -= ux * f; disp[i].y -= uy * f; disp[j].x += ux * f; disp[j].y += uy * f;
+    }
+    for (let i = 0; i < N; i++) { const dl = Math.hypot(disp[i].x, disp[i].y) || 0.01, lim = Math.min(dl, temp); nodes[i].x += (disp[i].x / dl) * lim; nodes[i].y += (disp[i].y / dl) * lim; }
+    temp *= 0.95; // cool
+  }
+  const [cx1, cy1] = cen(), ddx = cx0 - cx1, ddy = cy0 - cy1; for (const n of nodes) { n.x += ddx; n.y += ddy; } // recenter on the original centroid
+  return nodes;
 }
 // UX-6 dark mode: when PXC_DARK, lighten an INK colour (stroke/text/icon) that's too dark to read on a dark canvas.
 // Only touches near-dark inks (L<0.4) — vivid colours and white pass through unchanged, so it adapts, not inverts.
@@ -4880,6 +4908,25 @@ class CanvasView {
     this._updateBindings(); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Expanded: ' + P.length + ' parent(s) ↑ · ' + C.length + ' child(ren) ↓ · ' + F.length + ' friend(s) ↔.', dismissible: true }); } catch (_e) {}
   }
+  // GRAPH AUTO-LAYOUT: force-directed (Fruchterman-Reingold) relax of the on-canvas record cards, using the bound CONNECTORS
+  // as edges — untangles a mind-map into an organic graph (Obsidian/NotebookLM graph-view parity). Reposition-only (x/y);
+  // bound arrows re-route via _updateBindings; read-only on records; undoable via scheduleSave. SELECTION scopes it: a ≥2
+  // selection lays out just those cards (+ edges among them), else the whole canvas.
+  _layoutGraph() {
+    const selIds = this.selected.size >= 2 ? new Set(this.selected) : null;
+    const cards = this.scene.elements.filter((e) => !e.isDeleted && e.type === 'record' && (!selIds || selIds.has(e.id)));
+    if (cards.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: need 2+ record cards (select some, or have them on the canvas).', dismissible: true }); } catch (_e) {} return; }
+    if (cards.length > 400) { try { this.plugin.ui.addToaster({ title: 'Plexus: too many cards (' + cards.length + ') to auto-layout — select a subset (≤400).', dismissible: true }); } catch (_e) {} return; } // O(iter·N²) guard — keep the one-shot relax off the multi-second freeze cliff
+    const idx = new Map(cards.map((c, i) => [c.id, i]));
+    const nodes = cards.map((c) => ({ x: c.x + c.width / 2, y: c.y + c.height / 2 }));
+    const edges = [];
+    for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const a = e.startBinding && e.startBinding.elementId, b = e.endBinding && e.endBinding.elementId; if (a != null && b != null && idx.has(a) && idx.has(b) && a !== b) edges.push([idx.get(a), idx.get(b)]); }
+    const cw = cards.reduce((s, c) => s + Math.abs(c.width), 0) / cards.length; // ideal edge length scales with card size
+    pxcGraphLayout(nodes, edges, { K: Math.max(220, cw * 1.4), iter: 200, temp: 700 });
+    cards.forEach((c, i) => { c.x = this._snap(nodes[i].x - c.width / 2); c.y = this._snap(nodes[i].y - c.height / 2); });
+    this._updateBindings(); this._gridDirty = true; this._cacheValid = false; this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Graph laid out (' + cards.length + ' cards, ' + edges.length + ' link' + (edges.length === 1 ? '' : 's') + ').', dismissible: true }); } catch (_e) {}
+  }
   // CS-6: milestone snapshots — save the current drawing state and restore an earlier one (replay its evolution).
   // Quota-safe: capped at 8 per drawing in localStorage, skipped if a scene is too large to store.
   _saveMilestone() {
@@ -7017,6 +7064,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Save milestone snapshot', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._saveMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Restore milestone (time-lapse)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._restoreMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Expand neighbours (relational mind-map)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4 — direction-aware: parents ↑ / children ↓ / friends ↔ (ExcaliBrain relation-vector)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange graph (force-directed layout)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._layoutGraph(); } }); // graph auto-layout (Fruchterman-Reingold) — untangle the mind-map (Obsidian/NotebookLM graph-view)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
