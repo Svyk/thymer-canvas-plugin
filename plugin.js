@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.99.0';
+const PLEXUS_VERSION = '1.100.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4836,26 +4836,43 @@ class CanvasView {
   }
   // CS-4: backlink halo & pull-in — for the selected record card, materialize its graph neighbours (incoming
   // backrefs + outbound refs) as bound record cards in a ring, with arrows. A per-record ExcaliBrain by hand.
+  // MIND MAP (ExcaliBrain relation-vector port): expand a record card's live neighbours into a DIRECTION-AWARE radial graph —
+  // forward refs (focus → X) are CHILDREN (below, blue), backreferences (Y → focus) are PARENTS (above, amber), mutual links
+  // are FRIENDS (sides, purple). Cards + arrows are coloured by role (the SAME ROLE_HEX the Brain subgraph drop uses), arrows
+  // point parent→focus / focus→child / focus↔friend. Fully relational (live refs + backrefs); de-dups against on-canvas cards.
   async _pullInNeighbours() {
     const card = this._singleSel();
     if (!card || card.type !== 'record') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single record card.', dismissible: true }); } catch (_e) {} return; }
     const guid = card.recordGuid; let rec = null; try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
     if (!rec) return;
-    const nb = new Set();
-    try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid) nb.add(r.guid); } } catch (_e) {}
-    try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid) nb.add(s.text.guid); } catch (_e) {}
+    const parents = new Set(), children = new Set();
+    try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid) children.add(s.text.guid); } catch (_e) {} // CHILD = a record the focus links TO (forward)
+    try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid) parents.add(r.guid); } } catch (_e) {} // PARENT = a record that links to the focus (backref)
+    const friends = new Set([...children].filter((g) => parents.has(g))); // FRIEND = mutual (both directions)
+    for (const g of friends) { parents.delete(g); children.delete(g); }
     const have = new Set(this.scene.elements.filter((e) => !e.isDeleted && e.type === 'record').map((e) => e.recordGuid));
-    const add = [...nb].filter((g) => g && g !== guid && !have.has(g)).slice(0, 16);
-    if (!add.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no new neighbours to pull in.', dismissible: true }); } catch (_e) {} return; }
-    const cx = card.x + card.width / 2, cy = card.y + card.height / 2, R = 300, CW = 240, CH = 150;
+    const clean = (set) => [...set].filter((g) => g && g !== guid && !have.has(g)).slice(0, 8);
+    const P = clean(parents), C = clean(children), F = clean(friends);
+    if (!(P.length + C.length + F.length)) { try { this.plugin.ui.addToaster({ title: 'Plexus: no new neighbours to expand.', dismissible: true }); } catch (_e) {} return; }
+    const cx = card.x + card.width / 2, cy = card.y + card.height / 2, CW = 220, CH = 130, R = 330;
     this.selected.clear();
-    add.forEach((g, i) => {
-      const a = (i / add.length) * Math.PI * 2 - Math.PI / 2, nx = this._snap(cx + Math.cos(a) * R - CW / 2), ny = this._snap(cy + Math.sin(a) * R - CH / 2);
-      const el = makeRecordCard(nx, ny, CW, CH, g); this.scene.elements.push(el); this.selected.add(el.id);
-      const ar = makeLinear(cx, cy, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); ar.points = [[cx, cy], [nx + CW / 2, ny + CH / 2]]; ar.startBinding = { elementId: card.id }; ar.endBinding = { elementId: el.id }; linearBBox(ar); this.scene.elements.push(ar);
-    });
+    const place = (guids, role, baseAngle) => {
+      const spread = Math.min(Math.PI * 0.9, (guids.length - 1) * 0.5); // fan, ≤162°
+      guids.forEach((g, i) => {
+        const t = guids.length === 1 ? 0 : (i / (guids.length - 1) - 0.5), a = baseAngle + t * spread;
+        const nx = this._snap(cx + Math.cos(a) * R - CW / 2), ny = this._snap(cy + Math.sin(a) * R - CH / 2);
+        const el = makeRecordCard(nx, ny, CW, CH, g); el.strokeColor = ROLE_HEX[role] || '#9aa0a6'; this.scene.elements.push(el); this.selected.add(el.id); this._invalidateRec(g);
+        const ncx = nx + CW / 2, ncy = ny + CH / 2, ar = makeLinear(0, 0, 'arrow', { stroke: ROLE_HEX[role] || '#9aa0a6', strokeWidth: 1.5 });
+        if (role === 'parent') { ar.points = [[ncx, ncy], [cx, cy]]; ar.startBinding = { elementId: el.id }; ar.endBinding = { elementId: card.id }; } // parent → focus
+        else { ar.points = [[cx, cy], [ncx, ncy]]; ar.startBinding = { elementId: card.id }; ar.endBinding = { elementId: el.id }; if (role === 'friend') ar.startArrowhead = 'arrow'; } // focus → child; focus ↔ friend (double head)
+        linearBBox(ar); this.scene.elements.push(ar); // role is encoded in the colour (ROLE_HEX); no relType tag (its preset colours differ)
+      });
+    };
+    place(P, 'parent', -Math.PI / 2); // above
+    place(C, 'child', Math.PI / 2); // below
+    F.forEach((g, i) => place([g], 'friend', i % 2 ? Math.PI : 0)); // friends alternate left ↔ right
     this._updateBindings(); this.dirty = true; this.scheduleSave();
-    try { this.plugin.ui.addToaster({ title: 'Pulled in ' + add.length + ' neighbour(s).', dismissible: true }); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Expanded: ' + P.length + ' parent(s) ↑ · ' + C.length + ' child(ren) ↓ · ' + F.length + ' friend(s) ↔.', dismissible: true }); } catch (_e) {}
   }
   // CS-6: milestone snapshots — save the current drawing state and restore an earlier one (replay its evolution).
   // Quota-safe: capped at 8 per drawing in localStorage, skipped if a scene is too large to store.
@@ -6987,7 +7004,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stamp new record (stencil)', icon: 'ti-id', onSelected: () => { const v = this._activeView(); if (v) v._stampRecord(); } }); // CS-5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Save milestone snapshot', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._saveMilestone(); } }); // CS-6
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Restore milestone (time-lapse)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._restoreMilestone(); } }); // CS-6
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Pull in neighbours (backlink halo)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Expand neighbours (relational mind-map)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._pullInNeighbours(); } }); // CS-4 — direction-aware: parents ↑ / children ↓ / friends ↔ (ExcaliBrain relation-vector)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }

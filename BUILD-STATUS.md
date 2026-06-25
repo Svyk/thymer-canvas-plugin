@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.100.0 — MIND MAP: direction-aware relational neighbour expansion (ExcaliBrain relation-vector port) (2026-06-24)
+PARITY LOOP iter 1 (Heptabase/Excalidraw/ExcaliBrain → full parity). Upgraded `_pullInNeighbours` from a flat grey ring
+into a direction-aware relational mind-map, porting ExcaliBrain's relation-vector model (`~/excalidraw-port-research/excalibrain`)
+onto Thymer's ref/backref graph.
+- Select a record card → **Expand neighbours (relational mind-map)**: forward `ref` segments → **CHILDREN** (lower fan, blue),
+  `getBackReferences()` → **PARENTS** (upper fan, amber), a guid in BOTH → **FRIEND** (sides, purple). Cards' `strokeColor` +
+  their arrows are coloured by the SAME `ROLE_HEX` the Brain subgraph drop uses; arrows point parent→focus / focus→child /
+  focus↔friend (double-headed). Symmetric fan layout (≤162° spread, R=330 from the focus center), de-dups against the focus
+  itself + on-canvas cards (re-run only adds new), capped 8/role.
+- Fully relational + read-only (getRecord/getBackReferences/getLineItems reads + canvas-only scene elements; NO record writes).
+  Reuses makeRecordCard/makeLinear/linearBBox/_updateBindings — no new element type or hittable flag.
+- **Adversarial review: clean, no defects** (read-only/data-safety, disjoint classification, layout signs, element
+  well-formedness incl. friend double-head via makeLinear's default endArrowhead, binding resolution, edge cases all verified).
+  Node `pxc_mindmap` 18/18 + all regressions green.
+- Next iters: interactive expand-on-click ⊕ affordance · semantic/backlink ghost-edges · graph auto-layout.
+
 ## ✅ v1.99.0 — white card REAL fix + inline-EDITABLE card properties (2026-06-24)
 Two follow-ups after the user reported the card was STILL white (only the editor popup went dark).
 - **White card — the real root cause (diagnosed live via chrome-devtools):** record/line cards are created with an
