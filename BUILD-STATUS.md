@@ -1,5 +1,26 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.99.0 — white card REAL fix + inline-EDITABLE card properties (2026-06-24)
+Two follow-ups after the user reported the card was STILL white (only the editor popup went dark).
+- **White card — the real root cause (diagnosed live via chrome-devtools):** record/line cards are created with an
+  explicit `backgroundColor: '#ffffff'` (makeRecordCard/makeLineCard default), and v1.95's fill `el.backgroundColor || surface`
+  HONOURED that default → always white, the dark-surface logic never ran (the dark area the user saw was the force-dark
+  backdrop). Fix: both card fills are back to `(el.backgroundColor && !== '#ffffff') ? el.backgroundColor : _cardSurfaceColor(dark)`
+  — a DEFAULT white card now FOLLOWS the canvas surface; a user-recoloured (non-white) card is still honoured. (Review
+  confirmed no regression: the palette maps a white pick → `transparent`, so the ONLY source of literal `#ffffff` is the
+  card default — there's no deliberate-white case to override.)
+- **Inline-EDITABLE properties (per the user — seamless inline, Title back):** DOUBLE-CLICK a property row in the card to
+  edit it — a `<select>` for choice props (Collection, Type), a text `<input>` for the rest — committed straight to the
+  record via `_writeRecProp` (invalidates → live re-render). `Title` is shown again (first editable row). `_drawRecordCard`
+  stores per-render `_cardPropRects` (dy rel. to card top, like `_lineRects`); `_cardPropAt` resolves the row under a dblclick;
+  the `onDblClick` record branch routes a property → `_editCardProp`, else title→open / body→edit-body. Editor shares
+  `_cellInp` with the table editor (open-one-closes-other), Escape aborts with no write.
+- **Adversarial review: clean, no defects on all 5 axes** — white-card no-regression (palette→transparent), dblclick routing
+  (prop vs title vs body band math reconciled), DOM editor + writeback (choice/date/number/text via `_writeRecProp`, Title
+  rename = the same path as the side panel, Escape-no-write), state lifecycle, scope. Node `pxc_transclusion` 32/32
+  (incl. hit-test + editor-kind) + `pxc_canvasfix` 28/28 + all regressions green.
+- Open knob: inline list capped at 8, empties shown as "—" — can hide empties / cap lower if cards get too tall.
+
 ## ✅ v1.98.0 — dark-canvas card match · natural dates in @ · HEIC images · properties v2 (2026-06-24)
 Four follow-up fixes from the user's transclusion pass.
 - **Card STILL white on a dark canvas** — v1.95 keyed the card off `PXC_DARK` (theme/force-dark), but the user's canvas is

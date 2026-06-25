@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.98.0';
+const PLEXUS_VERSION = '1.99.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3441,7 +3441,7 @@ class CanvasView {
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else this._editCardBody(hit); } // title + inline-properties band → open the record (rename/edit props there); body → edit body lines inline (writes back)
+      else if (hit && hit.type === 'record') { const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else this._editCardBody(hit); } // dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -4101,7 +4101,7 @@ class CanvasView {
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
         try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // [{text, depth, lineGuid}] — depth from parent_guid chain (getChildren() returns [] on the flat load); lineGuid → line-level connection targeting (Phase 4)
-        try { entry.props = this._recPanelFields(rec).filter((p) => p && p.name && p.name !== 'Title').slice(0, 8); } catch (_e) {} // INLINE PROPERTIES: ALL typed properties (incl. empty — schema-visible, like the side panel) EXCEPT the redundant Title (it repeats the card title)
+        try { entry.props = this._recPanelFields(rec).filter((p) => p && p.name).slice(0, 8); } catch (_e) {} // INLINE PROPERTIES: ALL editable typed properties (incl. Title — per the user, so it's editable inline — and empty fields, schema-visible like the side panel). Dblclick a value to edit (see _editCardProp).
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
     })();
@@ -4398,7 +4398,7 @@ class CanvasView {
     const dark = this._canvasDark(), accent = sk.color || el.strokeColor || '#7c5cff'; // surface + ink follow the EFFECTIVE backdrop (theme/force-dark OR a dark viewBackgroundColor), not PXC_DARK alone
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: an explicit bg (any value, incl. white) wins; else a luminance-gated surface that MATCHES the canvas backdrop (dark on a dark/force-dark canvas, light otherwise)
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : this._cardSurfaceColor(dark); // B1: cards DEFAULT to white bg (makeRecordCard) — that default must FOLLOW the canvas surface (dark on a dark canvas), so treat #ffffff as "no override"; a user-chosen NON-white card colour is still honoured
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
     ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
@@ -4411,7 +4411,7 @@ class CanvasView {
     // INLINE PROPERTIES (read-only): a DISTINCT two-column "Label  value" block under the title — a faint divider, an aligned
     // label column, empty fields shown as a muted "—" (schema-visible, like the side panel). Height tracked in _cardPropsH so
     // the dblclick open-band + the inline editor's titleH stay in sync.
-    let _propsH = 0;
+    let _propsH = 0; const _prRects = [];
     if (rec.props && rec.props.length) {
       const pTop = ty;
       ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.45; ctx.strokeStyle = dark ? '#3a4150' : '#e3e6ea'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tx, ty + 1.5); ctx.lineTo(tx + maxW, ty + 1.5); ctx.stroke(); ctx.restore(); // section divider
@@ -4423,11 +4423,13 @@ class CanvasView {
         const empty = (p.value === '' || p.value == null); const val = empty ? '—' : String(p.value);
         ctx.font = '11px system-ui, sans-serif'; ctx.fillStyle = empty ? (dark ? '#5b626e' : '#c2c7cf') : (dark ? '#c9cfd7' : '#3c4043');
         ctx.fillText(this._clipText(ctx, val, Math.max(20, maxW - labW)), tx + labW, ty);
+        _prRects.push({ name: p.name, kind: p.kind, choices: p.choices, value: p.value, dy: ty - y, labW }); // INLINE EDIT: dblclick this row's band → _editCardProp
         ty += 15;
       }
       ty += 4; _propsH = ty - pTop;
     }
     (this._cardPropsH || (this._cardPropsH = new Map())).set(el.id, _propsH);
+    (this._cardPropRects || (this._cardPropRects = new Map())).set(el.id, _prRects);
     ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = bodyCol;
     const bands = []; // Phase 4: capture each body row's band (relative to card top) for line-level connection targeting + the blue flag
     for (const ln of rec.lines) { if (ty > y + h - 14) break; const rh = this._drawOutlineRow(ctx, ln.text, ln.depth || 0, tx, ty, bodyCol, maxW); if (ln.lineGuid) bands.push({ lineGuid: ln.lineGuid, dy: ty - y, h: rh }); ty += rh; } // TRANSCLUSION: record-style rainbow marker + indent guide per row, wraps long lines (Indent-Rainbow parity)
@@ -4657,6 +4659,38 @@ class CanvasView {
     if (cols == null) return;
     el.query = q; el.cols = String(cols).split(',').map((s) => s.trim()).filter(Boolean);
     this._invalidateTables(); this.dirty = true; this.scheduleSave();
+  }
+  // INLINE PROPERTY EDIT: the property row under (wx,wy) on a record card (world coords), or null. Rects are stored per
+  // render in _cardPropRects (dy relative to the card top → survives a move without a re-raster, like _lineRects).
+  _cardPropAt(card, wx, wy) {
+    const rects = this._cardPropRects && this._cardPropRects.get(card.id); if (!rects || !rects.length) return null;
+    const pad = 10, tx = card.x + pad + 4, maxW = card.width - pad * 2 - 4;
+    for (const r of rects) { const ry = card.y + r.dy; if (wx >= tx - 2 && wx <= tx + maxW + 2 && wy >= ry - 3 && wy <= ry + 14) return r; }
+    return null;
+  }
+  // Edit ONE record-card property inline (dblclick its row): a DOM <select> for choice props, else a text <input>, positioned
+  // over the value column + zoom-scaled. Commit → _writeRecProp (writes + invalidates the card → live re-render). Mirrors _editTableCell.
+  async _editCardProp(card, pr) {
+    const guid = card.recordGuid; if (!guid || !pr) return;
+    if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} this._cellInp = null; }
+    const pad = 10, tx = card.x + pad + 4, maxW = card.width - pad * 2 - 4, z = this.camera.zoom, dk = this._canvasDark();
+    const s = this.camera.worldToScreen(tx + pr.labW, card.y + pr.dy - 3);
+    let inp;
+    if (pr.kind === 'choice' && pr.choices && pr.choices.length) {
+      inp = document.createElement('select');
+      const blank = document.createElement('option'); blank.value = ''; blank.textContent = '—'; inp.appendChild(blank);
+      for (const c of pr.choices) { const o = document.createElement('option'); o.value = c.label; o.textContent = c.label; if (String(pr.value || '') === c.label) o.selected = true; inp.appendChild(o); }
+    } else { inp = document.createElement('input'); inp.type = 'text'; inp.value = (pr.value == null ? '' : String(pr.value)); }
+    inp.style.cssText = 'position:absolute;left:' + s.x + 'px;top:' + s.y + 'px;width:' + (Math.max(60, maxW - pr.labW) * z) + 'px;height:' + (17 * z) + 'px;box-sizing:border-box;border:2px solid #7c5cff;border-radius:3px;padding:0 4px;font:' + (11 * z) + 'px system-ui;outline:none;z-index:25;background:' + (dk ? '#1b1f2a' : '#fff') + ';color:' + (dk ? '#e6e8ee' : '#1e1e1e');
+    this._cellInp = inp; this.wrap.appendChild(inp);
+    setTimeout(() => { try { inp.focus(); if (inp.select) inp.select(); } catch (_e) {} }, 0);
+    let done = false;
+    const commit = async () => { if (done) return; done = true; const val = inp.value; try { inp.remove(); } catch (_e) {} this._cellInp = null;
+      try { const rec = await getRecordPoll(this.plugin, guid); if (rec) this._writeRecProp(rec, guid, pr.name, pr.kind, val); } catch (_e) {} this.dirty = true; };
+    if (inp.tagName === 'SELECT') inp.addEventListener('change', () => inp.blur()); // pick → commit
+    inp.addEventListener('blur', commit);
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); else if (e.key === 'Escape') { done = true; try { inp.remove(); } catch (_e) {} this._cellInp = null; } });
+    inp.addEventListener('pointerdown', (e) => e.stopPropagation());
   }
   _editTableCell(el, cell) {
     if (!cell || !cell.prop || !cell.row) return;
@@ -5144,7 +5178,7 @@ class CanvasView {
     const dark = this._canvasDark(), accent = el.strokeColor || '#0ea5e9'; // surface + ink follow the EFFECTIVE backdrop (incl. a dark viewBackgroundColor), not PXC_DARK alone
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
-    ctx.fillStyle = el.backgroundColor || this._cardSurfaceColor(dark); // B1: explicit bg wins; else a luminance-gated surface matching the canvas backdrop
+    ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : this._cardSurfaceColor(dark); // B1: the default white card bg FOLLOWS the canvas surface; a non-white user choice is honoured
     if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
