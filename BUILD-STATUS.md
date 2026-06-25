@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ A4 — AUDIT-RESOLVED, NO SHIP: palette inheritance already covered (reimagined) (Tier-A loop, item 4/26) (2026-06-24)
+The worklist's A4 ("templates clone the full `appState.colorPalette` on New-from-template") was based on an audit
+mischaracterization. Grep-audit of plugin.js: there is **NO `appState.colorPalette`/`topPicks` field** and **NO
+drawing-template-clone** feature (`_applyTemplate`@4344 is the EDIT-3 *text* Templater feature; `_newDrawing`@7445 makes a
+blank "Untitled drawing"). So the premise ("clone-on-new silently drops the palette") has nothing to apply to.
+- The real user value — your colours carry across drawings — is ALREADY shipped + wired two ways, both inherited by every
+  new drawing: (1) the localStorage **`recentColors`** shared palette (`pushRecentColor`@5841 on every apply → a "Recent
+  (across drawings)" swatch row@5857 in the picker, explicitly the "inherited palette"); (2) the user-configurable **toolbar
+  palette** (`c.palette`@352, per-user, persisted across drawings).
+- Building a literal Excalidraw `colorPalette`-clone would require FIRST inventing a per-drawing palette object AND a
+  drawing-template-clone system — exactly the "invent a low-value feature" trap the loop forbids; the roadmap itself frames
+  most appState fields as "reimagine," and this one already is. **No code change, no version bump.** Checked off as covered.
+- Next (worklist A5): backlinks panel ("drawings referencing this record" via getBackReferenceRecords()).
+
 ## ✅ v1.108.0 — A3: AI image-edit works on EXTERNALIZED (blob-backed) images (Tier-A loop, ship 3/26) (2026-06-24)
 `_aiEditImage` previously BAILED ("isn't supported for externalized images yet") whenever the selected image was
 externalized — it read `file.dataURL`, but a blob-backed image stores only `file.blobGuid`. So AI-edit silently failed on
