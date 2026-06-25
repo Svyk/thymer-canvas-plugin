@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅ TIER A+B PARITY LOOP COMPLETE — 26/26 (8 code ships + 18 audit-resolved/deferred) (2026-06-24)
+The full Tier-A→B worklist (`TIER-AB-WORKLIST.md`, from the 2026-06-24 deferred-audit) is processed. Every item: built /
+audit-resolved (already shipped) / deferred-to-backlog. **8 code ships** (v1.105→v1.112), all node-tested + adversarially
+reviewed + pushed to `Svyk/thymer-canvas-plugin`:
+- **A1** v1.106 live cards in PNG/SVG/print/cite export · **A2** v1.107 concurrency rev-check (multi-device overwrite guard +
+  conflict backup) · **A3** v1.108 AI-edit on externalized images · **A5** v1.109 backlinks list · **B1** v1.110 in-place image
+  crop · **B2** v1.111 7 pen profiles · **B16** v1.112 grid/snap decouple. (v1.105 mind-map→note was the prior run.)
+- **Audit-resolved (already shipped):** A4 palette-inheritance · A6 elbow/orthogonal arrows · B4 frame settings · B5 gallery ·
+  B7 banner-sync · B9 deep-link anchors (Cite/xref) · B10 Settings modal.
+- **Deferred to the Thymer backlog (project `1ZD714PF7526KQTYQGRN3RK3MH`):** A7 TEST_HOOKS (release-toggle doc) · B3 layer
+  panel (not-parity/low-value) · B6 restored-panel reopen (probe → needs hands-on session, recipe logged) · B8 render-in-note
+  (platform-blocked, no Thymer render hook) · B11 IndexedDB cache · B12 mermaid-reedit · B13 jspdf PDF · B14 connector
+  ergonomics · B15 curved-arrow focus+gap · B17 editable-ontology · B18 dead-code (REAL superseded cache/margin subsystem
+  found — render-path removal needs a careful live-verified session, recipe logged) · B19 stencil import. Plus residuals from
+  B16 (SVG hachure patterns, arrowhead-none memory).
+- **Headline:** the deferred-audit OVER-SCOPED Tier B against a very mature plugin — most "polish" items were already shipped
+  or platform-blocked; only the genuine gaps (A1/A2/A3/A5/B1/B2/B16) needed real builds. Net: 8 ships, 18 honest resolutions,
+  a fully-documented backlog. **No live verification claimed** — each ship needs the user's Plugins-Manager reinstall + reload.
+
 ## ✅ v1.112.0 — B16: GRID / SNAP DECOUPLE (export-fidelity, the most-felt) (Tier-B loop, ship 7/26) (2026-06-24)
 Snap-to-grid was coupled to grid VISIBILITY — `_snap` gated on `_gridOn()` (`gridModeEnabled`), so you couldn't show the grid
 without snapping, or snap without showing the grid. Now decoupled.
