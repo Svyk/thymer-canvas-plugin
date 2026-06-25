@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.105.0';
+const PLEXUS_VERSION = '1.106.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1396,7 +1396,10 @@ async function saveSceneChunked(plugin, rec, scene, view) {
   }
   return { ok: true, mode: 'chunked', rev, chunks: Object.keys(manifestChunks).length };
 }
-function exportPng(scene, maxPx = 1024, opts) {
+// A1: CARD element types render via VIEW draw methods (warm caches), NOT the free `drawElement` — so every export
+// path (PNG/SVG/print/cite) routes them through a supplied `drawCard` callback or a pre-rasterized <image>.
+const PXC_CARD_TYPES = new Set(['record', 'linecard', 'query', 'rollup', 'table', 'board', 'task']);
+function exportPng(scene, maxPx = 1024, opts, drawCard) {
   opts = opts || {};
   return new Promise((resolve) => {
     const run = () => {
@@ -1410,7 +1413,7 @@ function exportPng(scene, maxPx = 1024, opts) {
         if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
         ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
         const _pd = PXC_DARK; PXC_DARK = false; // UX-6: export is always TRUE colour (the dark treatment is display-only)
-        try { for (const el of scene.elements) if (!el.isDeleted && !el.secHidden) drawElement(ctx, el); } finally { PXC_DARK = _pd; }
+        try { for (const el of scene.elements) { if (el.isDeleted || el.secHidden) continue; if (PXC_CARD_TYPES.has(el.type)) { if (drawCard) drawCard(ctx, el); } else drawElement(ctx, el); } } finally { PXC_DARK = _pd; } // A1: cards via the view callback; everything else stays on the free drawElement
         cv.toBlob((blob) => resolve(blob), 'image/png');
       } catch (_e) { resolve(null); }
     };
@@ -1425,7 +1428,7 @@ function exportPng(scene, maxPx = 1024, opts) {
 }
 function svgEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 // Phase 8: export the scene to a standalone SVG string (clean shapes — not the hand-drawn rough look).
-function exportSvg(scene) {
+function exportSvg(scene, cardImg) {
   const b = sceneBounds(scene), pad = 24;
   const W = Math.max(1, Math.round(b.w + pad * 2)), H = Math.max(1, Math.round(b.h + pad * 2));
   const p = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`];
@@ -1451,6 +1454,7 @@ function exportSvg(scene) {
       else { const pts = rp.map((q) => q.map((n) => f(n)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); } }
     else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
     else if (el.type === 'image') { const f = scene.files && scene.files[el.fileId]; if (f && f.dataURL) p.push(`<image x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" href="${svgEsc(f.dataURL)}" opacity="${op}" preserveAspectRatio="none"/>`); }
+    else if (PXC_CARD_TYPES.has(el.type)) { const c = cardImg && cardImg[el.id]; if (c && c.url) p.push(`<image x="${c.x.toFixed(2)}" y="${c.y.toFixed(2)}" width="${c.w.toFixed(2)}" height="${c.h.toFixed(2)}" href="${svgEsc(c.url)}" preserveAspectRatio="none"/>`); } // A1: live card → its pre-rasterized image at the rotated-AABB box. Rotation AND el.opacity are already baked into the raster (the draw method sets globalAlpha=el.opacity), so NO rot transform and NO opacity attr (double-applying would square it)
   }
   p.push('</g></svg>');
   return p.join('');
@@ -2634,7 +2638,9 @@ class CanvasView {
   async _exportSvg() {
     try {
       const scene = await this._sceneWithInlineImages(); // SCALE: resolve externalized blobGuid images → dataURL so SVG export isn't blank
-      const svg = exportSvg(scene);
+      const cardImg = {}; const _cs = (this.plugin._settings && this.plugin._settings.pngScale) || 2; // A1: cards can't be expressed as SVG primitives → rasterize each to an <image> at its rotated AABB (rotation baked in)
+      for (const el of scene.elements) { if (el.isDeleted || el.secHidden || !PXC_CARD_TYPES.has(el.type)) continue; try { const bb = { x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width), h: Math.abs(el.height) }; const box = el.angle ? rotatedAABB(bb, el.angle) : bb; cardImg[el.id] = { x: box.x, y: box.y, w: box.w, h: box.h, url: this._renderRegionPng(box, _cs, null, el.id) }; } catch (_e) {} }
+      const svg = exportSvg(scene, cardImg);
       const blob = new Blob([svg], { type: 'image/svg+xml' });
       const url = URL.createObjectURL(blob); const a = document.createElement('a');
       a.href = url; a.download = 'plexus-drawing.svg'; document.body.appendChild(a); a.click();
@@ -2665,7 +2671,7 @@ class CanvasView {
   // S8: export the drawing as a PNG, honoring the export settings (scale / padding / background).
   async _exportPngFile() {
     const st = this.plugin._settings || {};
-    const blob = await exportPng(this.scene, 4096, { scale: st.pngScale || 2, padding: st.exportPadding != null ? st.exportPadding : 24, background: st.exportBackground !== false });
+    const _we = this._exporting; this._exporting = true; let blob; try { blob = await exportPng(this.scene, 4096, { scale: st.pngScale || 2, padding: st.exportPadding != null ? st.exportPadding : 24, background: st.exportBackground !== false }, (c, e) => this._drawCardEl(c, e)); } finally { this._exporting = _we; }
     if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: PNG export failed.', dismissible: true }); } catch (_e) {} return 0; }
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
     a.href = url; a.download = 'plexus-drawing.png'; document.body.appendChild(a); a.click();
@@ -2675,14 +2681,26 @@ class CanvasView {
   }
   // P1.5: render a world-bounds region to a PNG dataURL (shapes/text/images; cards via drawElement fallback).
   // clipPoly (optional, WORLD coords) → render only inside that freehand shape (transparent outside) for the chip thumbnail.
-  _renderRegionPng(b, scale, clipPoly) {
+  _renderRegionPng(b, scale, clipPoly, onlyId) {
     const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(b.w * scale)); cv.height = Math.max(1, Math.round(b.h * scale));
     const ctx = cv.getContext('2d');
     ctx.setTransform(scale, 0, 0, scale, -b.x * scale, -b.y * scale);
     if (clipPoly && clipPoly.length >= 3) { ctx.beginPath(); ctx.moveTo(clipPoly[0].x, clipPoly[0].y); for (let i = 1; i < clipPoly.length; i++) ctx.lineTo(clipPoly[i].x, clipPoly[i].y); ctx.closePath(); ctx.clip(); }
-    ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(b.x, b.y, b.w, b.h); // bg inside clip only
-    for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden || el.type === 'frame') continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (el.type === 'record' || el.type === 'query' || el.type === 'board') {} else drawElement(ctx, el); } catch (_e) {} } // images render; cards skipped (async)
+    if (!onlyId) { ctx.fillStyle = (this.scene.appState && this.scene.appState.viewBackgroundColor) || '#ffffff'; ctx.fillRect(b.x, b.y, b.w, b.h); } // bg inside clip only; SKIP for a single-card raster (onlyId, the SVG path) so the image is TRANSPARENT outside the card's own pixels — a rotated card's AABB corners must not occlude elements behind it
+    const _wasExp = this._exporting; this._exporting = true; // A1: camera-independent (fixed) glow while rasterizing for export
+    try { for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden || el.type === 'frame') continue; if (onlyId && el.id !== onlyId) continue; try { if (el.type === 'image') this._drawImage(ctx, el); else if (PXC_CARD_TYPES.has(el.type)) this._drawCardEl(ctx, el); else drawElement(ctx, el); } catch (_e) {} } } finally { this._exporting = _wasExp; } // A1: live cards now render via their VIEW draw methods (warm caches; cold → graceful "Loading…")
     return cv.toDataURL('image/png');
+  }
+  // A1: route a CARD element to its live VIEW draw method (the SAME world-space dispatch the on-screen painter uses) — shared by every export path.
+  _drawCardEl(ctx, el) {
+    const t = el.type;
+    if (t === 'record') this._drawRecordCard(ctx, el);
+    else if (t === 'linecard') this._drawLineCard(ctx, el);
+    else if (t === 'query') this._drawQueryNode(ctx, el);
+    else if (t === 'rollup') this._drawRollupNode(ctx, el);
+    else if (t === 'table') this._drawTableNode(ctx, el);
+    else if (t === 'board') this._drawBoardCard(ctx, el);
+    else if (t === 'task') this._drawTaskNode(ctx, el);
   }
   // P1.5: Printable Layout — named frames become ordered pages; opens a print view (Save as PDF).
   _printFrames() {
@@ -3064,7 +3082,7 @@ class CanvasView {
     try {
       const ids = this.selected.size ? [...this.selected] : null;
       const sub = ids ? { type: 'excalidraw', appState: this.scene.appState, elements: this.scene.elements.filter((e) => ids.includes(e.id) && !e.isDeleted), files: this.scene.files } : this.scene;
-      blob = await exportPng(sub, 4096, { scale: (this.plugin._settings && this.plugin._settings.pngScale) || 2, padding: 24, background: false });
+      const _we = this._exporting; this._exporting = true; try { blob = await exportPng(sub, 4096, { scale: (this.plugin._settings && this.plugin._settings.pngScale) || 2, padding: 24, background: false }, (c, e) => this._drawCardEl(c, e)); } finally { this._exporting = _we; }
     } catch (_e) {}
     if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to copy.', dismissible: true }); } catch (_e) {} return; }
     try {
@@ -4442,7 +4460,7 @@ class CanvasView {
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : this._cardSurfaceColor(dark); // B1: cards DEFAULT to white bg (makeRecordCard) — that default must FOLLOW the canvas surface (dark on a dark canvas), so treat #ffffff as "no override"; a user-chosen NON-white card colour is still honoured
-    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
+    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = this._exporting ? 6 : 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim; ~12 world px at any zoom)
     ctx.lineWidth = (el.strokeWidth || 1.5) * (sk.color ? 2 : 1); ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
     const rec = this._recFor(el.recordGuid); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;
@@ -5289,7 +5307,7 @@ class CanvasView {
     const glowOn = !(this.plugin._settings && this.plugin._settings.cardGlow === false), titleCol = dark ? '#e6e7ea' : '#1e1e1e', bodyCol = dark ? '#9aa3ad' : '#5f6368', dimCol = dark ? '#8b9096' : '#9aa0a6';
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad); else ctx.rect(x, y, w, h);
     ctx.fillStyle = (el.backgroundColor && el.backgroundColor.toLowerCase() !== '#ffffff') ? el.backgroundColor : this._cardSurfaceColor(dark); // B1: the default white card bg FOLLOWS the canvas surface; a non-white user choice is honoured
-    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
+    if (glowOn) { ctx.shadowColor = accent; ctx.shadowBlur = this._exporting ? 6 : 12 * this.camera.zoom * this.dpr; ctx.fill(); ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)'; } else ctx.fill(); // GLOW: accent halo via the fill's shadow (static — no per-frame anim)
     ctx.lineWidth = el.strokeWidth || 1.5; ctx.strokeStyle = accent; ctx.stroke();
     ctx.save(); ctx.clip();
     const data = this._lineFor(el); const pad = 10, tx = x + pad + 4, maxW = w - pad * 2 - 4; let ty = y + pad;

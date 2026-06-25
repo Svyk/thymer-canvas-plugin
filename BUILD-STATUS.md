@@ -1,5 +1,26 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.106.0 — A1: LIVE CARDS in PNG/SVG/print/cite export (Tier-A loop, ship 1/26) (2026-06-24)
+TIER-A/B build loop (worklist: `~/plexus-canvas/TIER-AB-WORKLIST.md`; Tier C+D logged as backlog on the Thymer
+"Plexus Canvas" project page `1ZD714PF7526KQTYQGRN3RK3MH`). Record/query/linecard/rollup/table/board/task cards were
+SKIPPED by every export path (`_renderRegionPng` had an empty card branch; `exportPng` + `exportSvg` only knew the free
+`drawElement`) → PNG/print/copy/cite/SVG exported BLANK where cards are. Now they render.
+- **`PXC_CARD_TYPES`** (shared set) + **`_drawCardEl(ctx,el)`** (view-method dispatch, the SAME world-space draw the
+  on-screen painter uses). `_renderRegionPng` (PNG region / print-to-PDF / cite / board-embed) now draws cards via
+  `_drawCardEl`; gained an **`onlyId`** filter for pure single-card rasters. `exportPng` (PNG file + copy-as-PNG) takes a
+  `drawCard` callback; `exportSvg` takes a `cardImg` map and emits a per-card `<image>` at the card's **rotated AABB**
+  (rotation + el.opacity baked into the raster → no rot transform, no opacity attr). Export-mode glow is
+  camera-independent (`this._exporting` → fixed 6px, not `12·zoom·dpr`), so halos don't balloon with the live zoom.
+- **Render-only** (no record/line writes, no scene mutation, no new element type, no select/lasso/minimap surface). All
+  4 other `exportPng`/`exportSvg` callers (banner preview, slides, AI-vision, test hooks) pass no callback → cards
+  degrade gracefully (skipped, no throw) — verified by grep.
+- **Adversarial review: 2 MED (SVG-only) + 1 LOW, ALL FIXED** — (1) card `<image>` double-applied opacity (raster already
+  bakes globalAlpha=el.opacity) → dropped the attr; (2) a single-card raster filled an opaque AABB bg that occluded
+  elements behind a ROTATED card → bg fill now gated on `!onlyId` (transparent outside the card pixels); (3) made the two
+  PNG exporters save/restore `_exporting` for full re-entrancy. Flag-lifecycle / rotated-placement / cold-cache /
+  no-double-draw / frame-exclusion all verified clean. Node `pxc_cardexport` 40/40 + regressions green.
+- Next (worklist A2): concurrency rev-check (re-read Scene Rev before overwrite).
+
 ## ⏸ PARITY LOOP iter 7 — AUDIT-ONLY: parity effectively reached, loop PAUSED (no ship) (2026-06-24)
 Per the loop's own exit rule ("if the next several roadmap basics are ALL already shipped, say so and pause
 rather than invent low-value features"). Grep-audited every basic the loop named against plugin.js — ALL present:
