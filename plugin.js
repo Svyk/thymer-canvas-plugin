@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.111.0';
+const PLEXUS_VERSION = '1.112.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1992,7 +1992,9 @@ class CanvasView {
   // Phase 8: snap-to-grid (active only when the grid is on).
   _gridOn() { return !!(this.scene.appState && this.scene.appState.gridModeEnabled); }
   _gridSize() { return (this.scene.appState && this.scene.appState.gridSize) || 20; }
-  _snap(n) { if (!this._gridOn()) return n; const gs = this._gridSize(); return Math.round(n / gs) * gs; }
+  _snapOn() { const a = this.scene && this.scene.appState; return (a && a.gridSnap != null) ? !!a.gridSnap : this._gridOn(); } // B16: snap is DECOUPLED from grid visibility — gridSnap (when explicitly set) controls snapping independently; default (unset) follows the grid so existing drawings behave as before
+  _snap(n) { if (!this._snapOn()) return n; const gs = this._gridSize(); return Math.round(n / gs) * gs; }
+  _toggleSnap() { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridSnap = !this._snapOn(); this.dirty = true; this.scheduleSave(); return this.scene.appState.gridSnap; } // B16: toggle snap-to-grid independently of whether the grid is shown
   _toggleGrid() { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridModeEnabled = !this._gridOn(); this.dirty = true; this.scheduleSave(); return this.scene.appState.gridModeEnabled; }
   _gridStyle() { return (this.scene.appState && this.scene.appState.gridStyle) || 'dots'; } // B: 'dots' (default) | 'lines'
   _setGridStyle(s) { if (!this.scene.appState) this.scene.appState = {}; this.scene.appState.gridStyle = (s === 'lines' ? 'lines' : 'dots'); if (!this._gridOn()) this.scene.appState.gridModeEnabled = true; this.dirty = true; this.scheduleSave(); return this.scene.appState.gridStyle; } // setting a style turns the grid ON if it was off
@@ -3357,13 +3359,13 @@ class CanvasView {
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop' || mode === 'regionmark') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee
       if (mode === 'lasso' || mode === 'grouplasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; } // round-5 B: grouplasso reuses the lasso poly capture
-      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._gridOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; }
+      if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._snapOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; }
         this._dropLinkTarget = null; // DRAG-TO-RESTRUCTURE: a SINGLE record card dragged so its CENTER lands on ANOTHER record card → highlight it as a link target (the actual write is gated by a confirm on release)
         if (moveEls.length === 1 && moveEls[0].el.type === 'record') { const m0 = moveEls[0].el, t = this._recordCardUnder(m0.x + m0.width / 2, m0.y + m0.height / 2, m0.id); if (t) this._dropLinkTarget = t.id; }
         this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
-      if (mode === 'resize' && rsEl) { const pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
-      if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._gridOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
+      if (mode === 'resize' && rsEl) { const pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B16: connection-point drag snaps on _snapOn() (decoupled from grid visibility), consistent with move/resize // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
     };
     const onUp = (e) => {
       if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
@@ -7256,6 +7258,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) v._toggleGrid(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle snap-to-grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (!v) return; const on = v._toggleSnap(); try { this.ui.addToaster({ title: 'Snap-to-grid: ' + (on ? 'on' : 'off') + (v._gridOn() ? '' : ' (grid hidden)'), dismissible: true }); } catch (_e) {} } }); // B16: snap toggle independent of grid visibility
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Grid style — dots / lines', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (!v) return; const next = v._gridStyle() === 'lines' ? 'dots' : 'lines'; v._setGridStyle(next); try { this.ui.addToaster({ title: 'Grid: ' + next, dismissible: true }); } catch (_e) {} } }); // B: cycle the background grid style
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as SVG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportSvg(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Export drawing as PNG', icon: 'ti-download', onSelected: () => { const v = this._activeView(); if (v) v._exportPngFile(); } });
@@ -8798,11 +8801,14 @@ class Plugin extends AppPlugin {
       // Phase 8 grid/snap: snapping rounds to gridSize when grid on, passthrough when off.
       gridSnapTest: () => {
         const v = [...this._views].pop(); if (!v) return { error: 'no view' };
-        v.scene.appState.gridModeEnabled = true; v.scene.appState.gridSize = 20;
-        const on = [v._snap(13), v._snap(27), v._snap(31)]; // -> 20, 20, 40
-        v.scene.appState.gridModeEnabled = false; const off = v._snap(13);
-        v.dirty = true;
-        return { on, off, snapOk: on[0] === 20 && on[1] === 20 && on[2] === 40, offOk: off === 13 };
+        v.scene.appState.gridModeEnabled = true; v.scene.appState.gridSize = 20; delete v.scene.appState.gridSnap;
+        const on = [v._snap(13), v._snap(27), v._snap(31)]; // -> 20, 20, 40 (gridSnap unset → follows grid)
+        v.scene.appState.gridModeEnabled = false; const off = v._snap(13); // -> 13 (follows grid)
+        // B16 DECOUPLE: snap ON while the grid is HIDDEN, and grid SHOWN while snap is OFF
+        v.scene.appState.gridModeEnabled = false; v.scene.appState.gridSnap = true; const snapNoGrid = v._snap(13); // -> 20
+        v.scene.appState.gridModeEnabled = true; v.scene.appState.gridSnap = false; const gridNoSnap = v._snap(13); // -> 13
+        delete v.scene.appState.gridSnap; v.dirty = true;
+        return { on, off, snapNoGrid, gridNoSnap, snapOk: on[0] === 20 && on[1] === 20 && on[2] === 40, offOk: off === 13, decoupleOk: snapNoGrid === 20 && gridNoSnap === 13 };
       },
       // Phase 8 SVG export: scene -> standalone <svg> string with shape elements.
       svgExportTest: () => {

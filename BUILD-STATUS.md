@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.112.0 — B16: GRID / SNAP DECOUPLE (export-fidelity, the most-felt) (Tier-B loop, ship 7/26) (2026-06-24)
+Snap-to-grid was coupled to grid VISIBILITY — `_snap` gated on `_gridOn()` (`gridModeEnabled`), so you couldn't show the grid
+without snapping, or snap without showing the grid. Now decoupled.
+- New **`gridSnap`** appState flag + **`_snapOn()`** = `gridSnap != null ? !!gridSnap : _gridOn()` (explicit gridSnap wins;
+  unset → follows the grid → **old scenes byte-identical**). `_snap` + the move/resize/**editpt** (the 4th gate the first pass
+  missed) gates now use `_snapOn()`; the ~26 direct `_snap()` auto-layout sites inherit it for free. **`_toggleSnap()`** +
+  command "Plexus: Toggle snap-to-grid" (toaster annotates "(grid hidden)" when snap-on-grid-off).
+- **Adversarial review: SHIP.** Completeness confirmed (every snap site routes through `_snap`→`_snapOn()`); backward-compat
+  byte-identical (live `gridSnapTest` passes unchanged — I added decouple asserts to it too); `gridSnap` persists/round-trips
+  gate-free (no appState whitelist; default scene omits it → undefined → safe); no render/export/select/data surface change
+  (grid render still on `_gridOn()`). MED was just confirming the intended decouple blast-radius (snap-on snaps placements
+  too — intended). Node `pxc_gridsnap` 13/13 + regressions green.
+- B16 residuals DEFERRED to backlog: SVG hachure/cross-hatch PATTERNS in export (needs SVG `<pattern>` defs; low-value) +
+  arrowhead-'none' memory (small; remember last-used arrowhead). Next (worklist B17): editable shared-ontology record.
+
 ## ⏭ B11–B15 — DEFERRED (lower-value Tier-B tail), NO SHIP (Tier-B loop, items 17–21/26) (2026-06-24)
 Batch-deferred the lower-value tail to reach the genuine builds (B16/B18). All audit-rated lower-value/partial/large, none a
 clean small win: **B11** IndexedDB LocalCache (0 indexedDB refs — genuinely unbuilt, but a cache layer + rev-keyed
