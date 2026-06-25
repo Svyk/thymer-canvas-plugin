@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ⏭ B3 — DEFERRED to backlog (low-value, NO SHIP): layer-manager panel (Tier-B loop, item 9/26) (2026-06-24)
+Worklist B3 ("layer-manager panel: named layers show/hide/lock/reorder") deferred, not built. Audit of plugin.js: no
+`el.layer`/`el.locked` exist, BUT a named-layer panel is **not Excalidraw parity** (Excalidraw has no layers — it uses
+frames + z-order), is roadmap-deprioritized **P2** ("group+frame cover 80%"), and organization is already well-served by
+frames (named, collapsible via `secHidden`), groups, and z-order. The one genuinely-useful Excalidraw-parity atom is
+per-element **lock** — but to be usable it needs a locked-indicator + click-to-unlock affordance + gating of every selection
+path (`_hitTopAt`, `_selectAll`, `_elsInLoop`), i.e. UI+pointer cost approaching the panel itself, unjustified for an
+audit-rated low-marginal-value item the user hasn't specifically requested. **Logged to the Thymer backlog** (project page
+`1ZD714PF7526KQTYQGRN3RK3MH`); revisit element-lock if specifically wanted. No code change, no version bump.
+- Next (worklist B4): frame settings dialog + clip-on-render + marker frames.
+
 ## ✅ v1.111.0 — B2: 7 PEN PROFILES (highlighter/marker/fine-tip/fountain/thick-thin/…) (Tier-B loop, ship 6/26) (2026-06-24)
 The pen had ONE freehand profile; now 7 (default · highlighter · finetip · fountain · marker · thickthin · thinthickthin).
 - **`PXC_PEN_PROFILES`** table: each profile shapes the per-point radius (`fat`=slow fatten · `thin`=speed thinning ·
