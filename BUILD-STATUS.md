@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ℹ️ B4 — AUDIT-RESOLVED + residuals DEFERRED, NO SHIP: frame settings already ship (Tier-B loop, item 10/26) (2026-06-24)
+Worklist B4 ("frame settings dialog + clip-on-render + marker frames"). Audit of plugin.js: the useful frame settings are
+already shipped — **name** render (`_drawFrame`@5163, default "Section"), **rename** (double-click a frame → "Section name:"
+prompt → sets `el.name`@3568), **color** (select + the colour flyout → `strokeColor`), **collapse/expand** (command@7342 +
+the ▸ arrow + `secHidden` child-hiding), **move-as-unit** (`_frameChildren` drag), **slide-ordering** (frames→slides). So a
+"settings dialog" would just consolidate already-working options (and overlaps B10's in-panel Settings modal).
+- Residuals deferred to the Thymer backlog: **clip-on-render** (children cropped to frame bounds) is roadmap-deferred as
+  "render-loop-invasive for modest visual gain" — the flat paint order would need a per-element clip-to-owning-frame check in
+  the render hot path; revisit as an OPT-IN per-frame toggle if wanted. **Marker frames** (`frameRole:'marker'`) are niche.
+- No code change, no version bump. Next (worklist B5): companion Drawings CollectionPlugin (declare Scene/Assets fields) + gallery view.
+
 ## ⏭ B3 — DEFERRED to backlog (low-value, NO SHIP): layer-manager panel (Tier-B loop, item 9/26) (2026-06-24)
 Worklist B3 ("layer-manager panel: named layers show/hide/lock/reorder") deferred, not built. Audit of plugin.js: no
 `el.layer`/`el.locked` exist, BUT a named-layer panel is **not Excalidraw parity** (Excalidraw has no layers — it uses
