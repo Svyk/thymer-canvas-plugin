@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.156.0';
+const PLEXUS_VERSION = '1.157.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -39,6 +39,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   connLegend: true,
   // C7 comment badges: a small comment-count speech-bubble on any card that has anchored comments
   commentBadges: true,
+  // C14 PDF page labels: a small "p N / M" tag at each PDF page's corner
+  pdfPageLabels: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -7048,6 +7050,22 @@ class CanvasView {
     }
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore();
   }
+  // C14: a small "p N / M" label at each PDF page's bottom-left corner — so a laid-out / exploded multi-page document orients
+  // at a glance (@round PDF docs). Overlay-only, screen-space, no animation. Lazy-init: a PDF-free board pays only the scan.
+  _drawPdfPageBadges(ctx, z, d) {
+    const S = this.plugin._settings;
+    if ((S && S.pdfPageLabels === false) || this._drawGesture || this._camAnim || z < 0.18) return; // LOD: a page number is unreadable far out
+    const W = this.iCv.width, H = this.iCv.height; let started = false;
+    for (const el of this.scene.elements) {
+      if (!el || el.isDeleted || el.type !== 'image' || !el.pdf) continue; // PDF pages only
+      if (!started) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.save(); ctx.font = '600 ' + (10 * d) + 'px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; started = true; } // lazy → no save/alloc on a PDF-free board
+      const x = Math.min(el.x, el.x + el.width), yb = Math.max(el.y, el.y + el.height), sp = this.camera.worldToScreen(x, yb), px = sp.x * d, py = sp.y * d; // bottom-left corner
+      if (px < -120 || py < -60 || px > W + 120 || py > H + 60) continue; // cull off-screen
+      const txt = 'p ' + (el.pdf.page || '?') + (el.pdf.pageCount ? ' / ' + el.pdf.pageCount : ''), pad = 4.5 * d, ch = 15 * d, cw = ctx.measureText(txt).width + pad * 2, bx = px + 4 * d, by = py - ch - 4 * d; // just inside the bottom-left corner
+      ctx.globalAlpha = 0.88; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(bx, by, cw, ch, 6 * d); else ctx.rect(bx, by, cw, ch); ctx.fillStyle = 'rgba(20,24,33,0.92)'; ctx.fill(); ctx.lineWidth = 1 * d; ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.stroke(); ctx.globalAlpha = 1; ctx.fillStyle = '#e6e8ee'; ctx.fillText(txt, bx + pad, by + ch / 2 + 0.5 * d);
+    }
+    if (started) { ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore(); }
+  }
   // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
   _ghostEdgeAt(wx, wy) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
@@ -8056,6 +8074,7 @@ class CanvasView {
     // P3.9: hub badges — degree-count pill per connected card (screen-space; method self-gates on settings/focus-modes/LOD).
     if (this._showGhosts) { try { this._drawConnBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     if (!this.plugin._settings || this.plugin._settings.commentBadges !== false) { try { this._drawCommentBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C7: comment-count badges on annotated cards
+    if (!this.plugin._settings || this.plugin._settings.pdfPageLabels !== false) { try { this._drawPdfPageBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C14: page-number labels on PDF pages
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
@@ -9283,6 +9302,7 @@ class Plugin extends AppPlugin {
     toggle(gen, 'Force dark canvas (override theme)', 'darkMode', 'Dark mode auto-follows your Thymer theme; turn this on to force a dark canvas even on a light theme.');
     toggle(gen, 'Invert images in dark mode', 'invertImagesDark', 'Auto-inverts raster/SVG figures so they read on a dark canvas (zsviczian-style). Opt a single image out via the “Toggle image dark-invert” command.');
     toggle(gen, 'Comment badges on cards', 'commentBadges', 'A small speech-bubble count on any card with anchored comments (dimmed when all are resolved) — see annotated records at a glance.');
+    toggle(gen, 'PDF page numbers', 'pdfPageLabels', 'A small “p N / M” tag on each PDF page so a laid-out / exploded document orients at a glance.');
 
     const beh = section('Canvas behavior');
     toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');

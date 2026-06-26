@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.157.0 — C14: PDF page-number labels (orient a multi-page document) (2026-06-26)
+The least-touched pillar (@round PDF docs): a small "p N / M" tag at each PDF page's bottom-left corner, so a laid-out or
+exploded multi-page PDF orients at a glance. `_drawPdfPageBadges` mirrors the comment-badge overlay but uses LAZY init —
+a PDF-free board does only a zero-allocation O(N) scan (no save/setTransform/Map), strictly cheaper than the comment-badge
+sibling; `save` happens on the first PDF page, `restore` gated on `started` (balanced on every path). Reads `el.pdf.page`/
+`pageCount` (partial-safe → "p ?" / drops "/ M"); bottom-left placement avoids the top-left hub / top-right comment+⇄
+badges. New `pdfPageLabels` setting (default on) + General toggle (live, overlay-only). Review: **SHIP, CLEAN** — no
+HIGH/MED; lazy save/restore balanced, no per-frame alloc on PDF-free boards, transform/device-px, settings backfill,
+collision-free, edge cases all confirmed (2 LOW intentional: looser z<0.18 LOD since page numbers stay legible farther
+out, large pages). Tests `pxc_pdfpagelabel` 13; cmtbadge/pincluster regress green. **Next: more on-theme features.**
+
 ## ✅ v1.156.0 — C13: comment pin clustering at low zoom (declutter dense boards) (2026-06-26)
 (Past the v1.155 checkpoint — the feature space wasn't quite exhausted.) When zoomed OUT (z<0.55), overlapping comment
 pins cluster into one amber "stacked" super-pin with the count (dim if all resolved); clicking it fits the camera to those
