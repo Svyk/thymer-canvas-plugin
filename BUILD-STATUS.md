@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.133.0 — P3.6: glow on REAL connectors (on-theme follow-up) (2026-06-25)
+After the roadmap completed, the re-fired /loop ("implement other X-post features") → extend P3.0's ghost glow to
+user-drawn arrows/lines: `drawLinear` draws a soft bloom of the same path when `PLEXUS_EDGE_GLOW>0` (module global set
+per-render, scale-aware). Review: 2 MED + 1 LOW fixed — scale-aware blur (`min(20,3*zoom*dpr)` like the card glow, was a
+flat 7px); export forces glow off (deterministic, matches glow-less SVG); `adaptInk` glow color for dark-mode. 60fps via
+the `_drawGesture` gate (0 blur mid-gesture). Tests `pxc_connglow` 16. Commit `bbf18f4`, pushed. **Next follow-ups:
+Settings-panel UI for the connection toggles; PDF source-blob re-render for interrupted fills; 2nd-degree arrange.**
+
 ## ✅✅✅ VISUAL-THINKING CANVAS ROADMAP COMPLETE (2026-06-25)
 The whole plan inspired by azlen's "parallel pages, visibly connected" + round's anchored-comments X posts is shipped end
 to end across **16 reviewed feature ships (v1.117 mind-map → v1.132)**:
