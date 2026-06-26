@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.137.0';
+const PLEXUS_VERSION = '1.138.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3679,7 +3679,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -6595,7 +6595,7 @@ class CanvasView {
     const cos = (a, b) => { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }; // vectors are normalised -> dot = cosine
     const edges = [];
     for (let i = 0; i < els.length; i++) for (let j = i + 1; j < els.length; j++) { const s = cos(vecs[i], vecs[j]); if (s > 0.45) edges.push({ a: els[i].id, b: els[j].id, sim: s }); }
-    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace (its chain assumed the old graph)
+    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this._spotlightId = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace / spotlight (their geometry assumed the old graph)
     try { this.plugin.ui.addToaster({ title: edges.length + ' semantic ghost-edge(s) drawn.', dismissible: true }); } catch (_e) {}
     return edges.length;
   }
@@ -6726,6 +6726,46 @@ class CanvasView {
     ctx.globalAlpha = 1; ctx.restore();
     if (animating) this.dirty = true; // animate ~5s then settle → idle returns to 0 CPU (Esc clears; the trace persists statically until then)
   }
+  // P3.8 "see how this page connects to everything": select one record card → dim the whole board except that card and the
+  // pages it references / is referenced by (1-hop in the ghost graph), with its edges lit. Reads only; never writes a record.
+  async _spotlightConnections() {
+    const card = this._singleSel();
+    if (!card || card.type !== 'record' || !card.recordGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single record card to spotlight its connections.', dismissible: true }); } catch (_e) {} return; }
+    if (!this._ghostEdges || !this._ghostEdges.length) { try { await this._buildRelationalGhosts(true); } catch (_e) {} } // ensure the relational graph exists (quiet build)
+    const f = this._byId(card.id); if (!f || f.isDeleted) return; // re-resolve after the await (the card could have gone)
+    const inc = (this._ghostEdges || []).filter((ge) => ge && (ge.a === f.id || ge.b === f.id));
+    if (!inc.length) { this._spotlightId = null; this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Plexus: this page has no inferred connections to other cards on the board. (Arrange related pages or drop its refs first.)', dismissible: true }); } catch (_e) {} return; }
+    this._spotlightId = f.id; this._spotlightT0 = this._now(); this.dirty = true; // overlay renders it; persists until Escape / re-spotlight / the card is deleted
+    const n = new Set(); for (const ge of inc) n.add(ge.a === f.id ? ge.b : ge.a);
+    try { this.plugin.ui.addToaster({ title: 'Spotlighting ' + n.size + ' connected page' + (n.size === 1 ? '' : 's') + '. (Esc to clear.)', dismissible: true }); } catch (_e) {}
+  }
+  // Draw the spotlight on the OVERLAY: a screen-space dim scrim with the focus card + its 1-hop neighbors PUNCHED OUT
+  // (destination-out, the proven _flash idiom), then bright edges focus→neighbor + rings + an outward bead (~5s, then settle).
+  _drawSpotlight(ctx, z, d) {
+    const id = this._spotlightId; if (!id) return;
+    const f = this._byId(id); if (!f || f.isDeleted) { this._spotlightId = null; return; } // focus card died → drop the spotlight
+    const inc = (this._ghostEdges || []).filter((ge) => ge && (ge.a === id || ge.b === id));
+    if (!inc.length) { this._spotlightId = null; return; } // its edges were all removed (e.g. rebuild) → nothing to spotlight
+    const kept = [f]; const seen = new Set([id]);
+    for (const ge of inc) { const oid = (ge.a === id ? ge.b : ge.a), o = this._byId(oid); if (o && !o.isDeleted && !seen.has(oid)) { seen.add(oid); kept.push(o); } }
+    ctx.save();
+    // 1) screen-space dim scrim, punch out every kept card (focus + neighbors)
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = 'rgba(13,15,23,0.55)'; ctx.fillRect(0, 0, this.iCv.width, this.iCv.height);
+    ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000'; // opaque punch (alpha is all destination-out reads) → kept cards FULLY revealed, not left ~half-dimmed by the scrim's 0.55 alpha
+    for (const el of kept) { const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height), tl = this.camera.worldToScreen(x, y), br = this.camera.worldToScreen(x + Math.abs(el.width), y + Math.abs(el.height)), pad = 7 * d; this._rrect(ctx, tl.x * d - pad, tl.y * d - pad, (br.x - tl.x) * d + pad * 2, (br.y - tl.y) * d + pad * 2, 10 * d); ctx.fill(); }
+    ctx.globalCompositeOperation = 'source-over';
+    // 2) world-space bright edges focus→neighbor + outward bead + rings
+    ctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ctx.lineCap = 'round';
+    const fx = f.x + Math.abs(f.width) / 2, fy = f.y + Math.abs(f.height) / 2;
+    const animating = (this._now() - (this._spotlightT0 || 0)) < 5200, flowT = ((this._now() % 1400) / 1400);
+    for (let i = 1; i < kept.length; i++) { const o = kept[i], ox = o.x + Math.abs(o.width) / 2, oy = o.y + Math.abs(o.height) / 2, ge = inc.find((g) => (g.a === o.id || g.b === o.id)); const base = (ge && ge.rel) ? '#0ea5e9' : '#f59e0b'; const dx = ox - fx, dy = oy - fy, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = (fx + ox) / 2 + (-dy / len) * bend, cyp = (fy + oy) / 2 + (dx / len) * bend;
+      ctx.beginPath(); ctx.moveTo(fx, fy); ctx.quadraticCurveTo(cxp, cyp, ox, oy); ctx.globalAlpha = 0.95; ctx.strokeStyle = base; ctx.lineWidth = 2.6 / z; ctx.setLineDash([]); ctx.stroke();
+      if (animating) { const u = 1 - flowT, px = u * u * fx + 2 * u * flowT * cxp + flowT * flowT * ox, py = u * u * fy + 2 * u * flowT * cyp + flowT * flowT * oy; ctx.beginPath(); ctx.arc(px, py, 4 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.95; ctx.shadowColor = base; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0; } }
+    ctx.lineWidth = 2.6 / z; for (let i = 0; i < kept.length; i++) { const el = kept[i], isF = (i === 0); ctx.globalAlpha = isF ? 0.98 : 0.7; ctx.strokeStyle = isF ? '#7c5cff' : '#b9a6ff'; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 5 / z, y - 5 / z, Math.abs(el.width) + 10 / z, Math.abs(el.height) + 10 / z, 10 / z); ctx.stroke(); }
+    ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.restore();
+    if (animating) this.dirty = true; // animate ~5s then settle → idle returns to 0 CPU (Esc clears; the spotlight persists statically until then)
+  }
   // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
   _ghostEdgeAt(wx, wy) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
@@ -6781,7 +6821,7 @@ class CanvasView {
     }
     const edges = [];
     for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]) }); } // aRefsB/bRefsA → the hover label ("references" / "referenced by" / "linked")
-    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace (its chain assumed the old graph)
+    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this._spotlightId = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace / spotlight (their geometry assumed the old graph)
     if (!quiet) try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {} // P3.3: callers that already toast (Arrange parallel) pass quiet=true to avoid a double toaster
   }
   // P0.0: fetch the OpenAI key from the ENCRYPTED store (unlock once per session; migrate + delete any legacy
@@ -7695,6 +7735,8 @@ class CanvasView {
     if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // P3.7: traced connection path between two cards — bright animated chain on the overlay (independent of ghost hover).
     if (this._tracedPath && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawTracePath(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    // P3.8: spotlight — dim the board except one card + its 1-hop neighbors. Self-manages transforms (screen scrim → world edges).
+    if (this._spotlightId && !this._drawGesture) { try { this._drawSpotlight(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
@@ -8020,7 +8062,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -8095,6 +8137,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages (parallel, connected)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(); } }); // P3.3: the azlen "parallel pages, visibly connected" gesture (refs right / backrefs left, ghosts connect them). ti-layout-board = confirmed-bundled (frame tool)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages — 2 levels deep', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(2); } }); // P3.3b: pull a further-right column of the referenced pages' own references (the deeper "many parallel pages" azlen shows)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Trace connection between 2 cards', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._traceConnection(); } }); // P3.7: "how are these two ideas connected?" — BFS the ghost graph, light up the shortest reference chain. ti-affiliate = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Spotlight this page’s connections', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._spotlightConnections(); } }); // P3.8: dim the board except the selected card + its 1-hop reference neighbors. ti-target = confirmed-bundled (focus/spotlight metaphor)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }

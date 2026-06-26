@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.138.0 — P3.8: spotlight a page's connection neighborhood (2026-06-26)
+"See how this page connects to everything": select one record card → **"Spotlight this page's connections"** dims the
+whole board (overlay scrim) EXCEPT that card and its 1-hop reference neighbors (the pages it references / is referenced
+by), which are punched out fully bright with their edges lit + an outward bead (~5s, then settles → idle 0 CPU). Reuses
+the proven `_flash` scrim + `destination-out` punch idiom. Esc clears; a ghost rebuild or a deleted focus card
+self-clears. Read-only. Review: caught **1 HIGH** — the punch inherited the scrim's 0.55 alpha so kept cards stayed
+~half-dimmed (a permanent quality miss on a *persistent* spotlight, unlike the brief `_flash` pulse); fixed with an
+opaque punch fill (`fillStyle='#000'` — alpha is all `destination-out` reads → kept cards fully revealed). All
+composite/transform/save balance, self-heal early-returns (before `ctx.save()`), DPR space, idle-CPU, read-only,
+edge-id consistency confirmed clean. Tests `pxc_spotlight` 14; trace/arrange2 regress green. **Next: more on-theme features.**
+
 ## ✅ v1.137.0 — P3.7: trace the connection between two cards ("how are these ideas connected?") (2026-06-26)
 The other half of "visibly connected": select two record cards → **"Trace connection between 2 cards"** BFS-walks the
 relational ghost graph for the **shortest reference chain** between them and lights it up on the overlay — a glowing
