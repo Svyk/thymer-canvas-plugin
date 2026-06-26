@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.117.1';
+const PLEXUS_VERSION = '1.118.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4256,7 +4256,7 @@ class CanvasView {
         try { entry.props = this._recPanelFields(rec).filter((p) => p && p.name).slice(0, 8); } catch (_e) {} // INLINE PROPERTIES: ALL editable typed properties (incl. Title — per the user, so it's editable inline — and empty fields, schema-visible like the side panel). Dblclick a value to edit (see _editCardProp).
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
-    })();
+    })().finally(() => { try { this._scheduleReindex(); } catch (_e) {} }); // title settled → refresh backref labels/breadcrumbs (FB-T)
     return null;
   }
   _invalidateRec(guid) { if (this._recCache && this._recCache.has(guid)) { this._recCache.delete(guid); this.dirty = true; } }
@@ -5715,6 +5715,13 @@ class CanvasView {
         if (r.kind === 'line' && r.lineGuid) put(r.lineGuid, el.id, r.alias || r.label, 'line');
         else if (r.kind === 'record' && r.guid) put(r.guid, el.id, r.alias || r.label, 'record');
       }
+      // TRANSCLUSIONS (FB-T): a live record/line/task CARD on the board IS a reference to the record/line it embeds —
+      // even with no inline ref and no connecting arrow. The passes above miss a card that just sits there, so a
+      // transcluded note showed an EMPTY "Canvas References". Key the backref by the embedded record/line guid; label =
+      // its title / line text (resolves once _recFor caches it — _scheduleReindex re-runs then to upgrade the label).
+      // query/rollup/table/board cards embed a QUERY, not one record → no single target → skip (canvas-only, correct).
+      if (el.type === 'record' && el.recordGuid) { const rc = this._recCache && this._recCache.get(el.recordGuid); put(el.recordGuid, el.id, (rc && rc.title) || 'transclusion', 'record'); }
+      else if ((el.type === 'linecard' || el.type === 'task') && el.lineGuid) { const rc = this._recCache && this._recCache.get(el.recordGuid); const ln = rc && rc.lines && rc.lines.find((l) => l.lineGuid === el.lineGuid); put(el.lineGuid, el.id, (ln && ln.text) || (rc && rc.title) || 'transclusion', 'line'); }
       // CONNECTIONS (Phase 3): an arrow/line BOUND to a record/line card → a backref keyed by the transcluded record/line
       // guid (label = the connector's midpoint label). Opening that record/line then shows the ↗ flag + flyback to the
       // connection (via the existing _scanRefBadges/_openBackrefPicker/_flashAnchor). Both endpoints register (bidirectional).
@@ -5746,6 +5753,9 @@ class CanvasView {
     }
     try { this.plugin._setDrawingBackrefs(this.recordGuid, map); } catch (_e) {}
   }
+  // Debounced reindex — a transcluded card's title/line text arrives async (_recFor), so re-run the backref index once it
+  // settles to upgrade a placeholder label to the real title (and refresh connection breadcrumbs). Coalesced; destroy-safe.
+  _scheduleReindex() { if (this.destroyed) return; if (this._reindexT) clearTimeout(this._reindexT); this._reindexT = setTimeout(() => { this._reindexT = null; if (this.destroyed) return; try { this._reindexBackrefs(); } catch (_e) {} }, 600); }
   // A4: open a line ref → jump to the exact LINE (Nav-plugin pulse); fall back to a fresh panel, then the parent record.
   async _openRefLine(el) {
     const lg = el.refLineGuid; if (!lg) { if (el.refGuid) this._openCard({ refGuid: el.refGuid }); return; }
@@ -7297,7 +7307,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
