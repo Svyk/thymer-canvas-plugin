@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅✅ CHECKPOINT — VISUAL-THINKING CANVAS, 20-FEATURE ARC (v1.136→v1.155) (2026-06-26)
+Full node suite **72/72 test files green**, plugin.js syntax clean — the whole body of work passes together, zero
+cross-feature regression. This session shipped 20 reviewed+tested features replicating + extending the two seed X posts:
+- **azlen "parallel pages, visibly connected"** (10): 2nd-degree arrange · connection-path trace · neighborhood spotlight ·
+  hub badges · batch promote · minimap connections · **line-anchored edges (the signature)** · cluster framing ·
+  directional promote · connection legend.
+- **@round "anchored threaded comments on PDFs/docs"** (9): comment review-nav · categories · category count-chips ·
+  comment-count badges · @mention · comment-focus spotlight · bulk resolve/reopen · review-summary export · comment-on-
+  selection. The comment-review lifecycle is now complete end-to-end: create → categorize → count → filter → focus →
+  resolve → export.
+- **+1 bugfix**: unified the duplicate `_polyBBox` (region-anchor precision plugin-wide).
+Every ship: AUDIT → build on named reuse hooks → node-extract pure-logic test → adversarial code-review → fix → version
+bump → commit+push → BUILD-STATUS. The remaining substantive ideas (PDF text-search/outline, @mention cross-surface
+relation) are **platform-blocked on live verification** (PDF rendering / an MCP-created relation property) — best done in a
+session where the user can reload + verify, not shipped blind. The clean, self-contained, verifiable feature space for
+both pillars is exhausted at this checkpoint.
+
 ## ✅ v1.155.0 — C12: "Comment on selected card" (one-step annotate) (2026-06-26)
 A convenience that streamlines the core annotate flow: with a single card selected, the command anchors a new
 whole-element comment to it and opens the composer in one step (vs. switch-to-comment-tool-then-click).
