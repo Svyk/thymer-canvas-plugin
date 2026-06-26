@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.123.0';
+const PLEXUS_VERSION = '1.124.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6234,27 +6234,61 @@ class CanvasView {
   // D-A: a PDF drop → a DOCUMENT — pages laid out in a clean vertical column (real page heights, not a magic gap), each a
   // normal `type:'image'` element grouped under one `pdfgrp_<docId>` + tagged `el.pdf` so region/comment anchoring works for
   // free and a later page-nav (D-C) can walk the doc. Reuses _addImageFromFile (webp asset + safe inline fallback + cache).
+  // D-B: attach a rendered blob to an EXISTING (placeholder) image element's fileId — the asset/cache back-half of
+  // _addImageFromFile, but targeting a pre-placed element instead of creating one. Same confirm-then-anchor + inline
+  // fallback + decode-cache seed, so a page is never lost and appears the moment its raster lands.
+  async _attachBlobToFileId(fileId, blob, name) {
+    if (this.destroyed) return false; // the view was torn down mid-fill → don't write to a dead view / re-arm its save timer
+    const norm = await this._normalizeImageForInsert(new File([blob], name || 'pdf-page.webp', { type: blob.type || 'image/webp' }));
+    if (!norm) return false;
+    if (this._pendingBacking && !this._isBacking) { try { await this._ensureBackingAndMigrate(); } catch (_e) {} } // anchor to the backing drawing, not the host body (concurrent fills serialize on _backingInflight)
+    if (this.destroyed) return false;
+    if (!this.scene.files) this.scene.files = {};
+    const base = (name || 'pdf-page').replace(/\.[a-z0-9]+$/i, '') || 'pdf-page';
+    const ref = await this._assetPut(norm.blob, base + '.webp');
+    if (this.destroyed) return false;
+    if (ref && ref.anchored) this.scene.files[fileId] = { blobGuid: ref.blobGuid, name: ref.name, mimeType: ref.mimeType, w: norm.w, h: norm.h };
+    else { const durl = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(norm.blob); }); if (!durl) return false; this.scene.files[fileId] = { dataURL: durl, mimeType: norm.mime, w: norm.w, h: norm.h }; }
+    // Reconcile the owning placeholder's height to the TRUE raster aspect — fixes a stretched page when the cheap viewport
+    // pass had failed and the placeholder fell back to a default aspect (the raster aspect is authoritative).
+    try { if (norm.w > 0) { const owner = this.scene.elements.find((e) => e && e.fileId === fileId && !e.isDeleted); if (owner && owner.width > 0) { const want = owner.width * (norm.h / norm.w); if (Math.abs(want - owner.height) > 2) owner.height = want; } } } catch (_e) {}
+    try { const url = URL.createObjectURL(norm.blob); const seed = new Image(); const ce = { img: seed, ready: false, url }; const cache = this.plugin._imgCache || (this.plugin._imgCache = new Map()); cache.set(fileId, ce); seed.onload = () => { ce.ready = true; for (const v of this.plugin._views) { v.dirty = true; v._dragLayerValid = false; } try { this.plugin._imgCacheEvict(); } catch (_e) {} }; seed.onerror = () => { ce.broken = true; try { URL.revokeObjectURL(url); } catch (_e) {} }; seed.src = url; } catch (_e) {} // evict on each fill so a 100-page burst stays bounded at imageCacheMax (the cull guarantee)
+    this.dirty = true; this.scheduleSave(); return true;
+  }
+  // D-B: a PDF drop → instant PLACEHOLDERS (sized from a cheap viewport pass, no raster) laid in a column, then a bounded
+  // background fill (concurrency cap) rasterizes each page → its placeholder. The drop returns the moment placeholders are
+  // placed; pages stream in. The parsed doc is kept alive only during the fill, then destroyed (memory). Cap raised vs D-A.
   async _addPdf(file, wx, wy) {
     let pdfjs; try { pdfjs = await loadLib(LIB.pdfjs); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: pdf.js failed to load.', dismissible: true }); } catch (_e) {} return; }
     const hasWorker = await this._pdfSetupWorker(pdfjs);
     try { this.plugin.ui.addToaster({ title: 'Plexus: importing PDF…', dismissible: true }); } catch (_e) {}
     let doc; try { const buf = await file.arrayBuffer(); doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
-    const pageCount = doc.numPages, n = Math.min(pageCount, 20);
+    const pageCount = doc.numPages, CAP = 100, n = Math.min(pageCount, CAP);
     const docId = 'pdf' + Date.now().toString(36) + Math.floor(this._now()).toString(36);
-    const scale = (this.plugin._settings && this.plugin._settings.pdfScale) || 2, srcName = (file.name || 'document.pdf');
-    let top = wy; const GAP = 16;
+    const scale = (this.plugin._settings && this.plugin._settings.pdfScale) || 2, srcName = (file.name || 'document.pdf'), nameBase = srcName.replace(/\.[a-z0-9]+$/i, '');
+    // 1) cheap viewport pass → correctly-sized placeholder elements (dashed-box stub renders until the raster lands)
+    const DISP = 460, GAP = 16; let top = wy; const jobs = [];
     for (let p = 1; p <= n; p++) {
-      try {
-        const blob = await this._pdfPageBlob(doc, p, scale); if (!blob) continue;
-        const el = await this._addImageFromFile(new File([blob], 'pdf-' + srcName.replace(/\.[a-z0-9]+$/i, '') + '-p' + p + '.webp', { type: blob.type || 'image/webp' }), wx, top);
-        // Pages are a DOCUMENT via el.pdf.docId (D-C page-nav / explode / stack walk it) — NOT el.groupIds: groupIds makes a
-        // single click select the whole unit (3336), which would break per-page click-to-comment + the rec-panel + single-page Cite.
-        if (el) { el.x = wx - el.width / 2; el.y = top; el.pdf = { docId, page: p, pageCount, srcName, renderScale: scale }; top += el.height + GAP; this.dirty = true; }
-      } catch (_e) {}
+      let w = DISP, h = Math.round(DISP * 1.294);
+      try { const page = await doc.getPage(p); const vp = page.getViewport({ scale: 1 }); if (vp.width > 0) { const s = DISP / vp.width; w = DISP; h = Math.max(20, Math.round(vp.height * s)); } } catch (_e) {}
+      const fileId = newFileId();
+      const el = makeImage(wx - w / 2, top, w, h, fileId); el.pdf = { docId, page: p, pageCount, srcName, renderScale: scale };
+      this.scene.elements.push(el); jobs.push({ fileId, p }); top += h + GAP;
     }
-    try { doc.destroy && doc.destroy(); } catch (_e) {} // free the parsed PDF (D-B keeps it alive for lazy pages)
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: srcName + ' — ' + n + ' page' + (n === 1 ? '' : 's') + (pageCount > n ? ' (first ' + n + ' of ' + pageCount + ')' : '') + ', rendering…', dismissible: true }); } catch (_e) {} // honest about the cap
+    // 2) bounded background fill — render `CONC` pages at a time so a big PDF doesn't rasterize everything at once
+    const CONC = 2; let next = 0;
+    const worker = async () => {
+      while (!this.destroyed) {
+        const i = next++; if (i >= jobs.length) return;
+        const job = jobs[i];
+        try { const blob = await this._pdfPageBlob(doc, job.p, scale); if (blob && !this.destroyed) await this._attachBlobToFileId(job.fileId, blob, 'pdf-' + nameBase + '-p' + job.p + '.webp'); } catch (_e) {}
+      }
+    };
+    try { await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, () => worker())); } catch (_e) {}
+    try { doc.destroy && doc.destroy(); } catch (_e) {} // all pages rendered → free the parsed PDF
     this.scheduleSave();
-    try { this.plugin.ui.addToaster({ title: n + ' PDF page(s) imported' + (pageCount > n ? ' (first ' + n + ' of ' + pageCount + ' — large-PDF lazy load lands in a later build)' : '') + '.', dismissible: true }); } catch (_e) {} // honest about the 20-page cap (no silent truncation)
   }
   _importPdfPicker() {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
