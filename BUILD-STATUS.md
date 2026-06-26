@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.154.0 — C11: copy comments as a review summary (markdown → clipboard) (2026-06-26)
+Completes the comment-review lifecycle (create → categorize → count → filter → focus → bulk-resolve → **export**): a
+command formats all comments into a markdown digest — `# Canvas review — N comments (M open)`, then `## Category (n)`
+sections (stable order, empty skipped) with `- [x|space] **author** — text _(+K replies)_` lines — and copies it to the
+clipboard for handoff/review notes. Pure `pxcCommentsSummary` (header pluralization, inferred-category grouping,
+whitespace-collapse so odd comment text can't break the list structure, null-safe on missing/empty threads). Review:
+**SHIP, CLEAN** — no HIGH/MED; pure-read (no scene/record write), manual-command-only (no exfil), markdown-injection-safe
+(newlines collapsed → each comment one line), category grouping/pluralization/null-guards all confirmed. Folded the one
+substantive LOW: added an `execCommand('copy')` textarea fallback for when the async clipboard API rejects (lost focus
+after the palette closes / non-secure context) so the copy actually lands. Tests `pxc_cmtsummary` 14; bulkresolve/cmtcat
+regress green. **Next: more on-theme features.**
+
 ## ✅ v1.153.0 — C10: bulk resolve/reopen comments (review-workflow capstone) (2026-06-26)
 The capstone to the comment-review workflow (categories → counts → filters → focus): the rail gets a context-aware
 right-aligned button that resolves all currently-SHOWN (filtered) OPEN comments in one click — or reopens all if none

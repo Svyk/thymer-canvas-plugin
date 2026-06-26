@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.153.0';
+const PLEXUS_VERSION = '1.154.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -344,6 +344,19 @@ const PXC_CMT_CATEGORIES = [
 function pxcCommentCategory(c) {
   if (c && c.category) { const m = PXC_CMT_CATEGORIES.find((x) => x.key === c.category); if (m) return m; }
   const byCol = c && c.color && PXC_CMT_CATEGORIES.find((x) => x.color === c.color); return byCol || PXC_CMT_CATEGORIES[0];
+}
+// C11: format the board's comments into a markdown review digest — grouped by category (stable order), status checkbox,
+// author, first-line text, reply count + a header with totals. Pure → testable; the command copies it to the clipboard.
+function pxcCommentsSummary(comments) {
+  const live = (comments || []).filter((c) => c && !c.isDeleted && c.type === 'comment');
+  const open = live.filter((c) => !c.resolved).length;
+  const byCat = new Map();
+  for (const c of live) { const lab = pxcCommentCategory(c).label; if (!byCat.has(lab)) byCat.set(lab, []); byCat.get(lab).push(c); }
+  let md = '# Canvas review — ' + live.length + ' comment' + (live.length === 1 ? '' : 's') + ' (' + open + ' open)\n';
+  for (const cat of PXC_CMT_CATEGORIES) { const arr = byCat.get(cat.label); if (!arr || !arr.length) continue; md += '\n## ' + cat.label + ' (' + arr.length + ')\n';
+    for (const c of arr) { const root = c.thread && c.thread[0], txt = ((root && root.text) || '').replace(/\s+/g, ' ').trim(), auth = (root && root.author) || 'You', repl = (c.thread ? c.thread.length - 1 : 0);
+      md += '- [' + (c.resolved ? 'x' : ' ') + '] **' + auth + '** — ' + (txt || '(empty)') + (repl > 0 ? ' _(+' + repl + ' repl' + (repl === 1 ? 'y' : 'ies') + ')_' : '') + '\n'; } }
+  return md;
 }
 // C8 @mention: the active "@token" being typed immediately before the caret (the `@` must start the text or follow whitespace,
 // so an email's @ doesn't trigger). Returns {at, token} (at = index of the `@`) or null. Pure.
@@ -4646,6 +4659,15 @@ class CanvasView {
     if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); // re-render the thread, keep it open
   }
   _resolveComment(c, val) { if (!c) return; c.resolved = !!val; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); }
+  // C11: copy a markdown review digest of all comments to the clipboard (handoff / review notes). Read-only; async clipboard.
+  async _copyCommentsSummary() {
+    const list = this._comments();
+    if (!list.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no comments to summarize yet.', dismissible: true }); } catch (_e) {} return; }
+    const md = pxcCommentsSummary(list);
+    let okCopy = false; try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(md); okCopy = true; } } catch (_e) {}
+    if (!okCopy) { try { const ta = document.createElement('textarea'); ta.value = md; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;'; (this.wrap || document.body).appendChild(ta); ta.focus(); ta.select(); okCopy = !!(document.execCommand && document.execCommand('copy')); ta.remove(); } catch (_e) { okCopy = false; } } // legacy fallback: the async clipboard API can reject (lost focus after the palette closes / non-secure context) — a hidden textarea + execCommand('copy') still works
+    try { this.plugin.ui.addToaster({ title: okCopy ? 'Copied a review summary of ' + list.length + ' comment' + (list.length === 1 ? '' : 's') + ' to the clipboard.' : 'Plexus: clipboard unavailable — couldn’t copy the summary.', dismissible: true }); } catch (_e) {}
+  }
   // C10: bulk resolve/reopen the currently-shown (filtered) comments — the review-workflow capstone. Only flips comments that
   // actually change state. Deliberately does NOT call _commentChanged per comment: its scheduleSave snapshots the scene + pushes
   // an undo step SYNCHRONOUSLY (only save/reindex/mirror are debounced), so N calls = N full-scene stringifies + N undo steps
@@ -8419,6 +8441,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Previous comment (review)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(-1, false); } }); // C5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Next unresolved comment', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, true); } }); // C5: review only the open comments
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Spotlight commented cards', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v._cmtFocus = !v._cmtFocus; v.dirty = true; if (v._cmtFocus) { try { this.ui.addToaster({ title: 'Dimming all but annotated cards. (Esc to clear.)', dismissible: true }); } catch (_e) {} } } } }); // C9: review focus — dim all but commented cards
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy comments as review summary', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._copyCommentsSummary(); } }); // C11: markdown digest → clipboard
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
