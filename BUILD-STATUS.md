@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.159.0 — C16: "Fit to PDF document" (frame the whole PDF) (2026-06-26)
+Completes the PDF document-as-a-unit pair (with C15): a command frames the camera to the union bbox of all the active
+PDF's pages — handy after explode-to-grid or to see a stacked doc whole. `_fitToPdfDocument` reuses `_activePdfDocId` +
+`_pdfPagesOf` + `_fitToBounds`; union bbox is negative-size safe (`Math.min(x0,p.x,p.x+p.width)`), degenerate-clamped
+(≥1), and the empty-guard returns before any camera move. Review: **SHIP, CLEAN, no findings** — read-only (only
+`_fitToBounds` mutates camera + dirty; no scene write / no scheduleSave, unlike its explode/stack siblings), union
+correct, finite inputs, empty-guard ordering, leak-free all confirmed. Tests `pxc_fitpdf` 6; selpdf regress green. **Next: more on-theme features.**
+
 ## ✅ v1.158.0 — C15: "Select whole PDF document" (operate on a PDF as a unit) (2026-06-26)
 PDF pages are `type:'image'` elements grouped only by `el.pdf.docId` (not `groupIds`), so a click selects just one page —
 there was no easy way to move/delete/align a multi-page PDF as a unit. New command selects ALL pages of the document.
