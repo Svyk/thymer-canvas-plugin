@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.138.0';
+const PLEXUS_VERSION = '1.139.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -33,6 +33,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   bannerPreview: true, darkMode: false, openMode: 'normal', invertImagesDark: true,
   // P3.0/P3.5 connections: gradient/glow ghost edges + density control (edgeDensity: all|focus; edgeTypes: all|rel|semantic)
   edgeGlow: true, edgeDensity: 'all', edgeTypes: 'all',
+  // P3.9 hub badges: a degree-count pill on each connected card (heats slate→red with degree) when the connection layer is shown
+  connBadges: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -6766,6 +6768,25 @@ class CanvasView {
     ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.restore();
     if (animating) this.dirty = true; // animate ~5s then settle → idle returns to 0 CPU (Esc clears; the spotlight persists statically until then)
   }
+  // P3.9 hub badges: a small degree-count pill (screen-space, top-left, color heats slate→red with degree) on each connected
+  // record card while the connection layer is shown — see your hubs at a glance. Overlay-only; honors the P3.5 type filter.
+  _drawConnBadges(ctx, z, d) {
+    const S = this.plugin._settings;
+    if (!S || !S.connBadges || !this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
+    if (this._spotlightId || this._tracedPath || this._drawGesture || this._camAnim) return; // focus modes / gestures own the view; badges are the at-a-glance mode
+    if (z < 0.4) return; // LOD: too far out to read a number
+    const deg = new Map();
+    for (const ge of this._ghostEdges) { if (!ge || !this._ghostTypeOk(ge)) continue; deg.set(ge.a, (deg.get(ge.a) || 0) + 1); deg.set(ge.b, (deg.get(ge.b) || 0) + 1); } // degree = # of currently-shown inferred links incident to the card
+    if (!deg.size) return;
+    const byId = new Map(); for (const e of this.scene.elements) if (e && !e.isDeleted && e.type === 'record') byId.set(e.id, e); // ONE O(N) index so the per-node lookup below is O(1) → whole pass is O(N+E), not O(E·N) via _byId's linear find
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.save();
+    ctx.font = '700 ' + (10 * d) + 'px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const W = this.iCv.width, H = this.iCv.height;
+    for (const [id, n] of deg) { const el = byId.get(id); if (!el) continue; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height), sp = this.camera.worldToScreen(x, y), px = sp.x * d, py = sp.y * d; if (px < -60 || py < -60 || px > W + 60 || py > H + 60) continue; // cull off-screen
+      const hot = Math.min(1, (n - 1) / 7), col = pxcMixHex('#94a3b8', '#ef4444', hot), txt = '' + n, pad = 4.5 * d, ch = 15 * d, cw = ctx.measureText(txt).width + pad * 2, bx = px - 3 * d, by = py - ch - 3 * d; // pill floats just above the card's top-left corner (the ⇄ real-connector chip owns top-right)
+      ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(bx, by, cw, ch, 7 * d); else ctx.rect(bx, by, cw, ch); ctx.globalAlpha = 0.92; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1; ctx.lineWidth = 1 * d; ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.stroke(); ctx.fillStyle = '#fff'; ctx.fillText(txt, bx + pad, by + ch / 2 + 0.5 * d); }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore();
+  }
   // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
   _ghostEdgeAt(wx, wy) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
@@ -7737,6 +7758,8 @@ class CanvasView {
     if (this._tracedPath && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawTracePath(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // P3.8: spotlight — dim the board except one card + its 1-hop neighbors. Self-manages transforms (screen scrim → world edges).
     if (this._spotlightId && !this._drawGesture) { try { this._drawSpotlight(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    // P3.9: hub badges — degree-count pill per connected card (screen-space; method self-gates on settings/focus-modes/LOD).
+    if (this._showGhosts) { try { this._drawConnBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
@@ -8921,6 +8944,7 @@ class Plugin extends AppPlugin {
     select(conn, 'Inferred-link types', 'edgeTypes', 'Filter the auto ghost edges by kind (each canvas shows one kind at a time).', [
       { v: 'all', l: 'All' }, { v: 'rel', l: 'References / backrefs' }, { v: 'semantic', l: 'Semantic similarity' },
     ]);
+    toggle(conn, 'Hub badges', 'connBadges', 'A small degree-count pill on each connected card (heats slate→red with how many pages it links) — see your hubs at a glance.');
 
     const fonts = section('Fonts');
     select(fonts, 'Default text font', 'defaultFont', 'Applies to new text (and existing text on the system default).', [

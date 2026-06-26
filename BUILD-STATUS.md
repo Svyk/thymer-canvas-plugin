@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.139.0 — P3.9: hub badges (at-a-glance connection degree) (2026-06-26)
+The always-on *structural* complement to the interaction-driven trio (hover-focus / trace / spotlight): while the
+connection layer is shown, each connected record card gets a small degree-count pill (top-left, color heating
+slate→red with how many pages it links) so you can **see your hubs at a glance**. Overlay-only, screen-space, honors
+the P3.5 edge-type filter, gated off during focus modes / gestures and below z=0.4 (LOD) + off-screen cull. New
+`connBadges` setting (default on) with a Connections-section toggle (live, no reload — overlay key, no cache invalidate).
+Review: **SHIP** — no HIGH/MED; read-only, save/restore+transform balanced, all helper signatures verified, settings
+round-trip + legacy-blob backfill confirmed, no idle-CPU (static, never re-arms dirty). Applied the one LOW (perf): the
+per-frame degree pass built an `id→el` index once (O(N+E)) instead of a per-node `_byId` linear find (was O(E·N)).
+Tests `pxc_hubbadge` 22; spotlight/trace/connsettings regress green. **Next: more on-theme features.**
+
 ## ✅ v1.138.0 — P3.8: spotlight a page's connection neighborhood (2026-06-26)
 "See how this page connects to everything": select one record card → **"Spotlight this page's connections"** dims the
 whole board (overlay scrim) EXCEPT that card and its 1-hop reference neighbors (the pages it references / is referenced
