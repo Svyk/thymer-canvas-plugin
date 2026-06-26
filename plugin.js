@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.125.0';
+const PLEXUS_VERSION = '1.126.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -305,7 +305,7 @@ const TOOLS = [
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
   { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
   { id: 'card', icon: 'ti-id', title: 'New record card — click to drop a new note/record (edit its properties on the right)' },
-  { id: 'comment', icon: 'ti-message', title: 'Comment — anchor a threaded note to a card, a body line, an image region, or empty space' },
+  { id: 'comment', icon: 'ti-message', title: 'Comment — click a card / body line / empty space, or DRAG a box on an image or PDF page to comment on that region' },
   { id: 'datacore', icon: 'ti-table', title: 'Datacore card — click to drop a live query (dc: …); select it for the interactive view' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -3360,13 +3360,9 @@ class CanvasView {
       } else if (this.tool === 'card') {
         this.tool = 'select'; this._syncToolbar(); this._newRecordCardAt(down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-2: click to drop a new record card (default Notes/Captures); the property panel opens on its selection
       } else if (this.tool === 'comment') {
-        this.tool = 'select'; this._syncToolbar(); // C0: click a target → anchor a comment there (record / body line / image region / inline ref); empty space → a free margin note
-        const hit = this._hitTopAt(down.x, down.y);
-        const anchor = (hit && hit.type !== 'comment') ? this._bindingFor(hit, down.x, down.y) : null;
-        const c = makeComment(anchor, down.x, down.y, { color: '#f59e0b', authorGuid: null });
-        this.scene.elements.push(c); this.selected.clear(); this.dirty = true; this.scheduleSave();
-        this._cmtBorn = this._cmtBorn || {}; this._cmtBorn[c.id] = this._now(); // C3: entrance-pop animation
-        this._openCommentThread(c.id, true); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return;
+        // D-D: DRAG a box on a page/image → a REGION comment; a CLICK (no real drag) → a point/element comment (C0). Decided in onUp.
+        mode = 'cmtregion'; this._cropRect = { x: down.x, y: down.y, w: 0, h: 0 }; this._cmtRegionDown = { wx: down.x, wy: down.y };
+        try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true; return;
       } else if (this.tool === 'datacore') {
         this.tool = 'select'; this._syncToolbar(); this._insertQueryNode('dc: @task', down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-4: drop a Datacore query node; selecting it mounts the live interactive view
       } else if (this.tool === 'arrow' || this.tool === 'line') {
@@ -3435,7 +3431,7 @@ class CanvasView {
       if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const startElId = created.startBinding && created.startBinding.elementId; const bh = this._bindableAt(w.x, w.y, created.id, startElId) || this._nearestBindable(w.x, w.y, 44, created.id, startElId); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target), EXCLUDING the source (B2). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
-      if (mode === 'crop' || mode === 'regionmark') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee
+      if (mode === 'crop' || mode === 'regionmark' || mode === 'cmtregion') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee; D-D: comment-on-region too
       if (mode === 'lasso' || mode === 'grouplasso') { if (this._lasso) { const ces = (e.getCoalescedEvents ? e.getCoalescedEvents() : null); if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); this._lasso.push([cw.x, cw.y]); } } else this._lasso.push([w.x, w.y]); } this.dirty = true; return; } // round-5 B: grouplasso reuses the lasso poly capture
       if (mode === 'move' && moveEls) { let dx = w.x - down.x, dy = w.y - down.y; if (this._snapOn()) { dx = this._snap(dx); dy = this._snap(dy); } for (const m of moveEls) { if (m.pts0) { m.el.points = m.pts0.map(([px, py]) => [px + dx, py + dy]); } m.el.x = m.x0 + dx; m.el.y = m.y0 + dy; }
         this._dropLinkTarget = null; // DRAG-TO-RESTRUCTURE: a SINGLE record card dragged so its CENTER lands on ANOTHER record card → highlight it as a link target (the actual write is gated by a confirm on release)
@@ -3517,6 +3513,19 @@ class CanvasView {
           if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
           else { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
         } else if (ipTarget) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
+      }
+      else if (mode === 'cmtregion') { // D-D: finalize a comment gesture — a real drag over an image → a REGION comment; a click → a point/element comment
+        const rect = this._cropRect; this._cropRect = null; const dn = this._cmtRegionDown; this._cmtRegionDown = null;
+        this.tool = 'select'; this._syncToolbar();
+        if (rect && rect.w > 3 && rect.h > 3) { // a real box → region comment anchored to the top image under it
+          const img = this._topImageIn(rect);
+          if (img) { const frac = this._imgRegionFrac(img, rect); if (frac) { this._createCommentAnchored({ elementId: img.id, frac }, rect.x + rect.w, rect.y); } else this._createCommentAnchored(null, rect.x + rect.w / 2, rect.y + rect.h / 2); }
+          else this._createCommentAnchored(null, rect.x + rect.w / 2, rect.y + rect.h / 2); // dragged over empty space → a free margin note at the box
+        } else if (dn) { // a click (no real drag) → the C0 point/element comment
+          const hit = this._hitTopAt(dn.wx, dn.wy);
+          const anchor = (hit && hit.type !== 'comment') ? this._bindingFor(hit, dn.wx, dn.wy) : null;
+          this._createCommentAnchored(anchor, dn.wx, dn.wy);
+        }
       }
       else if (mode === 'regionmark') { // F2: finalize the drop-to-mark region → write frac into the connection's binding (else keep the whole-element link)
         const rect = this._cropRect; this._cropRect = null; const prl = this._pendingRegionLink; this._pendingRegionLink = null;
@@ -3657,7 +3666,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4405,6 +4414,13 @@ class CanvasView {
     pop.style.top = Math.max(8, Math.min(vh - ph - 8, cy + 16)) + 'px';
   }
   _hideCommentPreview() { if (this._cmtPreviewEl) { try { this._cmtPreviewEl.remove(); } catch (_e) {} this._cmtPreviewEl = null; } }
+  // Create a comment with a given anchor (or null = free margin note) at (wx,wy), select nothing, pop the entrance, open compose.
+  _createCommentAnchored(anchor, wx, wy) {
+    const c = makeComment(anchor, wx, wy, { color: '#f59e0b', authorGuid: null });
+    this.scene.elements.push(c); this.selected.clear(); this.dirty = true; this.scheduleSave();
+    this._cmtBorn = this._cmtBorn || {}; this._cmtBorn[c.id] = this._now(); // C3 entrance pop
+    this._openCommentThread(c.id, true); return c;
+  }
   // ── thread popover (compose + replies) — cloned from the connection-style popover chrome ──
   _openCommentThread(id, compose) {
     const c = this._byId(id); if (!c || c.isDeleted) return;
@@ -7829,7 +7845,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: "Plexus: Open today's whiteboard", icon: 'ti-calendar', onSelected: () => this._openTodayWhiteboard() }); // IO-2
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Add task', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._addTaskNode(); } }); // IO-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Cite selection (copy reference)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._copyImageRefToClip(); } });
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment (anchor a note)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v.tool = 'comment'; v._syncToolbar(); try { this.ui.addToaster({ title: 'Click a card, a body line, an image region, or empty space to anchor a comment.', dismissible: true }); } catch (_e) {} } } }); // C0
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment (anchor a note)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v.tool = 'comment'; v._syncToolbar(); try { this.ui.addToaster({ title: 'Click a card / body line / empty space, or drag a box on an image or PDF page to comment on that region.', dismissible: true }); } catch (_e) {} } } }); // C0
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle comments panel', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._toggleCommentRail(); } }); // C0
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
