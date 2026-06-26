@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.125.0 — Phase 2.D-C: PDF page-nav chrome + explode/stack (2026-06-25)
+Select a PDF page → a world-anchored chrome (`‹ p N/M ›` prev/next via `_focusMatch` to the sibling page in the same
+`el.pdf.docId`, + Grid/Stack). Commands "Explode PDF to grid" / "Stack PDF pages" (selected doc, else first PDF doc).
+`_pdfPagesOf`/`_pdfGoPage`(bounds→toast)/`_pdfStack`(column)/`_pdfExplode`(ceil√n grid) reposition x/y only (undoable, never
+delete/dup, Math.abs-safe). `_syncPdfNav` overlay theme-matched; mutually exclusive with the rec-panel. Review: **SHIP**
+(no HIGH/MED); 2 LOW fixed (one-frame width estimate; stale `pdfgrp` comment). Tests `pxc_pdfnav` 18. Commit `f689d7b`,
+pushed. **Next: D-D — one-click region comment on a PDF page (the round-demo capstone; ties Phase 2 back to the C0–C3
+comment system).**
+
 ## ✅ v1.124.0 — Phase 2.D-B: lazy/progressive PDF render + bounded memory (2026-06-25)
 A PDF drop returns INSTANTLY with placeholders (cheap `getViewport` pass sizes them; the dashed stub renders until filled),
 then a CONC=2 background worker pool rasterizes each page → `_attachBlobToFileId` (asset/cache back-half of
