@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.166.0';
+const PLEXUS_VERSION = '1.167.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -374,6 +374,22 @@ function pxcCommentsSummary(comments) {
   for (const cat of PXC_CMT_CATEGORIES) { const arr = byCat.get(cat.label); if (!arr || !arr.length) continue; md += '\n## ' + cat.label + ' (' + arr.length + ')\n';
     for (const c of arr) { const root = c.thread && c.thread[0], txt = ((root && root.text) || '').replace(/\s+/g, ' ').trim(), auth = (root && root.author) || 'You', repl = (c.thread ? c.thread.length - 1 : 0);
       md += '- [' + (c.resolved ? 'x' : ' ') + '] **' + auth + '** — ' + (txt || '(empty)') + (repl > 0 ? ' _(+' + repl + ' repl' + (repl === 1 ? 'y' : 'ies') + ')_' : '') + '\n'; } }
+  return md;
+}
+// C24: format the reference graph (ghost rel edges) into a markdown traceability digest — per note, what it references (→)
+// and what references it (←). `titleOf(elId)` resolves a card's title. Pure → testable; the command copies it to clipboard.
+function pxcConnectionGraphMd(edges, titleOf) {
+  const nodes = new Map(); // title → { refs:Set, backrefs:Set }
+  const get = (t) => { if (!nodes.has(t)) nodes.set(t, { refs: new Set(), backrefs: new Set() }); return nodes.get(t); };
+  for (const ge of (edges || [])) { if (!ge || !ge.rel) continue; const ta = titleOf(ge.a), tb = titleOf(ge.b); if (ta === tb) continue;
+    if (ge.aRefsB) { get(ta).refs.add(tb); get(tb).backrefs.add(ta); }
+    if (ge.bRefsA) { get(tb).refs.add(ta); get(ta).backrefs.add(tb); } }
+  let md = '# Canvas connection graph — ' + nodes.size + ' note' + (nodes.size === 1 ? '' : 's') + ', ' + (edges || []).filter((e) => e && e.rel).length + ' link' + ((edges || []).filter((e) => e && e.rel).length === 1 ? '' : 's') + '\n';
+  for (const [title, n] of [...nodes].sort((a, b) => a[0].localeCompare(b[0]))) {
+    md += '\n## ' + title + '\n';
+    if (n.refs.size) md += '- → references: ' + [...n.refs].sort().join(', ') + '\n';
+    if (n.backrefs.size) md += '- ← referenced by: ' + [...n.backrefs].sort().join(', ') + '\n';
+  }
   return md;
 }
 // C8 @mention: the active "@token" being typed immediately before the caret (the `@` must start the text or follow whitespace,
@@ -4702,13 +4718,26 @@ class CanvasView {
   }
   _resolveComment(c, val) { if (!c) return; c.resolved = !!val; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); }
   // C11: copy a markdown review digest of all comments to the clipboard (handoff / review notes). Read-only; async clipboard.
+  // Write text to the clipboard, returning whether it landed. Tries the async API, then a hidden-textarea + execCommand('copy')
+  // fallback (the async API can reject on lost focus after the palette closes / a non-secure context). Shared by C11 + C24.
+  async _clipboardWrite(text) {
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; } } catch (_e) {}
+    try { const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;'; (this.wrap || document.body).appendChild(ta); ta.focus(); ta.select(); try { return !!(document.execCommand && document.execCommand('copy')); } finally { ta.remove(); } } catch (_e) { return false; } // finally → the textarea is removed even if execCommand THROWS (some sandboxed contexts) — no leaked off-screen node
+  }
   async _copyCommentsSummary() {
     const list = this._comments();
     if (!list.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no comments to summarize yet.', dismissible: true }); } catch (_e) {} return; }
-    const md = pxcCommentsSummary(list);
-    let okCopy = false; try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(md); okCopy = true; } } catch (_e) {}
-    if (!okCopy) { try { const ta = document.createElement('textarea'); ta.value = md; ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;'; (this.wrap || document.body).appendChild(ta); ta.focus(); ta.select(); okCopy = !!(document.execCommand && document.execCommand('copy')); ta.remove(); } catch (_e) { okCopy = false; } } // legacy fallback: the async clipboard API can reject (lost focus after the palette closes / non-secure context) — a hidden textarea + execCommand('copy') still works
+    const okCopy = await this._clipboardWrite(pxcCommentsSummary(list));
     try { this.plugin.ui.addToaster({ title: okCopy ? 'Copied a review summary of ' + list.length + ' comment' + (list.length === 1 ? '' : 's') + ' to the clipboard.' : 'Plexus: clipboard unavailable — couldn’t copy the summary.', dismissible: true }); } catch (_e) {}
+  }
+  // C24: copy a markdown traceability digest of the board's reference graph (which notes reference which) to the clipboard.
+  async _copyConnectionGraph() {
+    if (!this._ghostEdges || !this._ghostEdges.length) { try { await this._buildRelationalGhosts(true); } catch (_e) {} } // ensure the reference graph exists
+    const relEdges = (this._ghostEdges || []).filter((ge) => ge && ge.rel);
+    if (!relEdges.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no reference connections to export. Arrange related pages or toggle on relational ghost-edges first.', dismissible: true }); } catch (_e) {} return; }
+    const titleOf = (elId) => { const el = this._byId(elId); if (!el || !el.recordGuid) return 'Untitled'; const c = this._recCache && this._recCache.get(el.recordGuid); return (c && c.title) || 'Untitled'; };
+    const okCopy = await this._clipboardWrite(pxcConnectionGraphMd(relEdges, titleOf));
+    try { this.plugin.ui.addToaster({ title: okCopy ? 'Copied the connection graph (' + relEdges.length + ' link' + (relEdges.length === 1 ? '' : 's') + ') to the clipboard.' : 'Plexus: clipboard unavailable — couldn’t copy the graph.', dismissible: true }); } catch (_e) {}
   }
   // C10: bulk resolve/reopen the currently-shown (filtered) comments — the review-workflow capstone. Only flips comments that
   // actually change state. Deliberately does NOT call _commentChanged per comment: its scheduleSave snapshots the scene + pushes
@@ -8561,6 +8590,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Next unresolved comment', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, true); } }); // C5: review only the open comments
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Spotlight commented cards', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v._cmtFocus = !v._cmtFocus; v.dirty = true; if (v._cmtFocus) { try { this.ui.addToaster({ title: 'Dimming all but annotated cards. (Esc to clear.)', dismissible: true }); } catch (_e) {} } } } }); // C9: review focus — dim all but commented cards
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy comments as review summary', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._copyCommentsSummary(); } }); // C11: markdown digest → clipboard
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy connection graph (traceability)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._copyConnectionGraph(); } }); // C24: reference graph → markdown → clipboard
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment on selected card', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentOnSelection(); } }); // C12: anchor a comment to the selected card + open the composer in one step
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it

@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.167.0 — C24: copy connection graph as markdown (traceability digest) + shared clipboard helper (2026-06-26)
+A QA-traceability feature: a command exports the board's reference graph (which notes reference which) as a markdown
+digest — `# … N notes, M links`, then per note `## title` · `→ references: …` · `← referenced by: …`. Pure
+`pxcConnectionGraphMd` (rel edges only — semantic excluded; direction from `aRefsB`/`bRefsA`; dedup via Sets; sorted;
+self-edge skip). `_copyConnectionGraph` builds the ghost graph if empty, resolves titles from `_recCache` (sync, "Untitled"
+fallback). Also extracted a shared `_clipboardWrite` helper (async API → hidden-textarea+execCommand fallback) and
+refactored C11 to use it (diffed behaviorally identical; the 14-assertion formatter test untouched). Review: **SHIP** —
+caught **1 HIGH** (the textarea leaked if `execCommand` THROWS — a PRE-EXISTING C11 bug, now the shared path) → fixed with
+a `finally` that removes the node on every path; C11-refactor fidelity, rel-only/direction/dedup/sort, read-only
+data-safety, no-leak all confirmed. **Known limitations (LOW, by design for a best-effort human-readable digest):** the
+graph is keyed by TITLE, so distinct cards sharing a title (incl. several uncached "Untitled") merge or drop their edge
+(self-skip); a board with not-yet-rendered cards shows "Untitled" until reopened. Tests `pxc_conngraph` 11;
+cmtsummary/edgeweight regress green.
+
 ## ✅ v1.166.0 — C23: semantic edge hover shows the similarity % (2026-06-26)
 Small enhancement to the NotebookLM-style semantic view: hovering a semantic ghost edge now shows "N% similar" instead of
 a generic "related". One-line change to the `_drawGhostFocus` label derivation — the existing fallback `'related'` becomes
