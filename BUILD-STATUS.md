@@ -1,5 +1,29 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅ MIND-MAP SHORT LOOP COMPLETE — 2/2 shipped (the rest was already at parity) (2026-06-25)
+The user asked to port the NotebookLM Obsidian-Excalidraw MindMap Builder features. The AUDIT found the Plexus mind-map
+builder **already ~at full parity** (keyboard flow Tab/Enter/Alt+C/X/V/Arrow, `_mmCycleLayout` right/down/radial/up/left tree
+strategies, `_mmTogglePin`, `_mmToggleFold`, `_mmToggleBoundary` — all shipped, atop the relational substrate: live cards,
+refs/backrefs, ghost-edges, drag-restructure, ExcaliBrain expansion, outline⇄canvas, flip-a-card, task sync). So the loop was
+just the two genuine residuals:
+- **v1.115.0 MM-polish** — Tab/Enter add-node-and-edit, Alt+Ctrl/Cmd+Arrow nav+center, paste-markdown-list→branch.
+- **v1.116.0 MM8** — AI → LIVE mind-map (below).
+Run summary: **2 ships + the rest audit-resolved as already-shipped.** Mind-map parity with the videos is effectively complete;
+the only remaining future-extension is AI-linking nodes to EXISTING records via `@@` refs (the live editable tree is delivered).
+
+## ✅ v1.116.0 — MM8: AI → LIVE editable mind-map (mind-map short loop, ship 2/2) (2026-06-25)
+Command **"Plexus: AI mind map from prompt"** → `_aiMindMap`: a topic → `_aiComplete` (system prompt: an indented bullet
+outline, central topic first, 2–4 levels) → a NEW `mmRoot` central text node + the outline built as children via `_mmPasteList`
+(the v1.115 append-only outline→tree parser) + `_mmLayout`. Every node is a live editable/expandable mind-map node driven by
+the keyboard flow — NOT a flat rasterized Mermaid image (the gap vs `_aiMermaid`). Reuses `_aiComplete`/`_aiKey` + `_mmMakeNode`/
+`_mmPasteList`/`_mmLayout`; needs the user's OpenAI/xAI/Anthropic key (Settings).
+- **APPEND-ONLY** (only a new root + new children; no overwrite/delete, no record/note write). AI-fail (`_aiComplete` null) +
+  key-missing + empty-outline + prompt-cancel all bail with ZERO scene change, each BEFORE the single `scene.elements.push`.
+- **Adversarial review: SHIP** — 5 axes clean (append-only, ordered guards, root created+`mmRoot`-stamped+pushed before
+  `_mmPasteList` reads it, body-empty places the lone root, ordinary text/arrow primitives so render/select/export already
+  handle them). Only LOW = no post-await `destroyed`-check, consistent with every sibling AI builder, harmless no-op. Node
+  `pxc_aimindmap` 16/16 + regressions green.
+
 ## ✅ v1.115.0 — MM-polish: mind-map keyboard-flow polish (mind-map short loop, ship 1/2) (2026-06-25)
 After the mind-map-parity AUDIT found the builder ALREADY ~at parity with the NotebookLM MindMap Builder videos (Tab=child,
 Enter=sibling, Alt+C/X/V branch ops, Alt+Arrow nav `_mmNav`, `_mmCycleLayout` right/down/radial/up/left, `_mmTogglePin`,

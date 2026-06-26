@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.115.0';
+const PLEXUS_VERSION = '1.116.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5787,6 +5787,28 @@ class CanvasView {
     if (!code) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model returned no Mermaid code.', dismissible: true }); } catch (_e) {} return; }
     await this._renderMermaidCode(code);
   }
+  // MM8: AI → a LIVE editable mind-map (NOT a rasterized image). A prompt → an indented outline from the model → a real
+  // mmRoot/mmParent tree (reuses _mmMakeNode + _mmPasteList + _mmLayout), so every node is editable/expandable via the
+  // mind-map keyboard flow. APPEND-ONLY — only creates new nodes; never overwrites. Key-missing / AI-fail are both guarded.
+  async _aiMindMap() {
+    const topic = await this._promptText('AI mind map — topic or prompt:', 'how to plan a product launch');
+    if (!topic) return;
+    try { this.plugin.ui.addToaster({ title: 'Plexus: building a mind map…', dismissible: true }); } catch (_e) {}
+    const SYS = 'You build mind maps. Return ONLY an indented bullet outline — markdown "-" bullets, TWO spaces per nesting level, 2 to 4 levels deep. The FIRST line is the central topic (NO bullet, NO indent); every other line is a "- " bullet indented under its parent. No prose, no preamble, no code fences, no numbering.';
+    let out = null; try { out = await this._aiComplete(SYS, String(topic)); } catch (_e) {}
+    if (out == null) { try { this.plugin.ui.addToaster({ title: 'Plexus: no mind map returned (check the AI provider + key in Settings).', dismissible: true }); } catch (_e) {} return; }
+    out = String(out).replace(/^```\w*\s*/i, '').replace(/```\s*$/i, '').trim();
+    const lines = out.split('\n').filter((l) => l.trim());
+    if (!lines.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model returned no outline.', dismissible: true }); } catch (_e) {} return; }
+    const central = lines[0].replace(/^[\t ]*(?:[-*•+]|\d+[.)])?\s*/, '').trim() || String(topic).slice(0, 60);
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const root = this._mmMakeNode(central, this._snap(c.x), this._snap(c.y), null, null); root.mmRoot = root.id;
+    this.scene.elements.push(root);
+    const body = lines.slice(1).join('\n');
+    if (body.trim()) this._mmPasteList(root, body); else this._mmLayout(root.id); // _mmPasteList builds the children + re-lays out; else place the lone root
+    this.selected.clear(); this.selected.add(root.id); this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'AI mind map built — Tab=child, Enter=sibling, edit any node; “Cycle mind-map layout” to rearrange.', dismissible: true }); } catch (_e) {}
+  }
   // P2: LaTeX equation (MathJax SVG, lazy) → rasterized image element.
   async _insertLatex() {
     const tex = await this._promptText('LaTeX:', 'e = mc^2');
@@ -7342,6 +7364,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI auto-cluster into named frames', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAutoCluster(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI usage this session', icon: 'ti-chart-bar', onSelected: () => { try { this.ui.addToaster({ title: 'Plexus AI: ' + (this._aiCalls || 0) + ' call(s), ' + (this._aiTokens || 0) + ' tokens this session.', dismissible: true }); } catch (_e) {} } }); // Phase 6: token meter
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI Mermaid diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMermaid(); } }); // Phase 6: NL → Mermaid
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI mind map from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiMindMap(); } }); // MM8: NL → a LIVE editable mmRoot/mmParent mind-map (not a rasterized image)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI analyse this drawing (vision)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAnalyzeCanvas(); } }); // Phase 6: vision
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI generate image', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiImage(); } }); // Phase 6: image gen
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Crop selected image (in place)', icon: 'ti-scissors', onSelected: () => { const v = this._activeView(); if (v) v._startCropInPlace(); } }); // B1 — arms a one-shot crop marquee on the selected image; drag a box → crops it in place (non-destructive, undoable)
