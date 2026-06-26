@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.145.0';
+const PLEXUS_VERSION = '1.146.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6890,9 +6890,20 @@ class CanvasView {
     // A 3-point arrow with the SAME perpendicular control point the ghost curve used → the curve branch (pts>=3) actually
     // fires, so the promoted connector matches the curved dashed ghost (a 2-point curved:true arrow renders straight).
     const mx = (acx + bcx) / 2, my = (acy + bcy) / 2, dx = bcx - acx, dy = bcy - acy, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08);
-    ar.points = [[acx, acy], [mx + (-dy / len) * bend, my + (dx / len) * bend], [bcx, bcy]]; ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; ar.endArrowhead = 'arrow'; ar.startArrowhead = null; ar.relType = preset.key; ar.strokeColor = preset.color; ar.lineStyle = preset.lineStyle; ar.curved = true;
+    ar.points = [[acx, acy], [mx + (-dy / len) * bend, my + (dx / len) * bend], [bcx, bcy]]; ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; ar.relType = preset.key; ar.strokeColor = preset.color; ar.lineStyle = preset.lineStyle; ar.curved = true;
+    // DIRECTIONAL: orient the arrowhead(s) + label from the edge's reference direction (a=ge.a references b=ge.b ⇒ aRefsB).
+    // a→b: head at b ("references"); b→a: head at a; mutual: both heads ("linked"); no direction (semantic): default head at b ("relates to").
+    // Directional cases set relType=null (MANUAL style, like _setConnColor) so the style popover shows no "matching" preset —
+    // otherwise an _applyRelPreset click would re-stamp a single end-head + "relates to", destroying the direction the user can
+    // see. Color/lineStyle persist via the explicit fields above. Neutral case keeps relType='relates-to' (idempotent re-stamp).
+    const aRefsB = !!(ge && ge.aRefsB), bRefsA = !!(ge && ge.bRefsA); let label = preset.label;
+    if (aRefsB && bRefsA) { ar.startArrowhead = 'arrow'; ar.endArrowhead = 'arrow'; label = 'linked'; ar.relType = null; }
+    else if (bRefsA && !aRefsB) { ar.startArrowhead = 'arrow'; ar.endArrowhead = null; label = 'references'; ar.relType = null; } // b references a → head points back at a
+    else if (aRefsB) { ar.startArrowhead = null; ar.endArrowhead = 'arrow'; label = 'references'; ar.relType = null; } // a references b (the common case)
+    else { ar.startArrowhead = null; ar.endArrowhead = 'arrow'; } // semantic/no-direction → keep the neutral "relates to" preset
+    ar.relLabel = label;
     linearBBox(ar); this.scene.elements.push(ar);
-    try { this._setConnLabelText(ar, preset.label); } catch (_e) {} // a real "relates to" midpoint label
+    try { this._setConnLabelText(ar, label); } catch (_e) {} // a real directional midpoint label (references / linked / relates to)
     return ar;
   }
   _dropGhostPair(ge) { this._ghostEdges = (this._ghostEdges || []).filter((g) => !((g.a === ge.a && g.b === ge.b) || (g.a === ge.b && g.b === ge.a))); } // now a real connector → drop the ghost (a rebuild also excludes already-connected pairs)
@@ -6901,7 +6912,7 @@ class CanvasView {
     this._dropGhostPair(ge);
     this.selected.clear(); this.selected.add(ar.id);
     this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave();
-    try { this.plugin.ui.addToaster({ title: 'Promoted to a “relates to” connection — open its style to retype the relationship.', dismissible: true }); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Promoted to a “' + (ar.relLabel || 'relates to') + '” connection — open its style to retype the relationship.', dismissible: true }); } catch (_e) {}
   }
   // P3.10 "make all inferred links real": promote EVERY currently-shown ghost edge (type-filtered) to a real connector in one
   // step — append-only, confirm-gated past 6 (it creates many arrows). After arranging pages, lock the inferred web in place.

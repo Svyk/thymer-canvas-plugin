@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.146.0 — promote ghosts with the ACCURATE relationship (directional connectors) (2026-06-26)
+Quality completion of the promote feature (v1.131/v1.140): a promoted ghost→real connector now reflects the edge's
+reference DIRECTION instead of a generic "relates to". `_ghostToConnector` reads `aRefsB`/`bRefsA`: a→b → single head at
+b + "references"; b→a → head back at a + "references"; mutual → double-headed + "linked"; semantic/no-direction →
+neutral "relates to". Geometry still built a→b (direction = arrowhead, not endpoint swap). Single-promote toast reflects
+the actual label. Review caught **1 HIGH**: directional connectors kept `relType='relates-to'`, so opening the style
+popover (which the toast invites) and clicking any preset re-stamped a single end-head + "relates to", destroying the
+direction — fixed by setting `relType=null` (manual style, like `_setConnColor`) on directional connectors so no preset
+re-stamps them (neutral keeps the preset, idempotent). Reviewer confirmed arrowhead values, curved-3pt start-head
+tangent, `_setConnLabelText` scene-only safety, backward-compat, no batch shared-state leak. Tests `pxc_promotedir` 14;
+promote/promoteall regress green. **Next: more on-theme features.**
+
 ## ✅ v1.145.0 — P3.11: group linked pages into frames (organize by relatedness) (2026-06-26)
 The capstone to the parallel-pages story: cluster cards by REFERENCE relatedness (connected components of the ghost
 graph, synchronous — no AI/embeddings) and move each multi-card cluster into a labelled "Linked N" frame. Pure
