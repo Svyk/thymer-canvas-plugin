@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.151.0';
+const PLEXUS_VERSION = '1.152.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3732,7 +3732,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -6916,12 +6916,32 @@ class CanvasView {
     ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.restore();
     if (animating) this.dirty = true; // animate ~5s then settle → idle returns to 0 CPU (Esc clears; the spotlight persists statically until then)
   }
+  // C9 "spotlight commented cards": a review focus mode — dim the whole board EXCEPT cards that carry anchored comments
+  // (pins draw on top, untouched), so you can see at a glance what's been annotated. Reuses the proven _drawSpotlight scrim +
+  // destination-out punch (no animation → static, no dirty re-arm). Toggle via the command; Esc clears. Read-only.
+  _drawCommentFocus(ctx, z, d) {
+    if (!this._cmtFocus || this._drawGesture) return;
+    const ids = new Set(), byId = new Map();
+    for (const e of this.scene.elements) { if (!e || e.isDeleted) continue; byId.set(e.id, e); if (e.type === 'comment' && e.anchor && e.anchor.elementId) ids.add(e.anchor.elementId); } // ONE O(N) pass → index + commented-card ids (parity with the badge siblings, not per-id _byId)
+    const kept = []; for (const id of ids) { const el = byId.get(id); if (el) kept.push(el); } // byId holds only non-deleted → el is live
+    if (!kept.length) { this._cmtFocus = false; return; } // nothing anchored anywhere → drop the mode (don't dim to a black void)
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = 'rgba(13,15,23,0.55)'; ctx.fillRect(0, 0, this.iCv.width, this.iCv.height);
+    ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = '#000'; // opaque punch → commented cards FULLY revealed
+    for (const el of kept) { const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height), tl = this.camera.worldToScreen(x, y), br = this.camera.worldToScreen(x + Math.abs(el.width), y + Math.abs(el.height)), pad = 7 * d; this._rrect(ctx, tl.x * d - pad, tl.y * d - pad, (br.x - tl.x) * d + pad * 2, (br.y - tl.y) * d + pad * 2, 10 * d); ctx.fill(); }
+    ctx.globalCompositeOperation = 'source-over';
+    // a soft amber ring on each commented card (world space) — echoes the comment-badge amber
+    ctx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); ctx.lineWidth = 2 / z; ctx.strokeStyle = '#f59e0b'; ctx.globalAlpha = 0.85;
+    for (const el of kept) { const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 5 / z, y - 5 / z, Math.abs(el.width) + 10 / z, Math.abs(el.height) + 10 / z, 10 / z); ctx.stroke(); }
+    ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.restore();
+  }
   // P3.9 hub badges: a small degree-count pill (screen-space, top-left, color heats slate→red with degree) on each connected
   // record card while the connection layer is shown — see your hubs at a glance. Overlay-only; honors the P3.5 type filter.
   _drawConnBadges(ctx, z, d) {
     const S = this.plugin._settings;
     if (!S || !S.connBadges || !this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
-    if (this._spotlightId || this._tracedPath || this._drawGesture || this._camAnim) return; // focus modes / gestures own the view; badges are the at-a-glance mode
+    if (this._spotlightId || this._tracedPath || this._cmtFocus || this._drawGesture || this._camAnim) return; // focus modes (spotlight / trace / comment-focus) / gestures own the view; badges are the at-a-glance mode
     if (z < 0.4) return; // LOD: too far out to read a number
     const deg = new Map();
     for (const ge of this._ghostEdges) { if (!ge || !this._ghostTypeOk(ge)) continue; deg.set(ge.a, (deg.get(ge.a) || 0) + 1); deg.set(ge.b, (deg.get(ge.b) || 0) + 1); } // degree = # of currently-shown inferred links incident to the card
@@ -7967,6 +7987,7 @@ class CanvasView {
     if (this._tracedPath && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawTracePath(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // P3.8: spotlight — dim the board except one card + its 1-hop neighbors. Self-manages transforms (screen scrim → world edges).
     if (this._spotlightId && !this._drawGesture) { try { this._drawSpotlight(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    if (this._cmtFocus && !this._drawGesture) { try { this._drawCommentFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C9: dim all but commented cards (pins draw later → stay lit)
     // P3.9: hub badges — degree-count pill per connected card (screen-space; method self-gates on settings/focus-modes/LOD).
     if (this._showGhosts) { try { this._drawConnBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     if (!this.plugin._settings || this.plugin._settings.commentBadges !== false) { try { this._drawCommentBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C7: comment-count badges on annotated cards
@@ -8382,6 +8403,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Next comment (review)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, false); } }); // C5: step through comments (reading order, fly+flash+open)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Previous comment (review)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(-1, false); } }); // C5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Next unresolved comment', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, true); } }); // C5: review only the open comments
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Spotlight commented cards', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v._cmtFocus = !v._cmtFocus; v.dirty = true; if (v._cmtFocus) { try { this.ui.addToaster({ title: 'Dimming all but annotated cards. (Esc to clear.)', dismissible: true }); } catch (_e) {} } } } }); // C9: review focus — dim all but commented cards
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });

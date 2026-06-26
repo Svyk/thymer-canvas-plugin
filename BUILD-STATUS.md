@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.152.0 — C9: spotlight commented cards (review focus mode) (2026-06-26)
+A visual review mode bridging both pillars: toggle to dim the whole board EXCEPT cards that carry anchored comments
+(their pins draw on top → stay lit, + a soft amber ring), so you see what's been annotated at a glance. `_drawCommentFocus`
+faithfully duplicates the v1.138-reviewed `_drawSpotlight` scrim + opaque-`#000` `destination-out` punch (per "three lines >
+premature abstraction"); static (no dirty re-arm → idle 0 CPU); auto-off when nothing's commented (no black-void dim);
+toggle command + Esc clear. Review: **SHIP, CLEAN** — no HIGH/MED; composite/transform/save balance, opaque punch,
+auto-off-no-flash, self-heal, view-state-not-persisted all confirmed. Folded both LOW consistency nits: built ONE O(N)
+index instead of per-id `_byId` (parity with the badge siblings), and added `|| this._cmtFocus` to the hub-badge gate so
+focus mode suppresses the degree pills like spotlight/trace already do. (Stacking scrims with spotlight/trace left
+as-is — LOW/by-design, consistent with their existing mutual stacking; Esc clears all.) Tests `pxc_cmtfocus` 9;
+spotlight/hubbadge regress green. **Next: more on-theme features.**
+
 ## ✅ v1.151.0 — C8: @mention people in comments (2026-06-26)
 The collaborative dimension of @round: in the comment composer, typing `@name` pops a dropdown of workspace people
 (`getActiveUsers()` — SYNC, so no async picker), and ArrowUp/Down + Enter/Tab/click inserts "@Name " and records the
