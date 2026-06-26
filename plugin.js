@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.130.0';
+const PLEXUS_VERSION = '1.131.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3344,6 +3344,7 @@ class CanvasView {
         const nub = this._nubAt(sp);
         if (nub && this._connHover && !this._connHover.isDeleted) { mode = 'connect'; created = makeLinear(nub.x, nub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { elementId: this._connHover.id }; this.scene.elements.push(created); this.selected.clear(); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
         const hit = this._hitTopAt(down.x, down.y); downRef = null;
+        if (!hit && !e.shiftKey) { const ge = this._ghostEdgeAt(down.x, down.y); if (ge) { try { e.preventDefault(); } catch (_e) {} this._promoteGhost(ge); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } } // P3.4: click an inferred ghost edge in empty space → promote it to a real connector (only when no card is under the cursor)
         // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
         if (hit && hit.type === 'task') { const cb = this._taskCheckboxRect(hit); if (down.x >= cb.x && down.x <= cb.x + cb.w && down.y >= cb.y && down.y <= cb.y + cb.h) { this._toggleTaskNode(hit); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
         if (hit) {
@@ -6646,6 +6647,37 @@ class CanvasView {
     ring(this._byId(hoverId)); for (const id of farEnds) ring(this._byId(id));
     ctx.globalAlpha = 1; ctx.restore();
     this.dirty = true; // P3.2: re-arm the loop so the particle keeps animating WHILE hovering; when hover clears, this isn't called → loop idles at 0% CPU
+  }
+  // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
+  _ghostEdgeAt(wx, wy) {
+    if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
+    const tol = 8 / this.camera.zoom;
+    for (const ge of this._ghostEdges) {
+      const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
+      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
+      let px = ax, py = ay;
+      for (let i = 1; i <= 12; i++) { const t = i / 12, u = 1 - t, qx = u * u * ax + 2 * u * t * cxp + t * t * bx, qy = u * u * ay + 2 * u * t * cyp + t * t * by; if (distToSeg(wx, wy, px, py, qx, qy) <= tol) return ge; px = qx; py = qy; }
+    }
+    return null;
+  }
+  // P3.4: promote an inferred ghost edge into a persistent, labeled "relates to" connector (APPEND-only; the ghost is removed
+  // from the ephemeral set). The user can then retype the relationship via the connection-style popover.
+  _promoteGhost(ge) {
+    const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b || a.isDeleted || b.isDeleted) return;
+    const preset = PXC_REL_PRESETS[0]; // relates-to
+    const acx = a.x + Math.abs(a.width) / 2, acy = a.y + Math.abs(a.height) / 2, bcx = b.x + Math.abs(b.width) / 2, bcy = b.y + Math.abs(b.height) / 2;
+    const ar = makeLinear(acx, acy, 'arrow', { stroke: preset.color, strokeWidth: 2 });
+    // A 3-point arrow with the SAME perpendicular control point the ghost curve used → the curve branch (pts>=3) actually
+    // fires, so the promoted connector matches the curved dashed ghost (a 2-point curved:true arrow renders straight).
+    const mx = (acx + bcx) / 2, my = (acy + bcy) / 2, dx = bcx - acx, dy = bcy - acy, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08);
+    ar.points = [[acx, acy], [mx + (-dy / len) * bend, my + (dx / len) * bend], [bcx, bcy]]; ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; ar.endArrowhead = 'arrow'; ar.startArrowhead = null; ar.relType = preset.key; ar.strokeColor = preset.color; ar.lineStyle = preset.lineStyle; ar.curved = true;
+    linearBBox(ar); this.scene.elements.push(ar);
+    try { this._setConnLabelText(ar, preset.label); } catch (_e) {} // a real "relates to" midpoint label
+    this._ghostEdges = (this._ghostEdges || []).filter((g) => !((g.a === ge.a && g.b === ge.b) || (g.a === ge.b && g.b === ge.a))); // now a real connector → drop the ghost (a rebuild also excludes already-connected pairs)
+    this.selected.clear(); this.selected.add(ar.id);
+    this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Promoted to a “relates to” connection — open its style to retype the relationship.', dismissible: true }); } catch (_e) {}
   }
   // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
   // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
