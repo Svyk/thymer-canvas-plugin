@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.165.0 — C22: edge weight by reference strength (strongest relationships pop) (2026-06-26)
+A visual upgrade to the connection graph ("more visually appealing"): a ghost edge gets THICKER the more times the two
+notes reference each other, so the strongest relationships read at a glance. `_buildRelationalGhosts`' `directed` Set→Map
+(counts ref occurrences both ways; the direction booleans `aRefsB`/`bRefsA` become `count>0`, byte-equivalent to the old
+`.has`), each edge carries `weight = total refs both directions`, and pure `pxcEdgeWidthFactor` (1.0×→2.5× capped at
+weight 6+) scales both the static (`_drawGhosts`) and hover (`_drawGhostFocus`) line widths. Review: **SHIP, CLEAN, no
+regressions** — Set→Map equivalence confirmed (no edge changes its direction booleans, which drive labels + line-anchoring
++ promote orientation), no leftover Set consumers, width factor bounded [1.0×,2.5×] (no NaN/runaway), semantic edges
+(no `weight` → 1.0× base) + the trace path + the `_ghostEdgeAt` geometry hit-test + promote all unaffected, data-safe
+(ephemeral, never persisted). Tests `pxc_edgeweight` 12; edgelabel/lineanchor/promotedir regress green. **Next: more on-theme features.**
+
 ## ✅ v1.164.0 — C21: "Fit whole canvas" command (complete the fit set) (2026-06-26)
 Small gap-fill: `_fitToScene` (frame the whole board) existed but was only invoked on-open / for slides — not re-invokable.
 Exposed it as a command so the fit set is complete: **Fit whole canvas** (C21) · **Fit to PDF document** (C16) · **Fit to

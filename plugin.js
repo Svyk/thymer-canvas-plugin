@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.164.0';
+const PLEXUS_VERSION = '1.165.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -172,6 +172,9 @@ function pxcClusterPins(pins, radius) {
   }
   return clusters;
 }
+// C22: a ghost edge's stroke-width multiplier from its reference "weight" (total ref occurrences both ways) — so the most
+// strongly-related pairs read as thicker. weight 1 → 1.0×, +0.3× per extra ref, capped at 2.5× (weight 6+). Pure → testable.
+function pxcEdgeWidthFactor(weight) { return 1 + Math.min(Math.max((weight || 1) - 1, 0), 5) * 0.3; }
 // Connected components of an UNDIRECTED edge list (union-find). Returns an array of components, each an array of node ids.
 // Only nodes that appear in at least one edge are included (isolated nodes are not edges → not returned). Pure → testable.
 function pxcConnectedComponents(edges) {
@@ -6913,7 +6916,7 @@ class CanvasView {
       const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
       const path = () => { ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cxp, cyp, bx, by); };
       if (glow) { ctx.globalAlpha = 0.3; ctx.strokeStyle = stroke; ctx.lineWidth = 5 / z; ctx.shadowColor = pxcMixHex(ca, cb, 0.5); ctx.shadowBlur = 8; path(); ctx.stroke(); ctx.shadowBlur = 0; } // soft bloom in the A↔B midpoint hue (paid once in the static raster)
-      ctx.globalAlpha = 0.72; ctx.strokeStyle = stroke; ctx.lineWidth = 1.8 / z; ctx.setLineDash([6 / z, 5 / z]); path(); ctx.stroke(); ctx.setLineDash([]);
+      ctx.globalAlpha = 0.72; ctx.strokeStyle = stroke; ctx.lineWidth = (1.8 / z) * pxcEdgeWidthFactor(ge.weight); ctx.setLineDash([6 / z, 5 / z]); path(); ctx.stroke(); ctx.setLineDash([]); // C22: thicker = more refs both ways
     }
     ctx.globalAlpha = 1; ctx.restore();
   }
@@ -6935,7 +6938,7 @@ class CanvasView {
       let stroke = base; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, ca); g.addColorStop(1, cb); stroke = g; } catch (_e) {}
       const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cxp, cyp, bx, by);
-      ctx.globalAlpha = 0.98; ctx.strokeStyle = stroke; ctx.lineWidth = 2.8 / z; ctx.setLineDash([]); ctx.stroke(); // bright + SOLID over the faint dashed static version
+      ctx.globalAlpha = 0.98; ctx.strokeStyle = stroke; ctx.lineWidth = (2.8 / z) * pxcEdgeWidthFactor(ge.weight); ctx.setLineDash([]); ctx.stroke(); // bright + SOLID over the faint dashed static version; C22: weight-scaled
       // P3.2: a glowing particle traveling OUTWARD from the hovered card → the far end (shows direction of the relationship)
       const sx = (ge.a === hoverId) ? ax : bx, sy = (ge.a === hoverId) ? ay : by, ex = (ge.a === hoverId) ? bx : ax, ey = (ge.a === hoverId) ? by : ay;
       const u = 1 - flowT, px = u * u * sx + 2 * u * flowT * cxp + flowT * flowT * ex, py = u * u * sy + 2 * u * flowT * cyp + flowT * flowT * ey;
@@ -7196,16 +7199,16 @@ class CanvasView {
     const onCanvas = new Set(guid2el.keys());
     const explicit = new Set(); // pairs already joined by a bound connector ("elA|elB" sorted)
     for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const a = e.startBinding && e.startBinding.elementId, b = e.endBinding && e.endBinding.elementId; if (a && b) explicit.add(a < b ? a + '|' + b : b + '|' + a); }
-    const pairs = new Set(), directed = new Set(), srcLine = new Map(); // pairs: related record-guid pairs ("gA|gB" sorted); directed: "src>dst" (src references dst); srcLine: "src>dst" → the LINE GUID on src that holds the ref (AZLEN line-anchoring)
+    const pairs = new Set(), directed = new Map(), srcLine = new Map(); // pairs: related record-guid pairs ("gA|gB" sorted); directed: "src>dst" → COUNT of refs src→dst (count>0 gives the boolean direction, same as the old Set.has; the count → C22 edge weight); srcLine: "src>dst" → the LINE GUID on src that holds the ref (AZLEN line-anchoring)
     for (const c of cards) {
       let rec = null; try { rec = await this.plugin.data.getRecord(c.recordGuid); } catch (_e) {}
       if (!rec) continue; const rel = new Set();
-      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) { rel.add(s.text.guid); directed.add(c.recordGuid + '>' + s.text.guid); const dk = c.recordGuid + '>' + s.text.guid; if (li.guid && !srcLine.has(dk)) srcLine.set(dk, li.guid); } } catch (_e) {} // forward refs (C references the target) + the FIRST line on C that holds each ref
-      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) { rel.add(r.guid); directed.add(r.guid + '>' + c.recordGuid); } } } catch (_e) {} // backrefs (the other record references C) — that record's source line is captured when IT is iterated as a forward ref
+      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) { rel.add(s.text.guid); const dk = c.recordGuid + '>' + s.text.guid; directed.set(dk, (directed.get(dk) || 0) + 1); if (li.guid && !srcLine.has(dk)) srcLine.set(dk, li.guid); } } catch (_e) {} // forward refs (C references the target) — COUNT occurrences (weight) + the FIRST line on C that holds each ref
+      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) { rel.add(r.guid); const dk = r.guid + '>' + c.recordGuid; directed.set(dk, (directed.get(dk) || 0) + 1); } } } catch (_e) {} // backrefs (the other record references C) — count each backref entry too
       for (const g of rel) { if (g === c.recordGuid) continue; pairs.add(c.recordGuid < g ? c.recordGuid + '|' + g : g + '|' + c.recordGuid); }
     }
     const edges = [];
-    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]), aLine: srcLine.get(gs[0] + '>' + gs[1]) || null, bLine: srcLine.get(gs[1] + '>' + gs[0]) || null }); } // aRefsB/bRefsA → hover label; aLine/bLine → the source line each end references the other FROM (azlen line-anchoring)
+    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; const wAB = directed.get(gs[0] + '>' + gs[1]) || 0, wBA = directed.get(gs[1] + '>' + gs[0]) || 0; edges.push({ a: ea, b: eb, rel: true, aRefsB: wAB > 0, bRefsA: wBA > 0, weight: wAB + wBA, aLine: srcLine.get(gs[0] + '>' + gs[1]) || null, bLine: srcLine.get(gs[1] + '>' + gs[0]) || null }); } // aRefsB/bRefsA → hover label; weight (total refs both ways) → C22 stroke width; aLine/bLine → the source line (azlen line-anchoring)
     this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this._spotlightId = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace / spotlight (their geometry assumed the old graph)
     if (!quiet) try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {} // P3.3: callers that already toast (Arrange parallel) pass quiet=true to avoid a double toaster
   }
