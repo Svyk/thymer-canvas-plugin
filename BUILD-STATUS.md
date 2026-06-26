@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.169.0 — C26: PDF OUTLINE / table of contents (extract the bookmark tree → clickable TOC, jump to page) — pdf.js API PLATFORM-VERIFIED (2026-06-26)
+The 2nd previously-"platform-blocked" feature, now unblocked. **Platform resolution:** the uncertainty was pdf.js
+4.6.82 `getOutline`/`getDestination`/`getPageIndex` behavior — **live-verified in Chrome** on a synthetic 2-page PDF
+with a 2-item outline: `getOutline()` → `[{title,dest,items}]`, an explicit-array dest's `dest[0]` page-ref →
+`getPageIndex` → 0-based index (Introduction→0, Methods→1), and a named-string dest resolves via `getDestination`
+first. So the recipe the plugin uses is proven, not guessed. **Plugin:** (1) module helper `pxcFlattenOutline(doc,
+items, depth, acc, cap)` resolves the bookmark tree → flat `[{title, page (1-based|null), depth}]` (named-dest →
+getDestination, explicit dest[0] → getPageIndex; per-item try/catch so one bad dest never aborts the tree; title
+whitespace-normalize + 80-char slice + `(untitled)` fallback; cap 250). (2) `_addPdf` extracts the outline AFTER
+placeholders / BEFORE the render workers + `doc.destroy()` (sequential in one async fn → no doc use-after-free) and
+stores it at **DOC level** `scene.appState.pdfOutlines[docId]` (rides the `__meta` chunk → persists; survives
+deletion of any single page incl. page 1). (3) `_showPdfOutline()` builds a themed floating TOC panel
+(`.pxc-pdf-toc`, right rail, depth-indented rows, `pXX` page badges); a row click → `_jumpToPdfPage(docId, page)`
+re-resolves the live page element by page number → `_fitToBounds` camera fly (correct after explode/stack/move). (4)
+Command "Plexus: PDF outline (table of contents)" (`ti-list-tree`, bundled). (5) Esc + `destroy()` teardown via
+`_closePdfOutline()`. **Adversarial code-reviewer pass** (cleared CRITICAL/HIGH; confirmed the no-race ordering &
+persistence shape) → fixed **MED-1** (guard the post-await write with `!this.destroyed` so a hot-reload mid-await
+can't re-arm a save on a dead view — matches the render worker's guard) + **MED-2** (read the outline from the
+doc-level store, not page-1-only, so deleting page 1 no longer falsely reports "no bookmarks"). Tests: new
+`pxc_pdfoutline` 18 assertions (flatten/depth/page-map/cap/named-dest/null-fallbacks); full suite **82/82** green.
+pdf.js API verified live via chrome; rendered TOC panel verifies after the user reloads (live plugin is older).
+
 ## ✅ v1.168.0 — C25: @mention CROSS-SURFACE (the comment surfaces on the mentioned person's record) — PLATFORM-VERIFIED (2026-06-26)
 The previously-"platform-blocked" half of @mention (C8), now unblocked + live-verified via the Thymer MCP. **Platform
 resolution:** the data-model mismatch (getActiveUsers gives USER guids, not People-record guids) is solved by a `user`-type

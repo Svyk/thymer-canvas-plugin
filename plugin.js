@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.168.0';
+const PLEXUS_VERSION = '1.169.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -375,6 +375,19 @@ function pxcCommentsSummary(comments) {
     for (const c of arr) { const root = c.thread && c.thread[0], txt = ((root && root.text) || '').replace(/\s+/g, ' ').trim(), auth = (root && root.author) || 'You', repl = (c.thread ? c.thread.length - 1 : 0);
       md += '- [' + (c.resolved ? 'x' : ' ') + '] **' + auth + '** — ' + (txt || '(empty)') + (repl > 0 ? ' _(+' + repl + ' repl' + (repl === 1 ? 'y' : 'ies') + ')_' : '') + '\n'; } }
   return md;
+}
+// C26: flatten a pdf.js outline (bookmark tree) into [{title, page (1-based|null), depth}]. Resolves each item's dest —
+// a named dest (string) via doc.getDestination, then the explicit dest[0] page-ref via doc.getPageIndex (VERIFIED recipe,
+// pdf.js 4.6.82). Recurses into nested bookmarks; capped. doc supplies getDestination/getPageIndex.
+async function pxcFlattenOutline(doc, items, depth, acc, cap) {
+  for (const it of (items || [])) {
+    if (acc.length >= cap) break;
+    let dest = it && it.dest, pageIndex = null;
+    try { if (typeof dest === 'string') dest = await doc.getDestination(dest); if (Array.isArray(dest) && dest[0]) pageIndex = await doc.getPageIndex(dest[0]); } catch (_e) {}
+    acc.push({ title: (String((it && it.title) || '').replace(/\s+/g, ' ').trim().slice(0, 80) || '(untitled)'), page: (pageIndex != null && pageIndex >= 0) ? pageIndex + 1 : null, depth: depth });
+    if (it && it.items && it.items.length && acc.length < cap) await pxcFlattenOutline(doc, it.items, depth + 1, acc, cap);
+  }
+  return acc;
 }
 // C24: format the reference graph (ghost rel edges) into a markdown traceability digest — per note, what it references (→)
 // and what references it (←). `titleOf(elId)` resolves a card's title. Pure → testable; the command copies it to clipboard.
@@ -3788,7 +3801,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -4933,6 +4946,33 @@ class CanvasView {
     for (const p of pages) { x0 = Math.min(x0, p.x, p.x + p.width); y0 = Math.min(y0, p.y, p.y + p.height); x1 = Math.max(x1, p.x, p.x + p.width); y1 = Math.max(y1, p.y, p.y + p.height); } // union of page rects (negative-size safe)
     this._fitToBounds({ x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) }, 60);
   }
+  // C26: the PDF's bookmark tree (table of contents) — a clickable panel; a click flies the camera to that page. The outline
+  // was extracted from pdf.js (verified getOutline → getPageIndex recipe) at import time and stored on the doc's page-1 element.
+  _showPdfOutline() {
+    const docId = this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas (drop one, or select a PDF page first).', dismissible: true }); } catch (_e) {} return; }
+    const p1 = pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0]; // for the panel title (srcName) only
+    const outline = (this.scene.appState && this.scene.appState.pdfOutlines && this.scene.appState.pdfOutlines[docId]) || null; // MED-2: doc-level store, independent of which pages survive
+    if (!outline || !outline.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: this PDF has no bookmarks / outline to show.', dismissible: true }); } catch (_e) {} return; }
+    this._closePdfOutline();
+    const box = document.createElement('div'); box.className = 'pxc-pdf-toc'; this._pdfOutlineEl = box; try { this._themePanel(box); } catch (_e) {}
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    const head = document.createElement('div'); head.className = 'pxc-pdf-toc-head';
+    const ti = document.createElement('div'); ti.className = 'pxc-pdf-toc-title'; ti.textContent = ((p1.pdf && p1.pdf.srcName) || 'PDF') + ' — outline'; head.appendChild(ti);
+    const x = document.createElement('button'); x.className = 'pxc-pdf-toc-close'; x.textContent = '✕'; x.title = 'Close'; x.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closePdfOutline(); }); head.appendChild(x);
+    box.appendChild(head);
+    const ul = document.createElement('div'); ul.className = 'pxc-pdf-toc-list';
+    for (const item of outline) {
+      const row = document.createElement('div'); row.className = 'pxc-pdf-toc-row' + (item.page != null ? ' pxc-pdf-toc-nav' : ''); row.style.paddingLeft = (9 + (item.depth || 0) * 14) + 'px';
+      const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = item.title; row.appendChild(t);
+      if (item.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + item.page; row.appendChild(pg); row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfPage(docId, item.page); }); }
+      ul.appendChild(row);
+    }
+    box.appendChild(ul); this.wrap.appendChild(box);
+  }
+  _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
+  _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
   _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
     if (this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && a.type === 'image' && a.pdf) return a.pdf.docId; }
     const any = ((this.scene && this.scene.elements) || []).find((e) => e && e.type === 'image' && e.pdf && !e.isDeleted); return any ? any.pdf.docId : null;
@@ -6668,6 +6708,10 @@ class CanvasView {
       this.scene.elements.push(el); jobs.push({ fileId, p }); top += h + GAP;
     }
     this.dirty = true; this.scheduleSave();
+    // C26: extract the bookmark tree (TOC) BEFORE doc.destroy() and store it at DOC level (appState.pdfOutlines[docId], rides the
+    // __meta chunk) so it survives deletion of any single page incl. page 1 (MED-2). !this.destroyed guards a hot-reload mid-await
+    // re-arming a save on a dead view (MED-1, matches the render worker's guard). Best-effort.
+    try { const ol = await doc.getOutline(); if (ol && ol.length && !this.destroyed) { const flat = await pxcFlattenOutline(doc, ol, 0, [], 250); if (flat.length && !this.destroyed) { if (!this.scene.appState) this.scene.appState = {}; if (!this.scene.appState.pdfOutlines) this.scene.appState.pdfOutlines = {}; this.scene.appState.pdfOutlines[docId] = flat; this.scheduleSave(); } } } catch (_e) {}
     try { this.plugin.ui.addToaster({ title: srcName + ' — ' + n + ' page' + (n === 1 ? '' : 's') + (pageCount > n ? ' (first ' + n + ' of ' + pageCount + ')' : '') + ', rendering…', dismissible: true }); } catch (_e) {} // honest about the cap
     // 2) bounded background fill — render `CONC` pages at a time so a big PDF doesn't rasterize everything at once
     const CONC = 2; let next = 0;
@@ -8556,7 +8600,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -8688,6 +8732,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stack PDF pages (column)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfStack(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Select whole PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._selectPdfDocument(); } }); // C15: select all pages of the PDF as a unit (move/delete/align together)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
@@ -10538,6 +10583,17 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-pdfnav-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
 .pxc-host .pxc-root .pxc-pdfnav-lab { padding: 0 4px; color: var(--color-text-50, #fff); font-weight: 600; white-space: nowrap; }
 .pxc-host .pxc-root .pxc-pdfnav-sep { width: 1px; height: 16px; background: var(--cards-border-color, #333a4a); margin: 0 2px; }
+.pxc-host .pxc-root .pxc-pdf-toc { position: absolute; top: 14px; right: 14px; z-index: 9; width: 264px; max-height: calc(100% - 28px); display: flex; flex-direction: column; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.45); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); overflow: hidden; }
+.pxc-host .pxc-root .pxc-pdf-toc-head { display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 11px; border-bottom: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-pdf-toc-title { flex: 1; min-width: 0; color: var(--color-text-50, #fff); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pxc-host .pxc-root .pxc-pdf-toc-close { flex: none; width: 22px; height: 22px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-pdf-toc-close:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-pdf-toc-list { overflow-y: auto; overflow-x: hidden; padding: 4px 0; }
+.pxc-host .pxc-root .pxc-pdf-toc-row { display: flex; align-items: baseline; gap: 6px; padding: 4px 9px 4px 9px; border-radius: 5px; }
+.pxc-host .pxc-root .pxc-pdf-toc-row.pxc-pdf-toc-nav { cursor: pointer; }
+.pxc-host .pxc-root .pxc-pdf-toc-row.pxc-pdf-toc-nav:hover { background: var(--sidebar-bg-hover, rgba(124,92,255,.16)); }
+.pxc-host .pxc-root .pxc-pdf-toc-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-pdf-toc-pg { flex: none; color: var(--color-text-600, #9aa3b2); font-variant-numeric: tabular-nums; font-size: 11px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
