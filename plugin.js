@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.114.0';
+const PLEXUS_VERSION = '1.115.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3528,15 +3528,15 @@ class CanvasView {
       if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
       const mmSel = this._singleSel(); // P0.2: Tab/Enter grow the mind map when a node is selected
       if (mmSel && mmSel.mmRoot && mmSel.type === 'text') {
-        if (e.key === 'Tab') { e.preventDefault(); this._mmAddChild(mmSel); return; }
-        if (e.key === 'Enter') { e.preventDefault(); this._mmAddSibling(mmSel); return; }
+        if (e.key === 'Tab') { e.preventDefault(); const c = this._mmAddChild(mmSel); if (c) this._editText(c); return; } // MM-polish: child + IMMEDIATELY open inline edit (type right away — the video's core flow; _editText select-alls so the first keystroke replaces "New idea")
+        if (e.key === 'Enter') { e.preventDefault(); const s = this._mmAddSibling(mmSel); if (s) this._editText(s); return; } // MM-polish: sibling + immediately edit
         if (e.altKey) { // CP-3 v3c: Alt-key branch ops + spatial nav
           const k = e.key.toLowerCase();
           if (k === 'c') { e.preventDefault(); this._mmCopyBranch(mmSel); return; }
           if (k === 'x') { e.preventDefault(); this._mmCutBranch(mmSel); return; }
           if (k === 'v') { e.preventDefault(); this._mmPasteBranch(mmSel); return; }
           if (k === 'b') { e.preventDefault(); this._mmToggleBoundary(mmSel); return; }
-          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase()); return; }
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase(), e.ctrlKey || e.metaKey); return; } // MM-polish: Alt+Arrow navigates; ALSO holding Ctrl/Cmd auto-centers the camera on the node
         }
       }
       // ENTER / F2 → edit the selected text element inline — a reliable way into edit mode WITHOUT click-navigating a
@@ -3616,7 +3616,12 @@ class CanvasView {
       if (isSvgText) { this._addSvgAsImage(plain, c.x, c.y); return; }
       if (htmlImg) { this._addImageFromUrl(htmlImg, c.x, c.y); return; }
       if (urlImg) { this._addImageFromUrl(urlImg, c.x, c.y); return; }
-      if (hasText) { const el = makeText(c.x, c.y, { stroke: this.strokeColor, fontSize: 20 }); el.text = plain.trim(); measureText(el); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave(); }
+      if (hasText) {
+        // MM-polish: a multi-line list pasted while a single mind-map node is selected → a child BRANCH under it (not one text element).
+        const mmSel = (this.selected.size === 1) ? this._byId([...this.selected][0]) : null;
+        if (mmSel && mmSel.mmRoot && /\n/.test(plain.trim()) && this._mmPasteList(mmSel, plain)) { this.dirty = true; this.scheduleSave(); return; }
+        const el = makeText(c.x, c.y, { stroke: this.strokeColor, fontSize: 20 }); el.text = plain.trim(); measureText(el); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
+      }
     };
     this.wrap.addEventListener('dragover', onDragOver); this.wrap.addEventListener('drop', onDrop); document.addEventListener('paste', onPaste);
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
@@ -5582,11 +5587,37 @@ class CanvasView {
     this.scene.elements.unshift(rect); this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Boundary added (Alt+B to remove).', dismissible: true }); } catch (_e) {}
   }
-  _mmNav(node, dir) {
+  _mmNav(node, dir, center) {
     const all = this._mmNodes(node.mmRoot).filter((n) => !n.mmHidden && n.id !== node.id); const cx = node.x + node.width / 2, cy = node.y + node.height / 2;
     let best = null, bestD = Infinity;
     for (const n of all) { const dx = (n.x + n.width / 2) - cx, dy = (n.y + n.height / 2) - cy; const ok = dir === 'left' ? dx < -10 : dir === 'right' ? dx > 10 : dir === 'up' ? dy < -10 : dy > 10; if (!ok) continue; const d = Math.hypot(dx, dy); if (d < bestD) { bestD = d; best = n; } }
-    if (best) { this.selected.clear(); this.selected.add(best.id); this.dirty = true; }
+    if (best) { if (center) { this._focusMatch(best.id); } else { this.selected.clear(); this.selected.add(best.id); this.dirty = true; } } // MM-polish: center → _focusMatch pans the camera to the node (Alt+Ctrl/Cmd+Arrow)
+  }
+  // MM-polish: paste a markdown/indented bullet list under a mind-map node → a child BRANCH (one node per line, nested by indent).
+  // APPEND-ONLY: creates new nodes + edges under `node`; never touches the source clipboard or existing nodes. Returns true if it built anything.
+  _mmPasteList(node, text) {
+    const rootId = node.mmRoot; if (!rootId) return false;
+    const items = []; // {text, depth}
+    for (const ln of String(text || '').replace(/\r/g, '').split('\n')) {
+      if (!ln.trim()) continue;
+      const indent = (ln.match(/^[\t ]*/)[0] || '').replace(/\t/g, '  ').length;
+      const t = ln.replace(/^[\t ]*(?:[-*•+]|\d+[.)])?\s*/, '').trim();
+      if (t) items.push({ text: t, depth: indent });
+    }
+    if (!items.length) return false;
+    // collapse raw indent widths → contiguous depth levels (0,1,2…) so any indent unit works
+    const widths = [...new Set(items.map((i) => i.depth))].sort((a, b) => a - b);
+    const depthOf = {}; widths.forEach((w, i) => { depthOf[w] = i; });
+    for (const i of items) i.depth = depthOf[i.depth];
+    const lastAt = { '-1': node }; let made = 0; // parent stack: depth → last node; `node` anchors depth -1
+    for (const it of items) {
+      const parent = lastAt[it.depth - 1] || node;
+      const child = this._mmMakeNode(it.text, parent.x + 200, parent.y, rootId, parent.id); this.scene.elements.push(child);
+      const edge = makeLinear(parent.x, parent.y, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); edge.mmRoot = rootId; edge.mmEdge = { from: parent.id, to: child.id }; this.scene.elements.push(edge);
+      lastAt[it.depth] = child; for (const k in lastAt) if (+k > it.depth) delete lastAt[k]; made++;
+    }
+    if (made) this._mmLayout(rootId);
+    return made > 0;
   }
   // CP-3 (v3a): fold/unfold a node — hides/shows its whole subtree (and connecting edges) and re-lays out.
   _mmToggleFold(node) {

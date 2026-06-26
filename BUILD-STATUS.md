@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.115.0 — MM-polish: mind-map keyboard-flow polish (mind-map short loop, ship 1/2) (2026-06-25)
+After the mind-map-parity AUDIT found the builder ALREADY ~at parity with the NotebookLM MindMap Builder videos (Tab=child,
+Enter=sibling, Alt+C/X/V branch ops, Alt+Arrow nav `_mmNav`, `_mmCycleLayout` right/down/radial/up/left, `_mmTogglePin`,
+`_mmToggleFold` — all shipped), the user chose a short loop on the genuine residuals. This ships the small high-flow batch:
+- **(a) add-node opens edit:** `Tab`/`Enter` on a selected mind-map node → `_mmAddChild`/`_mmAddSibling` THEN `_editText(new)` —
+  which `ta.select()`s, so the first keystroke replaces "New idea" (the video's type-right-away flow). The `editingId` keydown
+  guard (3505) means it can't fire mid-edit (no double-textarea).
+- **(b) nav + auto-center:** `_mmNav(node, dir, center)` — `Alt+Ctrl/Cmd+Arrow` adds camera-center via `_focusMatch`; plain
+  `Alt+Arrow` is unchanged (select-only).
+- **(c) paste-list → branch:** `_mmPasteList` — pasting a multi-line markdown/indented list while a single mind-map node is
+  selected builds a child BRANCH (one node per line, nested by indent via a pruned parent-stack), instead of one text element.
+  APPEND-ONLY (new nodes+edges only); gated on single-mm-selection + multi-line so it never hijacks a normal text paste; sits
+  AFTER the `_lastPaste` dedupe + `preventDefault`; capped by the upstream 5000-char `hasText` limit.
+- **Adversarial review: SHIP** — all 6 axes clean (append-only, no dangling mmParent across normal/indented-first/mixed-tab/
+  non-monotonic/sibling-after-deep cases, paste-gate no-hijack, re-entrancy safe via the editingId guard, nav no-regression,
+  ordinary text+arrow elements so render/select/export already handle them). 2 NITs + 1 by-design LOW, none blocking. Node
+  `pxc_mmpaste` 18/18 + regressions green.
+- Next (short loop 2/2): MM8 — AI → LIVE record-card mind-map (vs the rasterized `_aiMermaid`). Then the loop is done.
+
 ## ✅✅ TIER A+B PARITY LOOP COMPLETE — 26/26 (8 code ships + 18 audit-resolved/deferred) (2026-06-24)
 The full Tier-A→B worklist (`TIER-AB-WORKLIST.md`, from the 2026-06-24 deferred-audit) is processed. Every item: built /
 audit-resolved (already shipped) / deferred-to-backlog. **8 code ships** (v1.105→v1.112), all node-tested + adversarially
