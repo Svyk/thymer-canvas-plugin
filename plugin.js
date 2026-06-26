@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.131.0';
+const PLEXUS_VERSION = '1.132.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -31,8 +31,8 @@ const PLEXUS_SETTINGS_KEY = 'plexus_settings';
 const PLEXUS_SETTINGS_DEFAULTS = {
   // S1 General
   bannerPreview: true, darkMode: false, openMode: 'normal', invertImagesDark: true,
-  // P3.0 connections: beautiful gradient + glow ghost edges (the "visibly connected" look)
-  edgeGlow: true,
+  // P3.0/P3.5 connections: gradient/glow ghost edges + density control (edgeDensity: all|focus; edgeTypes: all|rel|semantic)
+  edgeGlow: true, edgeDensity: 'all', edgeTypes: 'all',
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -6600,11 +6600,19 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Auto-clustered ' + els.length + ' element(s) into ' + clusters.length + ' named group(s).', dismissible: true }); } catch (_e) {}
   }
+  // P3.5: the connection-density filter — should this ghost edge be drawn at all? Honors the relation-type filter (all/rel/
+  // semantic). A `null` ge passes (defensive). Used by _drawGhosts, _drawGhostFocus, and _ghostEdgeAt so they stay consistent.
+  _ghostTypeOk(ge) { const t = (this.plugin._settings && this.plugin._settings.edgeTypes) || 'all'; if (t === 'rel') return !!(ge && ge.rel); if (t === 'semantic') return !(ge && ge.rel); return true; }
+  // P3.5: "hovered-only" density — hide the bulk static edges (only the hover overlay shows the hovered card's edges). Auto
+  // when the graph is dense (>150 edges) to keep it legible + cheap, OR when the user sets edgeDensity:'focus'.
+  _ghostFocusOnly() { return (this.plugin._settings && this.plugin._settings.edgeDensity === 'focus') || (this._ghostEdges && this._ghostEdges.length > 150); }
   _drawGhosts(ctx) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
+    if (this._ghostFocusOnly()) return; // P3.5: hovered-only mode → the bulk static edges are hidden; _drawGhostFocus still shows the hovered card's edges
     const z = this.camera.zoom, glow = !(this.plugin._settings && this.plugin._settings.edgeGlow === false) && !this._drawGesture && !this._panMode; // glow is a static-raster cost; drop it during ANY per-frame gesture (move/resize/rotate/pan/draw — _drawGesture) to protect 60fps
     ctx.save(); ctx.lineCap = 'round';
     for (const ge of this._ghostEdges) {
+      if (!this._ghostTypeOk(ge)) continue; // P3.5: relation-type filter
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
       const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
       const base = ge.rel ? '#0ea5e9' : '#f59e0b'; // rel (ref/backref) edges blue, semantic edges amber
@@ -6624,7 +6632,7 @@ class CanvasView {
   _drawGhostFocus(ctx, z) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length || this._drawGesture) return;
     const hoverId = (this.tool === 'select' && !this.editingId && this._connHover && !this._connHover.isDeleted) ? this._connHover.id : null; if (!hoverId) return;
-    const inc = this._ghostEdges.filter((ge) => ge.a === hoverId || ge.b === hoverId); if (!inc.length) return; // hovered card has no ghost edge → nothing to focus
+    const inc = this._ghostEdges.filter((ge) => (ge.a === hoverId || ge.b === hoverId) && this._ghostTypeOk(ge)); if (!inc.length) return; // hovered card has no (visible) ghost edge → nothing to focus (P3.5 type filter honored)
     const farEnds = new Set(); ctx.save(); ctx.lineCap = 'round';
     const flowT = ((this._now() % 1400) / 1400), heavyHub = inc.length > 12; // P3.2: particle parameter (0→1 every 1.4s); on a dense hub drop the per-particle shadow (60fps)
     for (const ge of inc) {
@@ -6653,6 +6661,10 @@ class CanvasView {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
     const tol = 8 / this.camera.zoom;
     for (const ge of this._ghostEdges) {
+      if (!this._ghostTypeOk(ge)) continue; // P3.5: a filtered-out (wrong relation-type) edge isn't shown → not clickable
+      // NOTE: we deliberately do NOT gate by _ghostFocusOnly/hover here. At promote-click time the cursor is in EMPTY SPACE
+      // (on the curve), so _connHover is null — gating on it would make promote DEAD in hovered-only mode. The edge was
+      // visible on hover; a click that lands within tol of its path promotes the right edge regardless of the density mode.
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
       const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
       const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
@@ -8028,6 +8040,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Relational ghost-edges (inferred ref/backref links)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._buildRelationalGhosts(); } }); // Obsidian/ExcaliBrain "show inferred links" — blue dashes between related-but-unconnected cards
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Connection density (all ↔ hovered-only)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings; s.edgeDensity = (s.edgeDensity === 'focus') ? 'all' : 'focus'; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeDensity === 'focus' ? 'hovered-only (declutter)' : 'all shown') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Filter connections (all / references / semantic)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings, order = ['all', 'rel', 'semantic']; s.edgeTypes = order[(order.indexOf(s.edgeTypes || 'all') + 1) % 3]; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } const v = this._activeView(); let none = false; try { if (v && v._ghostEdges && v._ghostEdges.length && s.edgeTypes !== 'all') none = !v._ghostEdges.some((ge) => v._ghostTypeOk(ge)); } catch (_e) {} try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeTypes === 'rel' ? 'references only' : s.edgeTypes === 'semantic' ? 'semantic only' : 'all types') + (none ? ' (none in the current set — the ghost layer is the other kind)' : '') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5: honest when the active ghost set has no edges of the chosen kind (the rel/semantic builders replace each other)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI suggest relations (writes refs)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiRelationSuggest(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI auto-cluster into named frames', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiAutoCluster(); } });
