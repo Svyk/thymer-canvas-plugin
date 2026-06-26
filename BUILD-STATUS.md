@@ -1,5 +1,21 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.118.0 — transclusions now show up in "Canvas References" (2026-06-25)
+User report: a **text ref** to "Ford Five Hundred" appeared under a record's Backreferences → Canvas References, but a
+**transclusion** of it on the board did NOT. Root cause: `_reindexBackrefs` indexed inline text refs (`el.runs` `t:'ref'`),
+standalone ref chips (`el.isRef`), and arrow-bound cards — but a bare transclusion CARD (`record`/`linecard`/`task`) just
+sitting on the board was never registered. Fix (read-only on the scene; backref store is last-writer-wins per drawing):
+- A `record` card keys a backref by its `recordGuid` (kind `record`); a `linecard`/`task` card keys by its `lineGuid` (kind
+  `line`). Label = the live record title / line text. `query`/`rollup`/`table`/`board` cards embed a QUERY not one record → skipped.
+- New `_scheduleReindex()` (debounced 600ms, coalesced, destroy-guarded) — re-runs the index once a card's title resolves
+  async (`_recFor.finally`), upgrading the `transclusion` placeholder to the real name + refreshing connection breadcrumbs.
+  N cards loading coalesce to ONE reindex. `destroy()` clears the `_reindexT` timer.
+Renders + flies back via the existing `_injectCanvasRefSection`/`_navToCanvasAnchor` path (source-agnostic). Adversarial review:
+**SHIP** — dedup (card vs arrow = distinct elIds), no write-storm (reindex read-only, never re-arms), persisted-store safe
+(full rebuild, self-healing placeholder), `.finally` fires once on all paths, destroy double-guarded, malformed elements safe.
+Only LOW: a >800ms-slow record load can leak a `transclusion` placeholder cross-device, self-heals ~1.4s. Tests: `pxc_translink` 17.
+Commit `69aac80`, pushed. Reinstall+reload to pick it up.
+
 ## 🛠 v1.117.1 — HOTFIX: blank canvas on flip-to-drawing (2026-06-25)
 User flipped a note → drawing and got a **completely blank canvas** (no toolbar, no content). Root cause: a 1.117.0 regression —
 `mount()` calls `_buildToolbar()` (line 1847) BEFORE assigning `this.wrap` (was line 1851), and the new `_wireToolbarTips`
