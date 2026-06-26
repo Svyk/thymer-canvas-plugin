@@ -1,5 +1,24 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅✅ VISUAL-THINKING CANVAS ROADMAP COMPLETE (2026-06-25)
+The whole plan inspired by azlen's "parallel pages, visibly connected" + round's anchored-comments X posts is shipped end
+to end across **16 reviewed feature ships (v1.117 mind-map → v1.132)**:
+- **Phase 1 — Anchored comments** (v1.119–1.122): C0 scene `type:'comment'` + pins/rail/thread, C1 durable `Canvas
+  Comments` Thymer mirror, C2 cross-surface note backref, C3 polish (pin-drag/hover-preview/entrance-pop).
+- **Phase 2 — PDF documents** (v1.123–1.126): D-A document model + cross-runtime blob-worker, D-B lazy placeholder render,
+  D-C page-nav + explode/stack, D-D one-click region comment (ties PDF to the comment system).
+- **Phase 3 — Parallel pages, visibly connected** (v1.127–1.132): P3.0 gradient/glow edges, P3.1 hover-focus, P3.2 flow
+  particle, P3.3 columnar "Arrange related pages" (the azlen gesture), P3.4 promote ghost→real, P3.5 density control.
+Every ship: node-extract tests + adversarial code-review + data-safety discipline. All pushed to Svyk/thymer-canvas-plugin.
+Reinstall + reload to use it all.
+
+## ✅ v1.132.0 — Phase 3.P3.5: connection-density control (FINAL) (2026-06-25)
+`edgeDensity` (all | focus = hovered-only, auto when >150 edges) + `edgeTypes` (all | rel | semantic) gates on the ghost
+graph, applied consistently across draw/hover/promote; 2 persisted command toggles. Review: caught a **HIGH** (the
+focus-only HIT gate keyed on live `_connHover` which is null at empty-space click time → promote was dead in hovered-only
+mode + the auto>150 forced users there) — fixed by removing the focus-only restriction from `_ghostEdgeAt` (kept the type
+filter); LOW addressed (honest filter toast). Tests `pxc_density` 20. Commit `3963e3a`, pushed.
+
 ## ✅ v1.131.0 — Phase 3.P3.4: promote ghost→real connector (2026-06-25)
 Click an inferred ghost edge (empty space) → a persistent "relates to" connector. `_ghostEdgeAt` (samples the ghost's
 quad curve, same control point as the renderer, distToSeg ≤ 8/zoom); `_promoteGhost` (curved 3-point arrow bound to both
