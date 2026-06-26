@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.128.0 — Phase 3.P3.1: ghost-edge hover-focus (2026-06-25)
+Hover a card with ghost edges → its incident edges go BRIGHT+SOLID + the hovered/connected cards get a focus ring.
+Two-tiered correctly: bulk gradient/glow ghosts stay in the static raster (P3.0); hover-focus is `_drawGhostFocus` on the
+iCv OVERLAY (redraws every frame → live on hover, since `_cacheValid` isn't invalidated by a hover). Reuses `_connHover`;
+same world-transform + `/z` convention as the select-glow; gated select-mode/!editing/!gesture/incident-edge-required.
+Review: **SHIP** (no defects — focus updates+clears correctly, state/transform balanced, perf bounded, no P3.0 regression).
+Tests `pxc_edgefocus` 13. Commit `17c5ee1`, pushed. **Next: P3.2 — animated flow on the hovered edge (marching dashes /
+particle, dirty-rearmed, idle→0 CPU when hover clears).**
+
 ## ✅ v1.127.0 — Phase 3.P3.0: gradient/glow ghost edges (2026-06-25)
 The auto ghost edges (related on-canvas cards) went from flat dashed lines to GRADIENT-along-the-chord (endpoint accent
 hue A→B — the azlen "visibly connected" look) + soft GLOW (shadowBlur, A↔B midpoint hue via new `pxcMixHex`) + a gentle
