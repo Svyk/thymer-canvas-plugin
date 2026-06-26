@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.163.0 — C20: PDF document title labels (identify multiple PDFs) (2026-06-26)
+Extends C14: on each PDF's FIRST page, draws the filename (`el.pdf.srcName`, truncated at 30 chars) in a purple pill at
+the top-left, so multiple regulatory PDFs on a board are identifiable at a glance (QA use case). Added INSIDE the C14
+overlay loop — no new save/restore; the title's `globalAlpha`/`fillStyle` are reset by the next iteration's page-number
+pill; `ctx.font` is untouched so `measureText` stays consistent. Page-1-only (`el.pdf.page === 1`), wider left-cull margin
+for the longer pill, top-left vs the page number's bottom-left (no overlap). Same `pdfPageLabels` setting drives both
+(toggle renamed "PDF page numbers & title"). Review: **SHIP, CLEAN** — no HIGH/MED; C14 state-balance preserved,
+page-1-only, collision-free, truncation/odd-input safe, no PDF-free-board cost, read-only all confirmed (3 LOW
+observations only: duplicate worldToScreen on page 1, no pageCount gate, identical-filename ambiguity — all non-issues).
+Tests `pxc_pdftitle` 10; pdfpagelabel regress green. **Next: more on-theme features.**
+
 ## ✅ v1.162.0 — C19: "Fit to selection" (frame whatever's selected) (2026-06-26)
 A general camera convenience (pairs with C15 "Select whole PDF document"): frame the camera to the union bbox of the
 currently-selected elements — any kinds. `_fitToSelection` resolves selection ids → live elements, unions their

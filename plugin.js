@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.162.0';
+const PLEXUS_VERSION = '1.163.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -7106,6 +7106,15 @@ class CanvasView {
       if (px < -120 || py < -60 || px > W + 120 || py > H + 60) continue; // cull off-screen
       const txt = 'p ' + (el.pdf.page || '?') + (el.pdf.pageCount ? ' / ' + el.pdf.pageCount : ''), pad = 4.5 * d, ch = 15 * d, cw = ctx.measureText(txt).width + pad * 2, bx = px + 4 * d, by = py - ch - 4 * d; // just inside the bottom-left corner
       ctx.globalAlpha = 0.88; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(bx, by, cw, ch, 6 * d); else ctx.rect(bx, by, cw, ch); ctx.fillStyle = 'rgba(20,24,33,0.92)'; ctx.fill(); ctx.lineWidth = 1 * d; ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.stroke(); ctx.globalAlpha = 1; ctx.fillStyle = '#e6e8ee'; ctx.fillText(txt, bx + pad, by + ch / 2 + 0.5 * d);
+      // C20: the document FILENAME on the first page (top-left, purple pill) so multiple PDFs on a board are identifiable.
+      if (el.pdf.page === 1 && el.pdf.srcName) {
+        const raw = String(el.pdf.srcName), ttl = raw.length > 30 ? raw.slice(0, 29) + '…' : raw;
+        const tlx = Math.min(el.x, el.x + el.width), tly = Math.min(el.y, el.y + el.height), tsp = this.camera.worldToScreen(tlx, tly), tpx = tsp.x * d, tpy = tsp.y * d;
+        if (!(tpx < -240 || tpy < -40 || tpx > W + 40 || tpy > H + 60)) {
+          const tpad = 5 * d, tch = 16 * d, tcw = ctx.measureText(ttl).width + tpad * 2, tbx = tpx + 4 * d, tby = tpy - tch - 4 * d; // top-left, outset above
+          ctx.globalAlpha = 0.9; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(tbx, tby, tcw, tch, 6 * d); else ctx.rect(tbx, tby, tcw, tch); ctx.fillStyle = 'rgba(124,92,255,0.92)'; ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = '#fff'; ctx.fillText(ttl, tbx + tpad, tby + tch / 2 + 0.5 * d);
+        }
+      }
     }
     if (started) { ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore(); }
   }
@@ -9348,7 +9357,7 @@ class Plugin extends AppPlugin {
     toggle(gen, 'Force dark canvas (override theme)', 'darkMode', 'Dark mode auto-follows your Thymer theme; turn this on to force a dark canvas even on a light theme.');
     toggle(gen, 'Invert images in dark mode', 'invertImagesDark', 'Auto-inverts raster/SVG figures so they read on a dark canvas (zsviczian-style). Opt a single image out via the “Toggle image dark-invert” command.');
     toggle(gen, 'Comment badges on cards', 'commentBadges', 'A small speech-bubble count on any card with anchored comments (dimmed when all are resolved) — see annotated records at a glance.');
-    toggle(gen, 'PDF page numbers', 'pdfPageLabels', 'A small “p N / M” tag on each PDF page so a laid-out / exploded document orients at a glance.');
+    toggle(gen, 'PDF page numbers & title', 'pdfPageLabels', 'A small “p N / M” tag on each PDF page (and the filename on page 1) so a laid-out / exploded document orients + is identifiable at a glance.');
 
     const beh = section('Canvas behavior');
     toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');
