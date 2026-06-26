@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.159.0';
+const PLEXUS_VERSION = '1.160.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5016,6 +5016,18 @@ class CanvasView {
     mkb('Move…', 'Move this record to another collection (keeps its links)', async () => { const col = await this._pickCollection('Move this record to collection:'); if (col) { try { rec.moveToCollection(col.getGuid()); this._invalidateRec(guid); this.dirty = true; this.scheduleSave(); try { this.plugin.ui.addToaster({ title: 'Moved to “' + (col.getName && col.getName()) + '”.', dismissible: true }); } catch (_e) {} } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not move the record.', dismissible: true }); } catch (_e2) {} } } });
     mkb('Template', 'Apply a Templater template to this record', () => this._applyTemplate(rec, guid)); // EDIT-3
     head.appendChild(btns); box.appendChild(head);
+    // EDIT-5 (C17): the card's TRUE connection degree — how many notes it references (↗) and how many reference it (↙) — so a
+    // note's role in the graph reads at a glance when inspecting it (complements the on-canvas hub badge). Filled async; a guard
+    // against the panel being replaced during the count avoids writing into a stale node.
+    const connRow = document.createElement('div'); connRow.className = 'pxc-rp-conn'; connRow.textContent = '↗ … · ↙ …'; box.appendChild(connRow);
+    (async () => {
+      let fwd = 0, back = 0, okF = false, okB = false;
+      try { const items = await rec.getLineItems(); okF = true; const seen = new Set(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && s.text.guid !== guid && !seen.has(s.text.guid)) { seen.add(s.text.guid); fwd++; } } catch (_e) {}
+      try { const br = await rec.getBackReferences(); okB = true; const seen = new Set(); for (const b of (br || [])) { const r = b && b.record; if (r && r.guid && r.guid !== guid && !seen.has(r.guid)) { seen.add(r.guid); back++; } } } catch (_e) {}
+      if (this._recPanelEl !== box) return; // a newer panel replaced this one during the async count → don't write a stale node
+      if (!okF && !okB) return; // both fetches failed → leave the "↗ … · ↙ …" placeholder, not a false "0 · 0"
+      connRow.textContent = '↗ ' + fwd + ' reference' + (fwd === 1 ? '' : 's') + '  ·  ↙ ' + back + ' backreference' + (back === 1 ? '' : 's');
+    })();
     // Property rows REMOVED (user): they duplicated the card's inline properties, which are now shown + EDITABLE INLINE on the
     // card itself (dblclick a row → _editCardProp). The panel keeps only Title + Open/Move/Template + the Datacore field.
     // EDIT-4a: a Datacore query field on the panel — type a dc: query → live result rows (guarded if Datacore isn't installed).
@@ -10472,6 +10484,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn { padding: 4px 9px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 11px/1.1 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-conn { font: 11px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); opacity: .8; padding: 1px 0; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-list { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-lab { font-size: 11px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

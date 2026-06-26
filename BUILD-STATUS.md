@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.160.0 — C17: connection counts in the record panel (a note's graph role at a glance) (2026-06-26)
+When you select a record card to inspect it, the panel now shows its TRUE graph degree — "↗ N references · ↙ M
+backreferences" — how many notes it references and how many reference it (complements the on-canvas hub badge, which is
+on-canvas-only). Filled async inside the already-async `_buildRecPanel`: dedup + self-excluded forward refs (ref-segment
+target guids) and backrefs (`getBackReferences().record.guid`), mirroring the canonical `_arrangeParallel`/`_pullInNeighbours`
+read loops. A `this._recPanelEl !== box` guard after the two async hops prevents writing into a panel the user replaced
+mid-fetch. Review: **SHIP, CLEAN** — no HIGH/MED; stale-write guard correct (per-build `box` identity), read-only (same
+read APIs as the ghost build, no writes), dedup/self-exclusion/malformed-safe, no per-frame cost (once per selection
+change), no leak, theme-safe CSS all confirmed. Folded the one LOW: track per-side fetch success → on double-failure leave
+the "↗ … · ↙ …" placeholder instead of a false "0 · 0". Tests `pxc_panelconn` 9; fitpdf regress green. **Next: more on-theme features.**
+
 ## ✅ v1.159.0 — C16: "Fit to PDF document" (frame the whole PDF) (2026-06-26)
 Completes the PDF document-as-a-unit pair (with C15): a command frames the camera to the union bbox of all the active
 PDF's pages — handy after explode-to-grid or to see a stacked doc whole. `_fitToPdfDocument` reuses `_activePdfDocId` +
