@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.148.0';
+const PLEXUS_VERSION = '1.149.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4613,8 +4613,10 @@ class CanvasView {
     if (!this._cmtRailOpen) { if (this._cmtRailEl) this._closeCommentRail(); return; }
     const list = this._comments();
     const filt = this._cmtRailFilter || 'all', catF = this._cmtRailCat || 'all';
-    const shown = list.filter((c) => (filt === 'all' ? true : filt === 'open' ? !c.resolved : c.resolved) && (catF === 'all' || pxcCommentCategory(c).key === catF)); // C6: status filter AND category filter
-    const sig = filt + '|' + catF + '|' + shown.map((c) => c.id + ':' + (c.resolved ? 'r' : 'o') + ':' + (c.color || '') + ':' + pxcCommentCategory(c).key + ':' + (c.thread ? c.thread.length : 0) + ':' + (c.thread && c.thread[0] ? (c.thread[0].text || '').slice(0, 24) : '')).join(',');
+    const statusList = list.filter((c) => filt === 'all' ? true : filt === 'open' ? !c.resolved : c.resolved); // status-matched: the chip-count basis AND a superset of `shown`
+    const shown = statusList.filter((c) => catF === 'all' || pxcCommentCategory(c).key === catF); // + the category filter
+    // sign the WHOLE statusList (not just `shown`) so a change in a non-active category still updates the chip counts / "All N"
+    const sig = filt + '|' + catF + '|' + statusList.map((c) => c.id + ':' + (c.resolved ? 'r' : 'o') + ':' + pxcCommentCategory(c).key + ':' + (c.thread ? c.thread.length : 0) + ':' + (c.thread && c.thread[0] ? (c.thread[0].text || '').slice(0, 24) : '')).join(',');
     if (this._cmtRailEl && this._cmtRailSig === sig) return; // unchanged → don't rebuild (keeps scroll)
     this._closeCommentRailEl();
     this._cmtRailSig = sig;
@@ -4627,10 +4629,12 @@ class CanvasView {
     head.appendChild(fwrap);
     const x = document.createElement('button'); x.className = 'pxc-cmt-railclose'; x.textContent = '✕'; x.title = 'Close'; x.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closeCommentRail(); }); head.appendChild(x);
     box.appendChild(head);
-    // C6: category filter — a colored dot per category (+ "All"); ANDs with the status filter above. Active dot is ringed.
+    // C6: category filter — labelled "●Label N" chips (counts respect the status filter above; ANDs with it). Only non-empty
+    // categories show (+ the active one even at 0 so it's always un-toggleable). Click toggles; the active chip is filled.
+    const catCounts = {}; for (const c of statusList) { const k = pxcCommentCategory(c).key; catCounts[k] = (catCounts[k] || 0) + 1; } // statusList declared at the top (count basis)
     const cwrap = document.createElement('div'); cwrap.className = 'pxc-cmt-railcats';
-    const allb = document.createElement('button'); allb.className = 'pxc-cmt-catbtn' + (catF === 'all' ? ' pxc-on' : ''); allb.textContent = 'All'; allb.title = 'All categories'; allb.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = 'all'; this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(allb);
-    for (const cat of PXC_CMT_CATEGORIES) { const b = document.createElement('button'); b.className = 'pxc-cmt-catdot' + (catF === cat.key ? ' pxc-on' : ''); b.style.background = cat.color; b.title = cat.label; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = (catF === cat.key ? 'all' : cat.key); this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(b); } // toggle off if re-clicking the active category
+    const allb = document.createElement('button'); allb.className = 'pxc-cmt-catbtn' + (catF === 'all' ? ' pxc-on' : ''); allb.textContent = 'All ' + statusList.length; allb.title = 'All categories'; allb.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = 'all'; this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(allb);
+    for (const cat of PXC_CMT_CATEGORIES) { const n = catCounts[cat.key] || 0; if (!n && catF !== cat.key) continue; const b = document.createElement('button'); b.className = 'pxc-cmt-catchip' + (catF === cat.key ? ' pxc-on' : ''); const dot = document.createElement('span'); dot.className = 'pxc-cmt-chipdot'; dot.style.background = cat.color; b.appendChild(dot); const tx = document.createElement('span'); tx.textContent = cat.label + ' ' + n; b.appendChild(tx); b.title = cat.label; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = (catF === cat.key ? 'all' : cat.key); this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(b); } // toggle off if re-clicking the active category
     box.appendChild(cwrap);
     const ul = document.createElement('div'); ul.className = 'pxc-cmt-raillist';
     if (!shown.length) { const em = document.createElement('div'); em.className = 'pxc-cmt-railempty'; em.textContent = list.length ? 'No comments match this filter.' : 'No comments yet. Pick the Comment tool and click anything to add one.'; ul.appendChild(em); } // C6: distinguish "filtered out" from "none exist"
@@ -10212,9 +10216,10 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-cmt-railcats { display: flex; align-items: center; gap: 5px; padding: 4px 10px 6px; flex-wrap: wrap; }
 .pxc-host .pxc-root .pxc-cmt-catbtn { padding: 2px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-600, #9aa3b2); cursor: pointer; font: 10px/1.1 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-cmt-catbtn.pxc-on { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
-.pxc-host .pxc-root .pxc-cmt-catdot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
-.pxc-host .pxc-root .pxc-cmt-catdot.pxc-on { border-color: var(--color-text-50, #fff); }
-.pxc-host .pxc-root .pxc-cmt-catdot:hover { border-color: var(--color-text-600, #9aa3b2); }
+.pxc-host .pxc-root .pxc-cmt-catchip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-600, #9aa3b2); cursor: pointer; font: 10px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-cmt-catchip:hover { border-color: var(--color-text-600, #9aa3b2); }
+.pxc-host .pxc-root .pxc-cmt-catchip.pxc-on { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-cmt-chipdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .pxc-host .pxc-root .pxc-cmt-railclose { width: 22px; height: 22px; border: none; border-radius: 6px; background: transparent; color: var(--color-text-600, #9aa3b2); cursor: pointer; }
 .pxc-host .pxc-root .pxc-cmt-railclose:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); color: var(--color-text-50, #fff); }
 .pxc-host .pxc-root .pxc-cmt-raillist { display: flex; flex-direction: column; overflow-y: auto; padding: 6px; gap: 4px; }

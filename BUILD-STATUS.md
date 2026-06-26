@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.149.0 — C6b: comment category count chips (distribution at a glance) (2026-06-26)
+Refines the v1.148 category filter: bare color dots → labelled **"●Label N"** count chips showing the comment distribution
+(respecting the status filter), only for non-empty categories (+ the active one even at 0, so it stays un-toggleable),
+with an "All N" total. Also hoisted `statusList` and changed the rail-rebuild `sig` to sign the COUNT BASIS (`statusList`)
+instead of the category-filtered `shown` — fixing a staleness bug where a comment added/changed in a NON-active category
+wouldn't update the chip counts. Review: **SHIP, CLEAN** — no HIGH/MED; sig correctness (stable, no churn, covers every
+rendered element; `_commentChanged` nulls the sig as belt-and-suspenders), the dropped `c.color` verified safe
+(`_setCommentCategory` is the only writer of `c.color`; generic recolor touches only `strokeColor`), no duplicate
+`statusList`, dead `.pxc-cmt-catdot` CSS fully removed, no leak, theme-safe, empty/edge all confirmed. Tests
+`pxc_cmtcounts` 8; cmtcat/cmtreview regress green. **Next: more on-theme features.**
+
 ## ✅ v1.148.0 — C6: comment categories (Note/Question/To-do/Idea/Done/Decision) + rail filter (2026-06-26)
 The @round "review the comments on a doc" pillar gains organization: anchored comments get named, color-coded categories;
 the popover's old free color swatch becomes category chips (sets category + color in one click), and the rail gains a
