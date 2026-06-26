@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.120.0';
+const PLEXUS_VERSION = '1.121.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4354,7 +4354,7 @@ class CanvasView {
   }
   _commentAuthorName() { try { const us = this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers(); const u = us && us[0]; if (u) return (u.getName && u.getName()) || u.name || 'You'; } catch (_e) {} return 'You'; }
   // The single seam every comment mutation flows through — C0 just persists the scene; C1 will also enqueue the Thymer mirror here.
-  _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ try { if (c) this._scheduleCommentMirror(c.id); } catch (_e) {} } // C1: also enqueue the durable Thymer mirror (debounced)
+  _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ try { this._scheduleReindex(); } catch (_e) {} /* C2: refresh the note-side "Canvas Comments" backref */ try { if (c) this._scheduleCommentMirror(c.id); } catch (_e) {} } // C1: also enqueue the durable Thymer mirror (debounced)
   // Fly the camera to a comment's anchor + pulse it (reuses the cross-ref flash machinery).
   _jumpToComment(c) {
     if (!c) return; const b = c.anchor; let anchor = null;
@@ -6010,6 +6010,13 @@ class CanvasView {
     };
     for (const el of els) {
       if (!el || el.isDeleted) continue;
+      // C2: an anchored COMMENT on a record/line surfaces on that note's Backreferences ("Canvas Comments"). Key it by the
+      // commented record guid; label = first line + reply count. Image/free comments target no note → canvas-only (skip).
+      if (el.type === 'comment') {
+        const noteGuid = this._commentedRecordGuid(el);
+        if (noteGuid) { const root = el.thread && el.thread[0]; const n = (el.thread && el.thread.length) || 0; const txt = (root ? (root.text || '') : '').replace(/\s+/g, ' ').trim(); const label = (txt ? (txt.length > 40 ? txt.slice(0, 39) + '…' : txt) : '(comment)') + (el.resolved ? ' ✓' : '') + (n > 1 ? ' · ' + (n - 1) + ' repl' + (n - 1 === 1 ? 'y' : 'ies') : ''); put(noteGuid, el.id, label, 'comment'); }
+        continue;
+      }
       if (el.isRef) {
         if (el.refKind === 'line' && el.refLineGuid) put(el.refLineGuid, el.id, el.refAlias || el.refLabel, 'line');
         else if (el.refKind === 'record' && el.refGuid) put(el.refGuid, el.id, el.refAlias || el.refLabel, 'record');
@@ -8230,7 +8237,7 @@ class Plugin extends AppPlugin {
     const head = document.createElement('div'); head.className = 'plexus-bref-head'; head.textContent = entries.length + ' canvas references'; menu.appendChild(head);
     for (const en of entries) {
       const row = document.createElement('div'); row.className = 'plexus-bref-row';
-      const dot = document.createElement('span'); dot.className = 'plexus-bref-dot'; dot.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(dot);
+      const dot = document.createElement('span'); dot.className = 'plexus-bref-dot'; dot.style.background = (en.kind === 'comment' ? '#f59e0b' : en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); if (en.kind === 'comment') { dot.textContent = '💬'; dot.style.background = 'transparent'; } row.appendChild(dot); // C2: comment rows read as 💬, not a ref dot
       this._appendBrefContent(row, en, 'bref'); // F1/F3: from → dir → label (+ region thumbnail)
       row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closeBrefMenu(); this._navToCanvasAnchor(en); });
       menu.appendChild(row);
@@ -8272,7 +8279,7 @@ class Plugin extends AppPlugin {
     // RECORD targets → a "Canvas References" SECTION in the native Backreferences footer (request 3); inline ↗ badge only
     // as a fallback when that footer isn't rendered. RECONCILE: a record no longer cited drops the section + the fallback badge.
     for (const root of document.querySelectorAll('.listview-items[data-guid]')) {
-      const g = root.getAttribute('data-guid'); const entries = (idx[g] || []).filter((e) => e.kind === 'record');
+      const g = root.getAttribute('data-guid'); const entries = (idx[g] || []).filter((e) => e.kind === 'record' || e.kind === 'comment'); // C2: comments anchored to this note surface here too (partitioned into a "Canvas Comments" group)
       if (!entries.length) { // B3: index dropped this record → remove the stale section + fallback inline badge
         try { const panel = root.closest && root.closest('.editor-panel'); const body = panel && panel.querySelector('.tlr-body'); const sec = body && body.querySelector(':scope > .plexus-canvas-refs'); if (sec) sec.remove(); } catch (_e) {}
         const rb = root.querySelector(':scope > .plexus-backref-rec'); if (rb) rb.remove();
@@ -8295,22 +8302,28 @@ class Plugin extends AppPlugin {
     if (!panel) { let n = root; for (let i = 0; i < 8 && n; i++) { if (/editor-panel/.test(n.className || '')) { panel = n; break; } n = n.parentElement; } }
     const body = panel ? panel.querySelector('.tlr-body') : null;
     if (!body) return false; // backreferences footer not rendered → caller falls back to the inline badge
-    const sig = entries.length + ':' + entries.map((e) => e.el + '|' + (e.label || '') + '|' + (e.from || '') + '|' + (e.dir || '') + (e.img ? '|i' : '')).join(','); // re-render when the breadcrumb (from/dir/thumb) changes too (F1/F3)
+    const sig = entries.length + ':' + entries.map((e) => (e.kind === 'comment' ? 'c' : '') + e.el + '|' + (e.label || '') + '|' + (e.from || '') + '|' + (e.dir || '') + (e.img ? '|i' : '')).join(','); // re-render when the breadcrumb (from/dir/thumb) or a comment changes too (F1/F3 + C2)
     const existing = body.querySelector(':scope > .plexus-canvas-refs');
     if (existing) { if (existing.getAttribute('data-pxc-sig') === sig) return true; existing.remove(); }
     const slot = document.createElement('div'); slot.className = 'tlr-section-slot plexus-canvas-refs'; slot.setAttribute('data-pxc-sig', sig);
-    const title = document.createElement('div'); title.className = 'tlr-title tlr-section-title text-details'; title.textContent = 'Canvas References'; slot.appendChild(title);
-    const list = document.createElement('div'); list.className = 'plexus-cref-list';
-    for (const en of entries) {
-      const row = document.createElement('div'); row.className = 'plexus-cref-row';
-      const ic = document.createElement('span'); ic.className = 'plexus-cref-ic'; ic.textContent = '↗'; ic.style.background = (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(ic);
-      this._appendBrefContent(row, en, 'cref'); // F1/F3: from → dir → label (+ region thumbnail)
-      row.title = 'Fly to this reference on the canvas';
-      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(en); });
-      const _en = en; row.addEventListener('mouseenter', () => this._showBrefHover([_en], row)); row.addEventListener('mouseleave', () => this._hideBrefHover()); // round-4: hover → big-thumbnail rich popover
-      list.appendChild(row);
-    }
-    slot.appendChild(list);
+    // C2: render two groups — "Canvas References" (refs/transclusions/connections) and "Canvas Comments" (anchored comments).
+    const group = (heading, list, isComment) => {
+      if (!list.length) return;
+      const title = document.createElement('div'); title.className = 'tlr-title tlr-section-title text-details'; title.textContent = heading + (isComment ? ' (' + list.length + ')' : ''); slot.appendChild(title);
+      const ul = document.createElement('div'); ul.className = 'plexus-cref-list';
+      for (const en of list) {
+        const row = document.createElement('div'); row.className = 'plexus-cref-row';
+        const ic = document.createElement('span'); ic.className = 'plexus-cref-ic'; ic.textContent = isComment ? '💬' : '↗'; ic.style.background = isComment ? '#f59e0b' : (en.kind === 'record' ? '#7c5cff' : '#0ea5e9'); row.appendChild(ic);
+        this._appendBrefContent(row, en, 'cref'); // F1/F3: from → dir → label (+ region thumbnail)
+        row.title = isComment ? 'Open this comment on the canvas' : 'Fly to this reference on the canvas';
+        row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._navToCanvasAnchor(en); });
+        if (!isComment) { const _en = en; row.addEventListener('mouseenter', () => this._showBrefHover([_en], row)); row.addEventListener('mouseleave', () => this._hideBrefHover()); }
+        ul.appendChild(row);
+      }
+      slot.appendChild(ul);
+    };
+    group('Canvas References', entries.filter((e) => e.kind !== 'comment'), false);
+    group('Canvas Comments', entries.filter((e) => e.kind === 'comment'), true);
     const status = body.querySelector(':scope > .tlr-status-slot');
     if (status && status.nextSibling) body.insertBefore(slot, status.nextSibling); else body.insertBefore(slot, body.firstChild);
     return true;
@@ -8417,12 +8430,14 @@ class Plugin extends AppPlugin {
     if (entry.el && view.scene && view.scene.elements && !view.scene.elements.some((e) => e.id === entry.el && !e.isDeleted)) {
       try { this._brefPruneEntry(entry.drawing, entry.el); } catch (_e) {}
       for (const v of this._views) { v.dirty = true; }
-      try { this.ui.addToaster({ title: 'That connection no longer exists — removed the stale reference.', dismissible: true }); } catch (_e) {}
+      try { this.ui.addToaster({ title: entry.kind === 'comment' ? 'That comment no longer exists — removed the stale reference.' : 'That connection no longer exists — removed the stale reference.', dismissible: true }); } catch (_e) {}
       return;
     }
     // SECTIONS Phase 2: breadcrumb — if the cited target lived inside a section, name it on the way back. Resolved LIVE
     // from the loaded scene by guid (cross-device: the section name need not travel in the filename, only its id does).
     if (entry.sec) { try { const sf = (view.scene.elements || []).find((e) => e.id === entry.sec && e.type === 'frame' && !e.isDeleted); if (sf) this.ui.addToaster({ title: 'In section “' + (sf.name || 'Section') + '”', dismissible: true }); } catch (_e) {} }
+    // C2: a comment entry → fly to the comment's anchor + open its thread (not the generic element flash on a zero-size pin).
+    if (entry.kind === 'comment') { try { const c = (view.scene.elements || []).find((e) => e.id === entry.el && e.type === 'comment' && !e.isDeleted); if (c) { view._jumpToComment(c); view._openCommentThread(c.id, false); return; } } catch (_e) {} }
     // Navigating TO the canvas → always start wide (the whole source image) then cinematically zoom into the region.
     try { view._flashAnchor(entry, { establishImage: true }); } catch (e) { console.error('[Plexus] navToAnchor', e); }
   }
