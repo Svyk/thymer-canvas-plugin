@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.123.0 — Phase 2.D-A: PDF document model + cross-runtime worker (2026-06-25)
+Upgraded `_addPdf` from a magic-`y+=520` stack into a real DOCUMENT: pages render to a clean vertical column (real
+heights), each tagged `el.pdf={docId,page,pageCount,srcName,renderScale}`. Grouping is by `el.pdf.docId` ONLY (NOT
+`el.groupIds` — that makes a click select the whole unit and would break per-page click-to-comment/rec-panel/Cite; the
+adversarial HIGH). Pages stay `type:'image'` → region/comment anchoring + GPU LRU + decode-cull + SVG export untouched.
+Cross-runtime pdf.js worker (`_pdfSetupWorker`: fetch worker src → same-origin blob: URL, disableWorker fallback; `res.ok`
+guard so a CDN error can't poison the cache — the MED); webp render (png fallback); `doc.destroy()`; honest 20-page cap.
+Review: HIGH+MED fixed. Tests `pxc_pdfdoc` 19. Commit `305a04b`, pushed. **Next: D-B — lazy render + memory (cull-gated
+pages 3..N, doc-proxy lifetime, concurrency cap).**
+
 ## ✅✅ PHASE 1 COMPLETE — anchored comments (C0–C3) (2026-06-25)
 The round/azlen "anchored threaded comments" pillar is shipped end-to-end: **C0** (v1.119) scene `type:'comment'` element
 anchored via `_bindingFor` + speech-bubble pins + thread popover + right rail; **C1** (v1.120) durable Thymer mirror to the
