@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.132.0';
+const PLEXUS_VERSION = '1.133.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -60,6 +60,7 @@ const PLEXUS_SETTINGS_DEFAULTS = {
 // S10: module-level mirror of settings.linkOpacity (0..1) for free-function renderers (drawText has no `this`).
 let PLEXUS_LINK_ALPHA = 1;
 function _pxcLinkAlpha() { return PLEXUS_LINK_ALPHA; }
+let PLEXUS_EDGE_GLOW = 0; // P3.6: shadowBlur (device px, 0=off) for the glow under REAL connectors. Set per-render, SCALE-AWARE (zoom*dpr, like the card glow) so the halo stays ~constant in world px; forced to 0 during export for a deterministic raster.
 function loadPlexusSettings() { try { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(PLEXUS_SETTINGS_KEY) || '{}')); } catch (_e) { return Object.assign({}, PLEXUS_SETTINGS_DEFAULTS); } }
 function savePlexusSettings(s) { try { localStorage.setItem(PLEXUS_SETTINGS_KEY, JSON.stringify(s)); } catch (_e) {} }
 // IO-3: ONE shared ontology read by all three Plexus plugins (Canvas/Brain/Templater) so they agree on
@@ -976,6 +977,15 @@ function pxcSmoothPath(ctx, p) {
 function drawLinear(ctx, el) {
   const pts = routedPoints(el); if (!pts || pts.length < 2) return; // points are ABSOLUTE world coords
   ctx.save(); applyStroke(ctx, { stroke: el.strokeColor, strokeWidth: el.strokeWidth, opacity: el.opacity });
+  // P3.6: a soft glow under the connector (the azlen "visibly connected" aesthetic, now on the connections YOU draw, not
+  // just inferred ghosts). A wide low-alpha bloom of the SAME path under the crisp stroke; gated by PLEXUS_EDGE_GLOW
+  // (edgeGlow setting && not mid-gesture), so it's paid once in the static raster and never per-frame on a dragged mover.
+  if (PLEXUS_EDGE_GLOW > 0 && el.strokeColor && /^#/.test(el.strokeColor)) {
+    const gc = adaptInk(el.strokeColor); // P3.6: the glow tracks the SAME adapted hue the crisp stroke uses (else a dark connector blooms near-black on a dark canvas)
+    ctx.save(); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.22; ctx.strokeStyle = gc; ctx.lineWidth = (el.strokeWidth || 2) + 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.shadowColor = gc; ctx.shadowBlur = PLEXUS_EDGE_GLOW; ctx.setLineDash([]);
+    ctx.beginPath(); if (el.curved && pts.length >= 3) pxcSmoothPath(ctx, pts); else { ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); }
+    ctx.stroke(); ctx.restore();
+  }
   const ls = el.lineStyle; // round-5 C: dashed/dotted draw a CLEAN poly-line (rough + dash = messy); solid keeps the rough double-pass
   if (el.curved && pts.length >= 3) { // B: a curved connection — clean smooth stroke (rough + curve = messy), respects dash
     if (ls === 'dashed' || ls === 'dotted') { const sw = el.strokeWidth || 2; ctx.setLineDash(ls === 'dotted' ? [Math.max(0.5, sw * 0.2), sw * 2 + 3] : [sw * 4 + 6, sw * 3 + 4]); }
@@ -1471,8 +1481,8 @@ function exportPng(scene, maxPx = 1024, opts, drawCard) {
         const ctx = cv.getContext('2d');
         if (opts.background !== false) { ctx.fillStyle = scene.appState.viewBackgroundColor || '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
         ctx.setTransform(scale, 0, 0, scale, (-b.x + pad) * scale, (-b.y + pad) * scale);
-        const _pd = PXC_DARK; PXC_DARK = false; // UX-6: export is always TRUE colour (the dark treatment is display-only)
-        try { for (const el of scene.elements) { if (el.isDeleted || el.secHidden) continue; if (PXC_CARD_TYPES.has(el.type)) { if (drawCard) drawCard(ctx, el); } else drawElement(ctx, el); } } finally { PXC_DARK = _pd; } // A1: cards via the view callback; everything else stays on the free drawElement
+        const _pd = PXC_DARK; PXC_DARK = false; const _eg = PLEXUS_EDGE_GLOW; PLEXUS_EDGE_GLOW = 0; // UX-6: export is always TRUE colour (dark is display-only); P3.6: force the connector glow OFF so the PNG is deterministic + matches the (glow-less) SVG export
+        try { for (const el of scene.elements) { if (el.isDeleted || el.secHidden) continue; if (PXC_CARD_TYPES.has(el.type)) { if (drawCard) drawCard(ctx, el); } else drawElement(ctx, el); } } finally { PXC_DARK = _pd; PLEXUS_EDGE_GLOW = _eg; } // A1: cards via the view callback; everything else stays on the free drawElement
         cv.toBlob((blob) => resolve(blob), 'image/png');
       } catch (_e) { resolve(null); }
     };
@@ -7483,6 +7493,7 @@ class CanvasView {
   }
   render() {
     if (this.destroyed || !this.staticCv) return;
+    PLEXUS_EDGE_GLOW = (!(this.plugin._settings && this.plugin._settings.edgeGlow === false) && !this._drawGesture && !this._panMode) ? Math.min(20, 3 * this.camera.zoom * (this.dpr || 1)) : 0; // P3.6: real-connector glow blur, scale-aware (~3 world px) like the card glow; 0 during a gesture (no per-frame shadowBlur on a dragged mover)
     if (this._camAnim) this._stepCamAnim(); // advance the cinematic camera tween before drawing this frame
     this._syncPropPanel();
     // UX-6: dark mode AUTO-follows the live Thymer theme (so switching theme adjusts the canvas, strokes, icons,
