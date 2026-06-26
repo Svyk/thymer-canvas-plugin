@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.126.0';
+const PLEXUS_VERSION = '1.127.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -31,6 +31,8 @@ const PLEXUS_SETTINGS_KEY = 'plexus_settings';
 const PLEXUS_SETTINGS_DEFAULTS = {
   // S1 General
   bannerPreview: true, darkMode: false, openMode: 'normal', invertImagesDark: true,
+  // P3.0 connections: beautiful gradient + glow ghost edges (the "visibly connected" look)
+  edgeGlow: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -108,6 +110,10 @@ function _cssLum(css) {
   else { m = css.match(/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i); if (m) { r = +m[1]; g = +m[2]; b = +m[3]; } else return null; }
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
+// P3.0: hex → [r,g,b] (3- or 6-digit; null on a non-hex). Used for gradient/glow edge colours.
+function pxcHex2rgb(hex) { if (!hex) return null; const s = String(hex).trim(); const m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i); if (!m) return null; let h = m[1]; if (h.length === 3) h = h.split('').map((c) => c + c).join(''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+// P3.0: linear-mix two hex colours, t∈[0,1] (0=a, 1=b). Returns a hex; falls back to `a` (or '#7c5cff') on bad input.
+function pxcMixHex(a, b, t) { const ra = pxcHex2rgb(a), rb = pxcHex2rgb(b); if (!ra || !rb) return a || '#7c5cff'; t = Math.max(0, Math.min(1, t)); const c = ra.map((v, i) => Math.round(v + (rb[i] - v) * t)); return '#' + c.map((v) => v.toString(16).padStart(2, '0')).join(''); }
 // Elevate a surface OFF a backdrop so a card reads as a card: mix the colour toward white by `amt` (0..1). Returns a hex.
 function pxcElevate(css, amt) {
   if (!css) return null;
@@ -3374,6 +3380,7 @@ class CanvasView {
       } else {
         mode = 'create'; created = makeRect(down.x, down.y, 0, 0, { type: this.tool, stroke: this.strokeColor, fill: this.fillColor, fillStyle: this.fillStyle }); this.scene.elements.push(created); this.selected.clear();
       }
+      this._drawGesture = !!mode; // P3.0: any per-frame-rerastering gesture (move/resize/rotate/create/lasso/pen/…) → drop edge glow for 60fps
       try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true;
     };
     const onMove = (e) => {
@@ -3442,6 +3449,7 @@ class CanvasView {
       if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B16: connection-point drag snaps on _snapOn() (decoupled from grid visibility), consistent with move/resize // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
     };
     const onUp = (e) => {
+      this._drawGesture = false; // P3.0: gesture ended → edge glow back on next raster
       if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
       if (this._cmtPinDown) { // C3: end a comment-pin gesture — a drag committed the nudge (scene-only); a click opens the thread
         const pd = this._cmtPinDown; this._cmtPinDown = null; try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
@@ -3666,7 +3674,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -6557,9 +6565,21 @@ class CanvasView {
   }
   _drawGhosts(ctx) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return;
-    const z = this.camera.zoom; ctx.save(); ctx.globalAlpha = 0.5; ctx.lineWidth = 1.4 / z; ctx.setLineDash([5 / z, 5 / z]);
-    for (const ge of this._ghostEdges) { const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue; ctx.strokeStyle = ge.rel ? '#0ea5e9' : '#f59e0b'; const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); } // rel (ref/backref) edges blue, semantic edges amber
-    ctx.setLineDash([]); ctx.restore();
+    const z = this.camera.zoom, glow = !(this.plugin._settings && this.plugin._settings.edgeGlow === false) && !this._drawGesture && !this._panMode; // glow is a static-raster cost; drop it during ANY per-frame gesture (move/resize/rotate/pan/draw — _drawGesture) to protect 60fps
+    ctx.save(); ctx.lineCap = 'round';
+    for (const ge of this._ghostEdges) {
+      const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
+      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const base = ge.rel ? '#0ea5e9' : '#f59e0b'; // rel (ref/backref) edges blue, semantic edges amber
+      const ca = (a.strokeColor && /^#[0-9a-f]{3,6}$/i.test(a.strokeColor)) ? a.strokeColor : base, cb = (b.strokeColor && /^#[0-9a-f]{3,6}$/i.test(b.strokeColor)) ? b.strokeColor : base; // endpoint accent hues → a gradient ALONG the edge (source→target), the azlen "visibly connected" look
+      let stroke = base; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, ca); g.addColorStop(1, cb); stroke = g; } catch (_e) {}
+      // a gentle curve (one perpendicular control point) reads cleaner than a straight chord through the cards
+      const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
+      const path = () => { ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cxp, cyp, bx, by); };
+      if (glow) { ctx.globalAlpha = 0.3; ctx.strokeStyle = stroke; ctx.lineWidth = 5 / z; ctx.shadowColor = pxcMixHex(ca, cb, 0.5); ctx.shadowBlur = 8; path(); ctx.stroke(); ctx.shadowBlur = 0; } // soft bloom in the A↔B midpoint hue (paid once in the static raster)
+      ctx.globalAlpha = 0.72; ctx.strokeStyle = stroke; ctx.lineWidth = 1.8 / z; ctx.setLineDash([6 / z, 5 / z]); path(); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1; ctx.restore();
   }
   // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
   // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
