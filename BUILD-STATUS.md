@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.142.0 — bugfix: unify the duplicate `_polyBBox` (region-anchor precision) (2026-06-26)
+A latent bug the C5 review surfaced: there were TWO `_polyBBox` defs on `CanvasView` — an object-form (`p.x/p.y`) and an
+array-form (`p[0]/p[1]`). JS keeps the last, so the array-form won and the object-form was dead → every OBJECT-point
+caller (`_regionShapeWorld` output, used by region/frac-anchored comments AND connections) got `null` back and silently
+fell back to the HOST element bbox instead of the precise region rect. Audited all 5 call sites (the review's "just delete
+the array-form" would have inverted the breakage — 3 callers pass array `worldPoly`). Fix: ONE unified def that dispatches
+per-point (`Array.isArray(p) ? p[0] : p.x`), dead duplicate removed. Now region-anchored comments/connections resolve their
+true region rect (fly-to, sort order, group-frame hull all sharpen). Review: **SHIP, CLEAN** — exactly one def, object
+callers repaired, array callers equivalent-or-better (the added finite-y skip is unreachable + strictly safer), every
+caller's null-handling traced safe, pure read. Tests `pxc_polybbox` 9 (both shapes, NaN/empty/degenerate). **Next: more on-theme features.**
+
 ## ✅ v1.141.0 — C5: comment review navigation (step through comments) (2026-06-26)
 The @round "review the comments on a doc" gesture for the comments pillar: three commands — **Next comment**, **Previous
 comment**, **Next unresolved comment** — step through the board's anchored comments one at a time in reading order

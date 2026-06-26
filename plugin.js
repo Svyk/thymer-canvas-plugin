@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.141.0';
+const PLEXUS_VERSION = '1.142.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2439,7 +2439,7 @@ class CanvasView {
     pop.style.top = Math.max(8, Math.min(vh - ph - 8, cy + 16)) + 'px';
   }
   _hideRefPreview() { if (this._refPreviewT) { clearTimeout(this._refPreviewT); this._refPreviewT = null; } if (this._refPreviewEl) { try { this._refPreviewEl.remove(); } catch (_e) {} this._refPreviewEl = null; } }
-  _polyBBox(pts) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); } return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }; }
+  // (_polyBBox unified below — was a dead object-only duplicate here that the later array-form shadowed.)
   // Crop/lasso a sub-area of an image → mark it as the pending cite (NO crop copy). A dashed marquee shows it
   // until the user clicks Cite (or Escape). Stored as a fraction so it's robust to the image moving later.
   // `poly` (optional, world coords) = the freehand lasso loop → cited as the exact shape, not just its bbox.
@@ -2529,8 +2529,9 @@ class CanvasView {
     }
     return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
   }
-  // World bbox of an absolute polygon [[x,y]…] (round-5 D free-space regions).
-  _polyBBox(poly) { if (!poly || !poly.length) return null; let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of poly) { if (!isFinite(p[0])) continue; x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); } return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null; }
+  // World bbox of a polygon. Accepts BOTH point shapes: array `[[x,y]…]` (free-space worldPoly) AND object `[{x,y}…]`
+  // (_regionShapeWorld output). One unified def — the earlier object-only duplicate made region (frac) anchors null out.
+  _polyBBox(pts) { if (!pts || !pts.length) return null; let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of pts) { const px = Array.isArray(p) ? p[0] : p.x, py = Array.isArray(p) ? p[1] : p.y; if (!isFinite(px) || !isFinite(py)) continue; x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); } return isFinite(x0) ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null; }
   // The element ids enclosed by a lasso polygon — PURE (returns ids, no selection/region side effects). Used by the
   // drop-then-lasso group-link flow. Shares the robust full-scene _elsInLoop so it captures the SAME elements as Cite.
   _idsInLoop(poly, excludeId) { return this._elsInLoop(poly, excludeId, true).map((e) => e.id); } // group-lasso skips connectors
