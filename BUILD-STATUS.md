@@ -20,7 +20,15 @@ persistence shape) → fixed **MED-1** (guard the post-await write with `!this.d
 can't re-arm a save on a dead view — matches the render worker's guard) + **MED-2** (read the outline from the
 doc-level store, not page-1-only, so deleting page 1 no longer falsely reports "no bookmarks"). Tests: new
 `pxc_pdfoutline` 18 assertions (flatten/depth/page-map/cap/named-dest/null-fallbacks); full suite **82/82** green.
-pdf.js API verified live via chrome; rendered TOC panel verifies after the user reloads (live plugin is older).
+**LIVE-VERIFIED via chrome MCP (2026-06-26):** (a) the EXACT `pxcFlattenOutline` ran against real pdf.js 4.6.82 on a
+hand-built 3-page PDF with a nested outline + a NAMED destination → `Cover→p1(d0)`, `Intro→p2(d1)`, `Refs→p3(d0)`
+(named-dest "sec3" resolved via `getDestination`→`getPageIndex`; `item.dest` confirmed a STRING for named dests — the
+one branch the node test mocked); (b) the EXACT shipped `_showPdfOutline`/`_jumpToPdfPage` + the exact `.pxc-pdf-toc`
+CSS rendered the panel in the live browser (3 rows, correct titles/`pN` badges, depth indent 9/23/9px, visible +
+themed, width 263.99px) and a "Refs" row click fired exactly one `_fitToBounds({x:2000,y:0,w:400,h:560},40)` = the
+page-3 element's bounds (click→jump→camera-fly resolves the right page). Screenshot captured. NOTE: the live web app
+still runs the older deployed build (v1.112) — to use the command-palette entry, reload the tab / reinstall v1.169.0
+from GitHub (Plugins Manager); the rendered behavior itself is now verified live, not deferred.
 
 ## ✅ v1.168.0 — C25: @mention CROSS-SURFACE (the comment surfaces on the mentioned person's record) — PLATFORM-VERIFIED (2026-06-26)
 The previously-"platform-blocked" half of @mention (C8), now unblocked + live-verified via the Thymer MCP. **Platform
