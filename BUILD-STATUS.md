@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.124.0 — Phase 2.D-B: lazy/progressive PDF render + bounded memory (2026-06-25)
+A PDF drop returns INSTANTLY with placeholders (cheap `getViewport` pass sizes them; the dashed stub renders until filled),
+then a CONC=2 background worker pool rasterizes each page → `_attachBlobToFileId` (asset/cache back-half of
+`_addImageFromFile`, targeting an existing placeholder). Cap 20→100 (honest "first 100 of N"); doc kept alive only during
+fill then `doc.destroy()`. Review verified pool correctness (each page once, ≤CONC), backing-migrate race (serialized on
+`_backingInflight`), doc lifecycle. Caught **MED** (seed never `_imgCacheEvict`'d → 100-page burst left ~100 rasters
+resident, breaking the cull guarantee) + **2 LOW** (stretched page if viewport pass failed; post-destroy save re-arm) — all
+fixed. Tests `pxc_pdflazy` 16. Commit `37fb68b`, pushed. Known minor: an interrupted fill leaves empty placeholders
+(re-render-from-`el.pdf` is D-C). **Next: D-C — page-nav chrome + explode/stack (walk `el.pdf.docId`).**
+
 ## ✅ v1.123.0 — Phase 2.D-A: PDF document model + cross-runtime worker (2026-06-25)
 Upgraded `_addPdf` from a magic-`y+=520` stack into a real DOCUMENT: pages render to a clean vertical column (real
 heights), each tagged `el.pdf={docId,page,pageCount,srcName,renderScale}`. Grouping is by `el.pdf.docId` ONLY (NOT
