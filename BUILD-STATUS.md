@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.134.0 — Connections settings panel (2026-06-25)
+Surfaces the P3.0–P3.6 connection controls (Edge glow / Edge density all↔hovered-only / Inferred-link types
+all/references/semantic) in the Settings modal — were command-palette only. `apply()` invalidates the static cache for
+these keys (live update, no reload); UI + the P3.5 commands share `this._settings`. Review: **SHIP** (every dropdown value
+matches its renderer branch, proven invalidation chain, clean defaults merge, no regression). Tests `pxc_connsettings` 14.
+Commit `818137a`, pushed. **The Visual-Thinking Canvas is complete + polished + discoverable (v1.119→1.134, 18 ships).**
+
 ## ✅ v1.133.0 — P3.6: glow on REAL connectors (on-theme follow-up) (2026-06-25)
 After the roadmap completed, the re-fired /loop ("implement other X-post features") → extend P3.0's ghost glow to
 user-drawn arrows/lines: `drawLinear` draws a soft bloom of the same path when `PLEXUS_EDGE_GLOW>0` (module global set
