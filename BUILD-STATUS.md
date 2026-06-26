@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.140.0 — P3.10: "Make all inferred links real" (batch promote) (2026-06-26)
+The batch completion of P3.4 (promote one ghost→real connector): after you surface inferred reference links and arrange
+pages, one command promotes EVERY currently-shown ghost edge (type-filtered) to a real curved "relates to" connector at
+once. Refactored `_promoteGhost` → shared `_ghostToConnector` (append-only build, returns the arrow) + `_dropGhostPair`;
+new `_promoteAllGhosts()` snapshots the live type-OK ghosts, promotes each, drops every promoted pair in one pass
+(unordered key, so a reversed-stored ghost is dropped too), confirm-gated past 6. Append-only (pushes arrows, filters the
+ephemeral `_ghostEdges` index — never deletes scene data, no record/note writes); idempotent (`_buildRelationalGhosts`
+excludes already-connected pairs on rebuild → no duplicate connectors). Review: **SHIP, CLEAN** — refactor diffed
+byte-equivalent to the original, append-only/idempotent/leak-free/confirm-gate-closure all confirmed; zero findings.
+Tests `pxc_promoteall` 10; promote/hubbadge regress green. **Next: more on-theme features.**
+
 ## ✅ v1.139.0 — P3.9: hub badges (at-a-glance connection degree) (2026-06-26)
 The always-on *structural* complement to the interaction-driven trio (hover-focus / trace / spotlight): while the
 connection layer is shown, each connected record card gets a small degree-count pill (top-left, color heating

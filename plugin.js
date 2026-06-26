@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.139.0';
+const PLEXUS_VERSION = '1.140.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6806,8 +6806,10 @@ class CanvasView {
   }
   // P3.4: promote an inferred ghost edge into a persistent, labeled "relates to" connector (APPEND-only; the ghost is removed
   // from the ephemeral set). The user can then retype the relationship via the connection-style popover.
-  _promoteGhost(ge) {
-    const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b || a.isDeleted || b.isDeleted) return;
+  // Build a real curved "relates to" connector from a ghost edge (APPEND-only: pushes the arrow, sets its label) and return
+  // it, or null if an endpoint is gone. Does NOT touch _ghostEdges / selection / save — the caller owns that bookkeeping.
+  _ghostToConnector(ge) {
+    const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b || a.isDeleted || b.isDeleted) return null;
     const preset = PXC_REL_PRESETS[0]; // relates-to
     const acx = a.x + Math.abs(a.width) / 2, acy = a.y + Math.abs(a.height) / 2, bcx = b.x + Math.abs(b.width) / 2, bcy = b.y + Math.abs(b.height) / 2;
     const ar = makeLinear(acx, acy, 'arrow', { stroke: preset.color, strokeWidth: 2 });
@@ -6817,10 +6819,30 @@ class CanvasView {
     ar.points = [[acx, acy], [mx + (-dy / len) * bend, my + (dx / len) * bend], [bcx, bcy]]; ar.startBinding = { elementId: a.id }; ar.endBinding = { elementId: b.id }; ar.endArrowhead = 'arrow'; ar.startArrowhead = null; ar.relType = preset.key; ar.strokeColor = preset.color; ar.lineStyle = preset.lineStyle; ar.curved = true;
     linearBBox(ar); this.scene.elements.push(ar);
     try { this._setConnLabelText(ar, preset.label); } catch (_e) {} // a real "relates to" midpoint label
-    this._ghostEdges = (this._ghostEdges || []).filter((g) => !((g.a === ge.a && g.b === ge.b) || (g.a === ge.b && g.b === ge.a))); // now a real connector → drop the ghost (a rebuild also excludes already-connected pairs)
+    return ar;
+  }
+  _dropGhostPair(ge) { this._ghostEdges = (this._ghostEdges || []).filter((g) => !((g.a === ge.a && g.b === ge.b) || (g.a === ge.b && g.b === ge.a))); } // now a real connector → drop the ghost (a rebuild also excludes already-connected pairs)
+  _promoteGhost(ge) {
+    const ar = this._ghostToConnector(ge); if (!ar) return;
+    this._dropGhostPair(ge);
     this.selected.clear(); this.selected.add(ar.id);
     this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Promoted to a “relates to” connection — open its style to retype the relationship.', dismissible: true }); } catch (_e) {}
+  }
+  // P3.10 "make all inferred links real": promote EVERY currently-shown ghost edge (type-filtered) to a real connector in one
+  // step — append-only, confirm-gated past 6 (it creates many arrows). After arranging pages, lock the inferred web in place.
+  _promoteAllGhosts() {
+    const snap = (this._ghostEdges || []).filter((ge) => { if (!ge || !this._ghostTypeOk(ge)) return false; const a = this._byId(ge.a), b = this._byId(ge.b); return a && b && !a.isDeleted && !b.isDeleted; });
+    if (!snap.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no inferred links to promote. Toggle on relational ghost-edges (or arrange related pages) first.', dismissible: true }); } catch (_e) {} return; }
+    const run = () => {
+      let made = 0; const dropped = new Set();
+      for (const ge of snap) { const ar = this._ghostToConnector(ge); if (ar) { made++; dropped.add(ge.a < ge.b ? ge.a + '|' + ge.b : ge.b + '|' + ge.a); } }
+      this._ghostEdges = (this._ghostEdges || []).filter((g) => !dropped.has(g.a < g.b ? g.a + '|' + g.b : g.b + '|' + g.a)); // drop every promoted pair in one pass
+      this.selected.clear(); this._updateBindings(); try { this._reindexBackrefs(); } catch (_e) {} this.dirty = true; this.scheduleSave();
+      try { this.plugin.ui.addToaster({ title: 'Promoted ' + made + ' inferred link' + (made === 1 ? '' : 's') + ' to real “relates to” connections.', dismissible: true }); } catch (_e) {}
+    };
+    if (snap.length > 6) { const a0 = this._byId(snap[0].a), sp = a0 ? this.camera.worldToScreen(a0.x + Math.abs(a0.width) / 2, a0.y) : { x: 200, y: 160 }; this._showNestingChoice('Promote ' + snap.length + ' inferred links to real connections?', [{ txt: 'Promote', fn: () => { this._closeRegionChoice(); run(); } }, { txt: 'Cancel', fn: () => this._closeRegionChoice() }], sp.x, sp.y); }
+    else run();
   }
   // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
   // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
@@ -8181,6 +8203,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Colours (Shade Master / schemes)', icon: 'ti-palette', onSelected: () => { const v = this._activeView(); if (v) v._openColorTool(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Relational ghost-edges (inferred ref/backref links)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._buildRelationalGhosts(); } }); // Obsidian/ExcaliBrain "show inferred links" — blue dashes between related-but-unconnected cards
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Make all inferred links real', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._promoteAllGhosts(); } }); // P3.10: batch-promote every shown ghost edge → real "relates to" connectors (append-only, confirm-gated past 6)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connection density (all ↔ hovered-only)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings; s.edgeDensity = (s.edgeDensity === 'focus') ? 'all' : 'focus'; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeDensity === 'focus' ? 'hovered-only (declutter)' : 'all shown') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Filter connections (all / references / semantic)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings, order = ['all', 'rel', 'semantic']; s.edgeTypes = order[(order.indexOf(s.edgeTypes || 'all') + 1) % 3]; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } const v = this._activeView(); let none = false; try { if (v && v._ghostEdges && v._ghostEdges.length && s.edgeTypes !== 'all') none = !v._ghostEdges.some((ge) => v._ghostTypeOk(ge)); } catch (_e) {} try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeTypes === 'rel' ? 'references only' : s.edgeTypes === 'semantic' ? 'semantic only' : 'all types') + (none ? ' (none in the current set — the ghost layer is the other kind)' : '') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5: honest when the active ghost set has no edges of the chosen kind (the rel/semantic builders replace each other)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });
