@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.155.0 — C12: "Comment on selected card" (one-step annotate) (2026-06-26)
+A convenience that streamlines the core annotate flow: with a single card selected, the command anchors a new
+whole-element comment to it and opens the composer in one step (vs. switch-to-comment-tool-then-click).
+`_commentOnSelection` gates to a single non-comment/arrow/line element, reuses `_createCommentAnchored({elementId}, cx, cy)`.
+The node test caught a real bug pre-review — `card.x + Math.abs(width)/2` mis-centers a flipped (negative-size) element →
+fixed to `card.x + card.width/2` (correct for both signs; and `_drawSpotlight`/`_drawGhostFocus`'s `abs` form is only safe
+because record cards are positive-size). Review: **SHIP, CLEAN** — no HIGH/MED; frame/board/image/text/record all resolve a
+pin via `_elBBox` (no detached comment), anchor matches the tool's card-body click ('element' kind), data-safe (append +
+compose, empty-cancel discards), no leak. Dropped the one LOW (dead `card.isDeleted` — `_singleSel`→`_byId` already
+filters). Tests `pxc_cmtonsel` 13; cmtsummary regress green. **Next: more on-theme features.**
+
 ## ✅ v1.154.0 — C11: copy comments as a review summary (markdown → clipboard) (2026-06-26)
 Completes the comment-review lifecycle (create → categorize → count → filter → focus → bulk-resolve → **export**): a
 command formats all comments into a markdown digest — `# Canvas review — N comments (M open)`, then `## Category (n)`

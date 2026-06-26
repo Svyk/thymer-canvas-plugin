@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.154.0';
+const PLEXUS_VERSION = '1.155.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4552,6 +4552,14 @@ class CanvasView {
     this._cmtBorn = this._cmtBorn || {}; this._cmtBorn[c.id] = this._now(); // C3 entrance pop
     this._openCommentThread(c.id, true); return c;
   }
+  // C12: comment on the single-selected card in one step (anchor a whole-element comment to it + open the composer) — faster
+  // than switch-to-comment-tool-then-click. Reuses _createCommentAnchored. A connector/comment isn't a sensible target.
+  _commentOnSelection() {
+    const card = this._singleSel();
+    if (!card || card.type === 'comment' || card.type === 'arrow' || card.type === 'line') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single card to comment on.', dismissible: true }); } catch (_e) {} return; } // _singleSel→_byId already excludes deleted
+    const cx = card.x + card.width / 2, cy = card.y + card.height / 2; // center via +w/2 (not abs) → correct for a flipped (negative-size) element too
+    this._createCommentAnchored({ elementId: card.id }, cx, cy); // whole-element anchor (no lineGuid/frac → 'element' kind)
+  }
   // ── thread popover (compose + replies) — cloned from the connection-style popover chrome ──
   _openCommentThread(id, compose) {
     const c = this._byId(id); if (!c || c.isDeleted) return;
@@ -8442,6 +8450,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Next unresolved comment', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, true); } }); // C5: review only the open comments
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Spotlight commented cards', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v._cmtFocus = !v._cmtFocus; v.dirty = true; if (v._cmtFocus) { try { this.ui.addToaster({ title: 'Dimming all but annotated cards. (Esc to clear.)', dismissible: true }); } catch (_e) {} } } } }); // C9: review focus — dim all but commented cards
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Copy comments as review summary', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._copyCommentsSummary(); } }); // C11: markdown digest → clipboard
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment on selected card', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentOnSelection(); } }); // C12: anchor a comment to the selected card + open the composer in one step
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
