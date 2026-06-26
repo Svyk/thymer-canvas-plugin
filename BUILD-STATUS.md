@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.117.0 — mind-map discoverability: toolbar button + hover tooltips + keyboard nav (2026-06-25)
+Follow-up to the user's "how do I build a mind map? I don't see a button" + "add tooltips on hover" + "shift-tab to go back,
+arrows to jump between nodes." Three changes, all UI/keyboard (no scene-data writes beyond the existing append-only `_newMindMap`):
+- **Toolbar "New mind map" button** (`ti-graph`, known-bundled) — added to `DEFAULT_TOOLBAR_ORDER`/`TOOLBAR_SPECIAL_LABEL`/
+  `toolbarItemIcon` + a builder in `_buildToolbar` that calls `_newMindMap()`. Was command-palette-only before.
+- **`_wireToolbarTips`** — instant styled hover tooltips (`.pxc-tip`) on every toolbar button; the native `title` delay is long/
+  unreliable in the Electron host. Reads each button's `title`, suppresses the native one while shown, restores on hide; disposer
+  in `_toolbarDisposers`; `_tipEl` reused across rebuilds and now removed on `destroy()`.
+- **Mind-map keyboard nav** — a selected mind-map node JUMPS between nodes on plain arrows (`_mmNav`; Ctrl/Cmd auto-centers)
+  instead of nudging; **Shift+Tab → parent node** (Tab still = add child + open edit). Non-mind-map selections nudge unchanged.
+Adversarial review: **SHIP** — title-leak, listener-leak, keydown-regression and Shift+Tab-guard classes all verified clean
+(disposers run before every rebuild + on destroy; `_isMM` can't NPE; root/deleted-parent guarded; `preventDefault` unconditional).
+Only LOW/cosmetic residuals. Tests: `pxc_mmkeys` 11; regressions `pxc_mmpaste` 18 / `pxc_aimindmap` 16 / `pxc_gridsnap` 13.
+Commit `71efc46`, pushed. Reinstall+reload to pick it up.
+
 ## ✅✅ MIND-MAP SHORT LOOP COMPLETE — 2/2 shipped (the rest was already at parity) (2026-06-25)
 The user asked to port the NotebookLM Obsidian-Excalidraw MindMap Builder features. The AUDIT found the Plexus mind-map
 builder **already ~at full parity** (keyboard flow Tab/Enter/Alt+C/X/V/Arrow, `_mmCycleLayout` right/down/radial/up/left tree
