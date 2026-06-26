@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.122.0';
+const PLEXUS_VERSION = '1.123.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -202,7 +202,7 @@ const CE_CONNECTOR_COLOR = '#f97316';
    transformers.js — keeps plugin.js lean, cold start untouched). */
 const _libCache = {};
 async function loadLib(url) { if (_libCache[url]) return _libCache[url]; _libCache[url] = await import(url); return _libCache[url]; }
-const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs', heic2any: 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/+esm' };
+const LIB = { polybool: 'https://cdn.jsdelivr.net/npm/polybooljs@1.2.0/+esm', katex: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/+esm', mermaid: 'https://cdn.jsdelivr.net/npm/mermaid@11/+esm', pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs', pdfWorker: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs', heic2any: 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/+esm' }; // D-A: pdfWorker pinned to the SAME version as pdfjs (a worker/main mismatch is a classic break)
 function shapePolygon(el) {
   const x = el.x, y = el.y, w = el.width, h = el.height, t = el.type;
   if (t === 'diamond') return [[x + w / 2, y], [x + w, y + h / 2], [x + w / 2, y + h], [x, y + h / 2]];
@@ -6214,23 +6214,47 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'LaTeX inserted.', dismissible: true }); } catch (_e) {}
   }
   // P2: PDF import (pdf.js, lazy) — render pages to images, stacked on the canvas.
+  // D-A: cross-runtime pdf.js worker. A cross-origin MODULE-worker URL is often blocked (Electron webSecurity / browser
+  // worker policy), so fetch the worker source once → a same-origin BLOB url. Cached on the plugin. false ⇒ main-thread render.
+  async _pdfSetupWorker(pdfjs) {
+    if (!pdfjs || !pdfjs.GlobalWorkerOptions) return false;
+    if (this.plugin._pdfWorkerUrl) { try { pdfjs.GlobalWorkerOptions.workerSrc = this.plugin._pdfWorkerUrl; } catch (_e) {} return true; }
+    try { const res = await fetch(LIB.pdfWorker); if (!res || !res.ok) return false; const src = await res.text(); if (!src || src.length < 100) return false; const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' })); this.plugin._pdfWorkerUrl = url; pdfjs.GlobalWorkerOptions.workerSrc = url; return true; } // a 4xx/5xx must NOT cache an HTML error body as the worker (would poison every import this session) — fall back to main-thread render
+    catch (_e) { return false; } // → getDocument({disableWorker:true}) (slower main-thread render, but correct on both runtimes)
+  }
+  // Render one PDF page to a webp blob (png fallback) at `scale`. Returns the blob or null.
+  async _pdfPageBlob(doc, p, scale) {
+    const page = await doc.getPage(p), vp = page.getViewport({ scale });
+    const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+    await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+    let blob = await new Promise((res) => { try { cv.toBlob(res, 'image/webp', 0.85); } catch (_e) { res(null); } });
+    if (!blob) blob = await new Promise((res) => { try { cv.toBlob(res, 'image/png'); } catch (_e) { res(null); } });
+    return blob;
+  }
+  // D-A: a PDF drop → a DOCUMENT — pages laid out in a clean vertical column (real page heights, not a magic gap), each a
+  // normal `type:'image'` element grouped under one `pdfgrp_<docId>` + tagged `el.pdf` so region/comment anchoring works for
+  // free and a later page-nav (D-C) can walk the doc. Reuses _addImageFromFile (webp asset + safe inline fallback + cache).
   async _addPdf(file, wx, wy) {
     let pdfjs; try { pdfjs = await loadLib(LIB.pdfjs); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: pdf.js failed to load.', dismissible: true }); } catch (_e) {} return; }
-    try { if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs'; } catch (_e) {}
+    const hasWorker = await this._pdfSetupWorker(pdfjs);
     try { this.plugin.ui.addToaster({ title: 'Plexus: importing PDF…', dismissible: true }); } catch (_e) {}
-    let doc; try { const buf = await file.arrayBuffer(); doc = await pdfjs.getDocument({ data: buf }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
-    const n = Math.min(doc.numPages, 20); let y = wy;
+    let doc; try { const buf = await file.arrayBuffer(); doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
+    const pageCount = doc.numPages, n = Math.min(pageCount, 20);
+    const docId = 'pdf' + Date.now().toString(36) + Math.floor(this._now()).toString(36);
+    const scale = (this.plugin._settings && this.plugin._settings.pdfScale) || 2, srcName = (file.name || 'document.pdf');
+    let top = wy; const GAP = 16;
     for (let p = 1; p <= n; p++) {
       try {
-        const page = await doc.getPage(p), vp = page.getViewport({ scale: (this.plugin._settings && this.plugin._settings.pdfScale) || 2 });
-        const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
-        await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
-        const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
-        if (blob) await this._addImageFromFile(new File([blob], 'pdf-' + p + '.png', { type: 'image/png' }), wx, y);
-        y += 520;
+        const blob = await this._pdfPageBlob(doc, p, scale); if (!blob) continue;
+        const el = await this._addImageFromFile(new File([blob], 'pdf-' + srcName.replace(/\.[a-z0-9]+$/i, '') + '-p' + p + '.webp', { type: blob.type || 'image/webp' }), wx, top);
+        // Pages are a DOCUMENT via el.pdf.docId (D-C page-nav / explode / stack walk it) — NOT el.groupIds: groupIds makes a
+        // single click select the whole unit (3336), which would break per-page click-to-comment + the rec-panel + single-page Cite.
+        if (el) { el.x = wx - el.width / 2; el.y = top; el.pdf = { docId, page: p, pageCount, srcName, renderScale: scale }; top += el.height + GAP; this.dirty = true; }
       } catch (_e) {}
     }
-    try { this.plugin.ui.addToaster({ title: n + ' PDF page(s) imported.', dismissible: true }); } catch (_e) {}
+    try { doc.destroy && doc.destroy(); } catch (_e) {} // free the parsed PDF (D-B keeps it alive for lazy pages)
+    this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: n + ' PDF page(s) imported' + (pageCount > n ? ' (first ' + n + ' of ' + pageCount + ' — large-PDF lazy load lands in a later build)' : '') + '.', dismissible: true }); } catch (_e) {} // honest about the 20-page cap (no silent truncation)
   }
   _importPdfPicker() {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
@@ -6244,19 +6268,18 @@ class CanvasView {
     inp.addEventListener('change', async () => {
       const file = inp.files && inp.files[0]; if (!file) return;
       let pdfjs; try { pdfjs = await loadLib(LIB.pdfjs); } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: pdf.js failed to load.', dismissible: true }); } catch (_e) {} return; }
-      try { if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs'; } catch (_e) {}
-      let doc; try { doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
-      const pageStr = await this._promptText('Which page? (1–' + doc.numPages + ')', '1'); if (pageStr == null) return;
+      const hasWorker = await this._pdfSetupWorker(pdfjs);
+      let doc; try { doc = await pdfjs.getDocument({ data: await file.arrayBuffer(), disableWorker: !hasWorker }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
+      const pageStr = await this._promptText('Which page? (1–' + doc.numPages + ')', '1'); if (pageStr == null) { try { doc.destroy && doc.destroy(); } catch (_e) {} return; }
       const p = Math.max(1, Math.min(doc.numPages, parseInt(pageStr, 10) || 1));
+      const scale = (this.plugin._settings && this.plugin._settings.pdfScale) || 2, srcName = (file.name || 'document.pdf');
       try {
-        const page = await doc.getPage(p), vp = page.getViewport({ scale: (this.plugin._settings && this.plugin._settings.pdfScale) || 2 });
-        const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
-        await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
-        const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+        const blob = await this._pdfPageBlob(doc, p, scale);
         const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-        if (blob) await this._addImageFromFile(new File([blob], 'pdf-p' + p + '.png', { type: 'image/png' }), c.x, c.y);
+        if (blob) { const el = await this._addImageFromFile(new File([blob], 'pdf-' + srcName.replace(/\.[a-z0-9]+$/i, '') + '-p' + p + '.webp', { type: blob.type || 'image/webp' }), c.x, c.y); if (el) { el.pdf = { docId: 'pdf' + Date.now().toString(36) + 'single', page: p, pageCount: doc.numPages, srcName, renderScale: scale }; this.dirty = true; this.scheduleSave(); } }
         try { this.plugin.ui.addToaster({ title: 'PDF page ' + p + ' imported.', dismissible: true }); } catch (_e) {}
       } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: page render failed.', dismissible: true }); } catch (_e) {} }
+      try { doc.destroy && doc.destroy(); } catch (_e) {}
     });
     inp.click();
   }
