@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.134.0';
+const PLEXUS_VERSION = '1.135.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6639,11 +6639,11 @@ class CanvasView {
   // P3.1 hover-focus (OVERLAY pass — redraws every frame, so it updates live on hover; the static bulk ghosts stay cached).
   // Hover a card that participates in ghost edges → re-draw ITS edges BRIGHT + SOLID over the faint static ones, and ring
   // the hovered + connected cards. Reuses the already-tracked _connHover. World-transformed ctx (same as the static ghosts).
-  _drawGhostFocus(ctx, z) {
+  _drawGhostFocus(ctx, z, d) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length || this._drawGesture) return;
     const hoverId = (this.tool === 'select' && !this.editingId && this._connHover && !this._connHover.isDeleted) ? this._connHover.id : null; if (!hoverId) return;
     const inc = this._ghostEdges.filter((ge) => (ge.a === hoverId || ge.b === hoverId) && this._ghostTypeOk(ge)); if (!inc.length) return; // hovered card has no (visible) ghost edge → nothing to focus (P3.5 type filter honored)
-    const farEnds = new Set(); ctx.save(); ctx.lineCap = 'round';
+    const farEnds = new Set(), labels = []; ctx.save(); ctx.lineCap = 'round';
     const flowT = ((this._now() % 1400) / 1400), heavyHub = inc.length > 12; // P3.2: particle parameter (0→1 every 1.4s); on a dense hub drop the per-particle shadow (60fps)
     for (const ge of inc) {
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
@@ -6659,10 +6659,18 @@ class CanvasView {
       const sx = (ge.a === hoverId) ? ax : bx, sy = (ge.a === hoverId) ? ay : by, ex = (ge.a === hoverId) ? bx : ax, ey = (ge.a === hoverId) ? by : ay;
       const u = 1 - flowT, px = u * u * sx + 2 * u * flowT * cxp + flowT * flowT * ex, py = u * u * sy + 2 * u * flowT * cyp + flowT * flowT * ey;
       ctx.beginPath(); ctx.arc(px, py, 4 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.95; if (!heavyHub) { ctx.shadowColor = pxcMixHex(ca, cb, 0.5); ctx.shadowBlur = 8; } ctx.fill(); ctx.shadowBlur = 0;
+      // EDGE LABELS (the azlen "what connects them"): the relationship from the HOVERED card's perspective, at the curve midpoint.
+      if (!heavyHub && d) { const isA = (ge.a === hoverId), out = isA ? ge.aRefsB : ge.bRefsA, inn = isA ? ge.bRefsA : ge.aRefsB; const text = (out && inn) ? 'linked' : out ? 'references' : inn ? 'referenced by' : 'related'; const lx = 0.25 * ax + 0.5 * cxp + 0.25 * bx, ly = 0.25 * ay + 0.5 * cyp + 0.25 * by; labels.push({ wx: lx, wy: ly, text }); }
     }
     ctx.shadowBlur = 0; ctx.lineWidth = 2.5 / z; ctx.strokeStyle = '#7c5cff'; ctx.globalAlpha = 0.9; // shadow off for the ring pass (belt-and-suspenders)
     const ring = (el) => { if (!el) return; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 4 / z, y - 4 / z, Math.abs(el.width) + 8 / z, Math.abs(el.height) + 8 / z, 9 / z); ctx.stroke(); };
     ring(this._byId(hoverId)); for (const id of farEnds) ring(this._byId(id));
+    // labels in SCREEN space (crisp) — a dark pill + light text at each focused edge's midpoint
+    if (labels.length) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = '600 ' + (11 * d) + 'px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+      for (const lb of labels) { const sp = this.camera.worldToScreen(lb.wx, lb.wy), cx = sp.x * d, cy = sp.y * d, pad = 6 * d, ch = 18 * d, tw = ctx.measureText(lb.text).width, cw = tw + pad * 2, rx = cx - cw / 2, ry = cy - ch / 2; ctx.globalAlpha = 0.96; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(rx, ry, cw, ch, 7 * d); else ctx.rect(rx, ry, cw, ch); ctx.fillStyle = '#1b1f2a'; ctx.fill(); ctx.lineWidth = 1 * d; ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.stroke(); ctx.fillStyle = '#e6e8ee'; ctx.fillText(lb.text, rx + pad, cy + 0.5 * d); }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
     ctx.globalAlpha = 1; ctx.restore();
     this.dirty = true; // P3.2: re-arm the loop so the particle keeps animating WHILE hovering; when hover clears, this isn't called → loop idles at 0% CPU
   }
@@ -6711,16 +6719,16 @@ class CanvasView {
     const onCanvas = new Set(guid2el.keys());
     const explicit = new Set(); // pairs already joined by a bound connector ("elA|elB" sorted)
     for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const a = e.startBinding && e.startBinding.elementId, b = e.endBinding && e.endBinding.elementId; if (a && b) explicit.add(a < b ? a + '|' + b : b + '|' + a); }
-    const pairs = new Set(); // related record-guid pairs ("gA|gB" sorted), both on-canvas
+    const pairs = new Set(), directed = new Set(); // pairs: related record-guid pairs ("gA|gB" sorted); directed: "src>dst" (src references dst) → the EDGE LABEL direction
     for (const c of cards) {
       let rec = null; try { rec = await this.plugin.data.getRecord(c.recordGuid); } catch (_e) {}
       if (!rec) continue; const rel = new Set();
-      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) rel.add(s.text.guid); } catch (_e) {} // forward refs
-      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) rel.add(r.guid); } } catch (_e) {} // backrefs
+      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) { rel.add(s.text.guid); directed.add(c.recordGuid + '>' + s.text.guid); } } catch (_e) {} // forward refs (C references the target)
+      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) { rel.add(r.guid); directed.add(r.guid + '>' + c.recordGuid); } } } catch (_e) {} // backrefs (the other record references C)
       for (const g of rel) { if (g === c.recordGuid) continue; pairs.add(c.recordGuid < g ? c.recordGuid + '|' + g : g + '|' + c.recordGuid); }
     }
     const edges = [];
-    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true }); } // skip pairs already explicitly connected
+    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]) }); } // aRefsB/bRefsA → the hover label ("references" / "referenced by" / "linked")
     this._ghostEdges = edges; this._showGhosts = true; this.dirty = true;
     if (!quiet) try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {} // P3.3: callers that already toast (Arrange parallel) pass quiet=true to avoid a double toaster
   }
@@ -7632,7 +7640,7 @@ class CanvasView {
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
     // P3.1: ghost-edge hover focus — bright/solid focused edges + rings, on the OVERLAY (live on hover; static bulk stays cached).
-    if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
