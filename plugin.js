@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.121.0';
+const PLEXUS_VERSION = '1.122.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3246,13 +3246,14 @@ class CanvasView {
     const onDown = (e) => {
       host.focus();
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // self-heal: a prior drag that was cancelled (no pointerup) left the static-layer blit locked on
+      if (this._cmtPinDown) this._cmtPinDown = null; // C3 self-heal: a prior comment-pin press that never released (cancelled) must not wedge this gesture
       if (this._panMode) { this._panMode = false; if (this._panEndT) { clearTimeout(this._panEndT); this._panEndT = null; } } // a new gesture (drag/click) ends any wheel-pan still in compositor mode → the next render re-rasters crisp (HIGH: review)
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
       // C0: comment pin → open its thread. Single click, before drawing + before the xref pins (comment pins sit on top).
       if (this._commentPins && this._commentPins.length && (e.button === 0 || e.button === -1) && !this._present) {
         const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top;
-        for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} this._openCommentThread(pin.id, false); return; } }
+        for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} const cc = this._byId(pin.id); this._cmtPinDown = { id: pin.id, sx: e.clientX, sy: e.clientY, pinDx0: (cc && cc.pinDx) || 0, pinDy0: (cc && cc.pinDy) || 0, moved: false }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // C3: start a potential pin DRAG (nudge); a click with no drag opens the thread (handled in onUp)
       }
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
       // last frame (screen-space CSS coords), so an in-image region pin is clickable right on its spot.
@@ -3364,6 +3365,7 @@ class CanvasView {
         const anchor = (hit && hit.type !== 'comment') ? this._bindingFor(hit, down.x, down.y) : null;
         const c = makeComment(anchor, down.x, down.y, { color: '#f59e0b', authorGuid: null });
         this.scene.elements.push(c); this.selected.clear(); this.dirty = true; this.scheduleSave();
+        this._cmtBorn = this._cmtBorn || {}; this._cmtBorn[c.id] = this._now(); // C3: entrance-pop animation
         this._openCommentThread(c.id, true); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return;
       } else if (this.tool === 'datacore') {
         this.tool = 'select'; this._syncToolbar(); this._insertQueryNode('dc: @task', down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-4: drop a Datacore query node; selecting it mounts the live interactive view
@@ -3380,7 +3382,20 @@ class CanvasView {
     };
     const onMove = (e) => {
       if (this._miniDragging) { const rct = this.wrap.getBoundingClientRect(); this._miniTeleport(e.clientX - rct.left, e.clientY - rct.top); return; } // MINIMAP drag
+      if (this._cmtPinDown) { // C3: comment pin drag → offset pinDx/pinDy (world delta); past a 4px threshold it's a drag, not a click
+        const dx = e.clientX - this._cmtPinDown.sx, dy = e.clientY - this._cmtPinDown.sy;
+        if (!this._cmtPinDown.moved && Math.hypot(dx, dy) > 4) { this._cmtPinDown.moved = true; try { this._hideCommentPreview(); } catch (_e) {} }
+        if (this._cmtPinDown.moved) { const c = this._byId(this._cmtPinDown.id); if (c) { const z = this.camera.zoom || 1; c.pinDx = this._cmtPinDown.pinDx0 + dx / z; c.pinDy = this._cmtPinDown.pinDy0 + dy / z; this.dirty = true; } }
+        return;
+      }
       if (!mode) { // hover (no drag): cursor over an inline ref / a connect-nub
+        // C3: hovering a comment pin → a compact preview popover (author · first line · reply count); also tracks the hovered pin for the ring.
+        if (this.tool === 'select' && !this.editingId && !this._present && this._commentPins && this._commentPins.length) {
+          const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top; let overC = null;
+          for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { overC = pin.id; break; } }
+          if (overC !== this._cmtHoverId) { this._cmtHoverId = overC; this.dirty = true; if (overC) this._showCommentPreview(this._byId(overC), e.clientX, e.clientY); else this._hideCommentPreview(); }
+          if (overC) { if (this._refHoverKey) { this._refHoverKey = null; this._hideRefPreview(); } if (this._connHover) { this._connHover = null; } if (this._connInfoHover) { this._connInfoHover = null; } return; } // over a pin → tear down any @ref/connection hover (else two previews) and skip the ref-hover/nub logic below
+        } else if (this._cmtHoverId) { this._cmtHoverId = null; this._hideCommentPreview(); this.dirty = true; }
         if (this.tool === 'select' && !this.editingId && !this._present && !this._eyedrop) {
           const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
           const over = hit && hit.type === 'text' && hit.runs && hit.runs.length && hitInlineRef(hit, w.x, w.y);
@@ -3404,7 +3419,7 @@ class CanvasView {
         } else { if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._connInfoHover) { this._connInfoHover = null; this.dirty = true; } if (this._refHoverKey) { this._refHoverKey = null; this._hideRefPreview(); } }
         return;
       }
-      moved = true; clearLP(); this._connHover = null; this._connInfoHover = null; if (this._refHoverKey) { this._refHoverKey = null; this._hideRefPreview(); } // S10: any drag cancels a pending long-press open; also hide the connect-nubs + hover info card + ref preview during a drag
+      moved = true; clearLP(); this._connHover = null; this._connInfoHover = null; if (this._refHoverKey) { this._refHoverKey = null; this._hideRefPreview(); } if (this._cmtHoverId) { this._cmtHoverId = null; this._hideCommentPreview(); } // S10: any drag cancels a pending long-press open; also hide the connect-nubs + hover info card + ref/comment preview during a drag
       if (mode === 'pen' && e.pointerType === 'touch') return; // S4: palm rejection — ignore stray touch during a pen stroke
       if (mode === 'pan') { this.camera.x = cx0 - (e.clientX - sx) / this.camera.zoom; this.camera.y = cy0 - (e.clientY - sy) / this.camera.zoom; this._panMode = true; this._lastCamChange = this._now(); this.dirty = true; return; } // _panMode → render() translates the oversized layer via CSS transform (compositor pan), no raster
       const w = this._worldAt(e);
@@ -3432,6 +3447,12 @@ class CanvasView {
     };
     const onUp = (e) => {
       if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
+      if (this._cmtPinDown) { // C3: end a comment-pin gesture — a drag committed the nudge (scene-only); a click opens the thread
+        const pd = this._cmtPinDown; this._cmtPinDown = null; try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
+        if (pd.moved) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; try { this._scheduleCommentMirror(pd.id); } catch (_e) {} } // persist the scene + refresh the mirror's Anchor Data pinDx/pinDy (debounced); skip reindex (the backref label is unchanged by a nudge)
+        else { this._openCommentThread(pd.id, false); }
+        return;
+      }
       if (!mode) return; clearLP(); // S10: a quick tap-release never triggers the long-press open
       if (mode === 'create' && created) {
         normRect(created);
@@ -3636,7 +3657,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -4369,6 +4390,21 @@ class CanvasView {
     if (!anchor) { const r = this._commentAnchorRect(c); if (r) anchor = { region: { x: r.x - 24, y: r.y - 24, w: (r.w || 0) + 48, h: (r.h || 0) + 48 } }; }
     if (anchor) { try { this._flashAnchor(anchor); } catch (_e) {} }
   }
+  // C3: a compact hover preview on a comment pin (author · first line · reply count) — pointer-events:none, never blocks.
+  _showCommentPreview(c, cx, cy) {
+    this._hideCommentPreview(); if (!c) return;
+    const pop = document.createElement('div'); pop.className = 'pxc-refpreview'; this._cmtPreviewEl = pop; // reuses the global ref-preview chrome (dark, fixed, pointer-events:none) for consistency with @ref previews
+    const root = c.thread && c.thread[0], n = (c.thread && c.thread.length) || 0;
+    const title = document.createElement('div'); title.className = 'pxc-rp-title'; title.textContent = '💬 ' + (root ? (root.author || 'You') : 'New comment') + (c.resolved ? ' · resolved' : ''); pop.appendChild(title);
+    const body = document.createElement('div'); body.className = 'pxc-rp-body';
+    const t = document.createElement('div'); t.className = 'pxc-rp-line'; t.textContent = root ? (root.text || '') : '(empty — click to write)'; body.appendChild(t);
+    if (n > 1) { const r = document.createElement('div'); r.className = 'pxc-rp-line'; r.textContent = (n - 1) + ' repl' + (n - 1 === 1 ? 'y' : 'ies'); body.appendChild(r); }
+    pop.appendChild(body); document.body.appendChild(pop);
+    const pw = pop.offsetWidth || 240, ph = pop.offsetHeight || 70, vw = window.innerWidth, vh = window.innerHeight;
+    pop.style.left = Math.max(8, Math.min(vw - pw - 8, cx + 14)) + 'px';
+    pop.style.top = Math.max(8, Math.min(vh - ph - 8, cy + 16)) + 'px';
+  }
+  _hideCommentPreview() { if (this._cmtPreviewEl) { try { this._cmtPreviewEl.remove(); } catch (_e) {} this._cmtPreviewEl = null; } }
   // ── thread popover (compose + replies) — cloned from the connection-style popover chrome ──
   _openCommentThread(id, compose) {
     const c = this._byId(id); if (!c || c.isDeleted) return;
@@ -4496,6 +4532,7 @@ class CanvasView {
       const t2 = document.createElement('div'); t2.className = 'pxc-cmt-rmeta'; t2.textContent = (root ? (root.author || 'You') + ' · ' + pxcRelTime(root.ts) : '') + ((c.thread && c.thread.length > 1) ? ' · ' + (c.thread.length - 1) + ' repl' + (c.thread.length - 1 === 1 ? 'y' : 'ies') : '') + (detached ? ' · detached' : ''); mid.appendChild(t2);
       row.appendChild(mid);
       row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (!detached) this._jumpToComment(c); this._openCommentThread(c.id, false); });
+      const _id = c.id; row.addEventListener('mouseenter', () => { this._cmtHoverId = _id; this.dirty = true; }); row.addEventListener('mouseleave', () => { if (this._cmtHoverId === _id) { this._cmtHoverId = null; this.dirty = true; } }); // C3: rail-row hover rings the pin on the canvas
       ul.appendChild(row);
     }
     box.appendChild(ul);
@@ -7415,10 +7452,18 @@ class CanvasView {
       const cs = this._comments();
       if (cs.length) {
         ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
+        const now = this._now();
         for (const c of cs) {
           const sp = this._commentPinScreen(c); if (!sp) continue;
           const cx = sp.x * d, cy = sp.y * d, bw = 24 * d, bh = 19 * d, rx = cx + 6 * d, ry = cy - bh - 6 * d;
-          const col = c.color || '#f59e0b'; ictx.globalAlpha = c.resolved ? 0.4 : 1;
+          const col = c.color || '#f59e0b';
+          let scale = 1; const born = this._cmtBorn && this._cmtBorn[c.id]; // C3: entrance pop (0.55→1 over 160ms, ease-out-cubic)
+          if (born) { const t = (now - born) / 160; if (t < 1) { scale = 0.55 + 0.45 * (1 - Math.pow(1 - t, 3)); this.dirty = true; } else { try { delete this._cmtBorn[c.id]; } catch (_e) {} } }
+          const cxC = rx + bw / 2, cyC = ry + bh / 2;
+          ictx.save();
+          if (scale !== 1) { ictx.translate(cxC, cyC); ictx.scale(scale, scale); ictx.translate(-cxC, -cyC); }
+          ictx.globalAlpha = c.resolved ? 0.4 : 1;
+          if (this._cmtHoverId === c.id && this._cmtPopId !== c.id) { ictx.save(); ictx.strokeStyle = col; ictx.globalAlpha = 0.5; ictx.lineWidth = 6 * d; this._rrect(ictx, rx - 2 * d, ry - 2 * d, bw + 4 * d, bh + 4 * d, 8 * d); ictx.stroke(); ictx.restore(); ictx.globalAlpha = c.resolved ? 0.4 : 1; } // C3: soft hover ring (canvas or rail-row hover)
           ictx.beginPath(); ictx.moveTo(rx + 7 * d, ry + bh); ictx.lineTo(rx + 2 * d, ry + bh + 7 * d); ictx.lineTo(rx + 14 * d, ry + bh); ictx.closePath(); ictx.fillStyle = col; ictx.fill(); // tail
           this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.fillStyle = col; ictx.fill();
           ictx.lineWidth = 1.4 * d; ictx.strokeStyle = 'rgba(255,255,255,0.92)'; this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.stroke();
@@ -7427,7 +7472,7 @@ class CanvasView {
           if (c.resolved) { ictx.font = '700 ' + (12 * d) + 'px system-ui, sans-serif'; ictx.fillText('✓', rx + bw / 2, ry + bh / 2 + 0.5 * d); }
           else if (n > 1) { ictx.font = '700 ' + (11 * d) + 'px system-ui, sans-serif'; ictx.fillText(String(n), rx + bw / 2, ry + bh / 2 + 0.5 * d); }
           else { ictx.beginPath(); ictx.arc(rx + bw / 2, ry + bh / 2, 2.6 * d, 0, 7); ictx.fill(); }
-          ictx.globalAlpha = 1;
+          ictx.restore(); ictx.globalAlpha = 1;
           this._commentPins.push({ x: (rx + bw / 2) / d, y: (ry + bh / 2) / d, r: 15, id: c.id });
         }
         ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
@@ -7647,7 +7692,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
