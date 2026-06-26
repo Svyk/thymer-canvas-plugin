@@ -10,13 +10,14 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.119.0';
+const PLEXUS_VERSION = '1.120.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
 const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
+const COMMENTS_COLLECTION = 'Canvas Comments'; // C1: the durable mirror for anchored comments (created via MCP; the plugin only writes records)
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
 // SCALE Phase 2: image-asset anchoring is SHARDED across these many-file properties on the backing drawing. This is a
@@ -1067,6 +1068,8 @@ let _fileIdC = 0;
 function newFileId() { return 'f' + Date.now().toString(36) + (_fileIdC++).toString(36); }
 // C0: relative time for comment bubbles/rail ("just now", "5m", "3h", "2d").
 function pxcRelTime(ts) { if (!ts) return ''; const s = Math.max(0, (Date.now() - ts) / 1000); if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm'; if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd'; }
+// C1: local-Pacific today as YYYY-MM-DD (for DateTime.parseDateTimeString — never hand-build a datetime with empty `formatted`).
+function pxcTodayISO() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 // SCALE/relational: read a record-relation property's target guids robustly. PluginProperty.values() may yield guid
 // strings, {guid} objects, or a one-element array holding a JSON-string of guids (how an MCP-written relation lands);
 // linkedRecords() returns [] for stored-but-unresolved relations (the gotcha), so we parse values() instead.
@@ -4351,7 +4354,7 @@ class CanvasView {
   }
   _commentAuthorName() { try { const us = this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers(); const u = us && us[0]; if (u) return (u.getName && u.getName()) || u.name || 'You'; } catch (_e) {} return 'You'; }
   // The single seam every comment mutation flows through — C0 just persists the scene; C1 will also enqueue the Thymer mirror here.
-  _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ }
+  _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ try { if (c) this._scheduleCommentMirror(c.id); } catch (_e) {} } // C1: also enqueue the durable Thymer mirror (debounced)
   // Fly the camera to a comment's anchor + pulse it (reuses the cross-ref flash machinery).
   _jumpToComment(c) {
     if (!c) return; const b = c.anchor; let anchor = null;
@@ -4499,6 +4502,104 @@ class CanvasView {
     this.wrap.appendChild(box);
   }
   _closeCommentRailEl() { if (this._cmtRailEl) { try { this._cmtRailEl.remove(); } catch (_e) {} this._cmtRailEl = null; } }
+  // ── C1: durable Thymer mirror (scene = hot source of truth; a "Canvas Comments" record = durable, queryable, cross-surface mirror) ──
+  // The anchor's choice kind for the record (lets a query reason about the anchor without parsing JSON).
+  _commentAnchorKind(c) { const b = c && c.anchor; if (!b || !b.elementId) return 'free'; if (b.lineGuid) return 'line'; if (b.refGuidTarget) return 'ref'; if (b.frac) return 'region'; return 'element'; }
+  // The note/record the anchor points AT (for the cross-surface "Commented Record" relation) — only when the anchor targets a record/line/task card.
+  _commentedRecordGuid(c) { const b = c && c.anchor; if (!b || !b.elementId) return null; const el = this._byId(b.elementId); if (!el || el.isDeleted) return null; return el.recordGuid || null; }
+  // Enqueue a comment for the debounced mirror flush (coalesced; one flush per ~800ms).
+  _scheduleCommentMirror(id) {
+    if (this.destroyed || !id) return;
+    if (!this._cmtMirrorQ) this._cmtMirrorQ = new Set();
+    this._cmtMirrorQ.add(id);
+    if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT);
+    this._cmtMirrorT = setTimeout(() => { this._cmtMirrorT = null; this._flushCommentMirror(); }, 800);
+  }
+  async _flushCommentMirror() {
+    if (this.destroyed) return;
+    const q = this._cmtMirrorQ; this._cmtMirrorQ = new Set(); if (!q || !q.size) return;
+    // Resolve WITHOUT _byId's isDeleted filter — a DELETED comment must still reach _mirrorComment so its trash branch runs.
+    for (const id of q) { try { const c = (this.scene.elements || []).find((e) => e && e.id === id && e.type === 'comment'); if (c) await this._mirrorComment(c); } catch (_e) {} if (this.destroyed) return; }
+  }
+  // Set a record-relation property to a single target guid — the verified set-OBJECT→read-back-pxcRelValues→retry-with-guid idiom.
+  async _setRel(rec, name, guid) {
+    if (!rec || !guid) return false;
+    let p = null; try { p = rec.prop(name); } catch (_e) {}
+    if (!p || !(p.set || p.addValue)) return false;
+    let ok = false; try { ok = pxcRelValues(p).includes(guid); } catch (_e) {} if (ok) return true; // already set
+    let recObj = null; try { recObj = await getRecordPoll(this.plugin, guid, 3); } catch (_e) {}
+    const put = (val) => { try { if (p.set) p.set(val); else p.addValue(val); } catch (_e) {} };
+    put(recObj || guid);
+    for (let i = 0; i < 3 && !ok; i++) { try { ok = pxcRelValues(p).includes(guid); } catch (_e) {} if (!ok) { await sleep(90); if (i === 1) put(guid); } }
+    return ok;
+  }
+  // Mirror ONE comment to its Canvas Comments record. Create-once (in-flight guarded), then idempotent property sync +
+  // APPEND-ONLY reply lines (dedup against the record's current body-line count). Scene stays the source of truth.
+  async _mirrorComment(c) {
+    if (!c || c.type !== 'comment') return;
+    const col = await this.plugin._commentsCollection(); if (!col) return; // no mirror collection → scene-only, no-op
+    const sid = c.id;
+    if (!this._cmtMirrorInflight) this._cmtMirrorInflight = new Map();
+    if (this._cmtMirrorInflight.has(sid)) { try { await this._cmtMirrorInflight.get(sid); } catch (_e) {} } // serialize concurrent runs for the same comment (create-once)
+    const run = (async () => {
+      // DELETE → trash the mirror record (best-effort); never block the scene.
+      if (c.isDeleted) { if (c.commentGuid) { try { const r = await getRecordPoll(this.plugin, c.commentGuid, 3); if (r && r.trash) r.trash(); } catch (_e) {} } return; }
+      const root = (c.thread && c.thread[0]) || null, rootText = root ? (root.text || '') : '';
+      let rec = null, created = false;
+      if (c.commentGuid) { try { rec = await getRecordPoll(this.plugin, c.commentGuid, 4); } catch (_e) {} }
+      if (!rec) {
+        const title = (rootText || 'Canvas comment').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Canvas comment';
+        let g = null; try { g = col.createRecord(title); } catch (_e) {}
+        if (typeof g !== 'string') return;
+        rec = await getRecordPoll(this.plugin, g, 8); if (!rec) return;
+        created = true; c.commentGuid = g; this.dirty = true; this.scheduleSave(); // persist the join NOW (kill-safety: reconcile rejoins via Scene Element Id + Drawing even if this write is lost)
+      }
+      // BOTH RECONCILE KEYS FIRST (Scene Element Id + the Drawing relation) — write them before any other property so a kill
+      // mid-flush can NEVER leave a record that reconcile can't match (which would orphan it + create a duplicate next load).
+      if (created || !(this._propText(rec, 'Scene Element Id'))) { try { rec.prop('Scene Element Id').set(sid); } catch (_e) {} }
+      await this._setRel(rec, 'Drawing', this.recordGuid);
+      if (created) {
+        try { const cp = rec.prop('Created At'); if (cp) cp.set(DateTime.parseDateTimeString(pxcTodayISO()).value()); } catch (_e) {} // create-only — never overwritten
+        try { const us = this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers(); const u = us && us[0]; const ap = rec.prop('Author'); if (u && ap && (ap.set || ap.addValue)) { if (ap.set) ap.set(u); else ap.addValue(u); } } catch (_e) {}
+      }
+      // idempotent property sync (cheap; runs every flush)
+      try { rec.prop('Comment Text').set(rootText); } catch (_e) {}
+      try { rec.prop('Status').setChoice(c.resolved ? 'resolved' : 'open'); } catch (_e) {}
+      try { rec.prop('Anchor Kind').setChoice(this._commentAnchorKind(c)); } catch (_e) {}
+      try { rec.prop('Anchor Data').set(JSON.stringify({ anchor: c.anchor || null, pinDx: c.pinDx || 0, pinDy: c.pinDy || 0 })); } catch (_e) {}
+      const noteGuid = this._commentedRecordGuid(c); if (noteGuid) await this._setRel(rec, 'Commented Record', noteGuid);
+      // thread replies → body lines, APPEND-ONLY (dedup against the record's CURRENT body-line count → idempotent + kill-safe)
+      let items = []; try { items = await rec.getLineItems() || []; } catch (_e) {}
+      const have = items.length, thread = c.thread || [];
+      for (let i = have; i < thread.length; i++) { const m = thread[i] || {}; const when = (() => { try { return new Date(m.ts || Date.now()).toISOString().slice(0, 16).replace('T', ' '); } catch (_e) { return ''; } })(); const line = (m.author || 'You') + (when ? ' · ' + when : '') + ' — ' + (m.text || ''); try { await rec.createLineItem(null, null, 'text', [{ type: 'text', text: line }], null); } catch (_e) {} }
+    })();
+    this._cmtMirrorInflight.set(sid, run);
+    try { await run; } finally { this._cmtMirrorInflight.delete(sid); }
+  }
+  _propText(rec, name) { try { const p = rec.prop(name); if (p && p.text) { const v = p.text(); if (v != null) return String(v); } } catch (_e) {} return ''; }
+  // Cold-start: rejoin scene comments to their existing mirror records (by Scene Element Id) so a kill between record-create
+  // and guid-writeback never dupes; enqueue a create for any never-mirrored comment. Runs once after the scene loads.
+  async _reconcileComments() {
+    if (this.destroyed) return;
+    const comments = this._comments(); if (!comments.length) return;
+    const col = await this.plugin._commentsCollection(); if (!col) return;
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) {}
+    const bySid = new Map();
+    for (const r of recs) {
+      if (!r || !r.guid) continue;
+      let dr = []; try { dr = pxcRelValues(r.prop('Drawing')); } catch (_e) {}
+      if (!dr.includes(this.recordGuid)) continue; // only THIS drawing's comment records
+      const sid = this._propText(r, 'Scene Element Id'); if (sid && !bySid.has(sid)) bySid.set(sid, r.guid);
+    }
+    let changed = false;
+    for (const c of comments) {
+      if (c.commentGuid) continue;
+      const g = bySid.get(c.id);
+      if (g) { c.commentGuid = g; changed = true; } // rejoin to the existing record
+      else this._scheduleCommentMirror(c.id); // never mirrored → create
+    }
+    if (changed) { this.dirty = true; this.scheduleSave(); }
+  }
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
   // ── EDIT-4c: a LIVE interactive Datacore view mounted over a selected dc: query node (via window.__plexusDatacore.mountView) ──
   _closeDcOverlay() { if (this._dcMounted) { try { this._dcMounted.destroy && this._dcMounted.destroy(); } catch (_e) {} this._dcMounted = null; } if (this._dcOverlayEl) { try { this._dcOverlayEl.remove(); } catch (_e) {} this._dcOverlayEl = null; } this._dcOverlayId = null; }
@@ -7019,6 +7120,7 @@ class CanvasView {
     this._committed = JSON.stringify(this.scene);
     try { this._updateBindings(); } catch (_e) {} // CONNECTIONS Phase 4: settle bindings + build the line/region flag-target maps on open (so the blue flag shows without waiting for the first edit)
     try { this._reindexBackrefs(); } catch (_e) {} // A1 (round 3): rebuild THIS drawing's backref sub-map from live elements on OPEN — self-heals orphaned/stale connector entries left by deletions in a prior session (was only rebuilt in saveNow)
+    try { setTimeout(() => { if (!this.destroyed) this._reconcileComments().catch(() => {}); }, 1200); } catch (_e) {} // C1: rejoin/seed comment mirrors a moment after load (deferred, non-blocking; backing + scene settled by then)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -7538,7 +7640,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -7546,7 +7648,7 @@ class Plugin extends AppPlugin {
   onLoad() {
     try { window.__plexusCanvas && window.__plexusCanvas.dispose(); } catch (_e) {}
     const reg = freshRegistry(); this._reg = reg;
-    this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._imgRefClip = null;
+    this._pendingQueue = []; this._views = new Set(); this._drawingsCol = null; this._commentsCol = null; this._imgRefClip = null;
     this._imgCache = new Map(); // S9: shared bounded LRU decode cache (one Image per fileId across all views)
     this._settings = loadPlexusSettings();
     this._ontology = loadPlexusOntology(); // IO-3: shared collection/relation ontology
@@ -7840,6 +7942,12 @@ class Plugin extends AppPlugin {
     const cols = await this.data.getAllCollections();
     this._drawingsCol = (cols || []).find((c) => c.getName && c.getName() === DRAWINGS_COLLECTION) || null;
     return this._drawingsCol;
+  }
+  async _commentsCollection() { // C1: the "Canvas Comments" mirror collection (find-by-name, cached). Null ⇒ stay scene-only (graceful).
+    if (this._commentsCol) return this._commentsCol;
+    let cols = []; try { cols = await this.data.getAllCollections(); } catch (_e) {}
+    this._commentsCol = (cols || []).find((c) => c.getName && c.getName() === COMMENTS_COLLECTION) || null;
+    return this._commentsCol;
   }
   // SCALE/backing: scan Plexus Drawings ONCE (cached) → the set of drawing guids + a {sourceNoteGuid → drawingGuid}
   // map (from each drawing's `Source Note` relation). Powers "is this a drawing?" + "which drawing backs note H?".
