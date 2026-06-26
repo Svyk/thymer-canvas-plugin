@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.151.0 — C8: @mention people in comments (2026-06-26)
+The collaborative dimension of @round: in the comment composer, typing `@name` pops a dropdown of workspace people
+(`getActiveUsers()` — SYNC, so no async picker), and ArrowUp/Down + Enter/Tab/click inserts "@Name " and records the
+person's guid on `c.mentions` (scene-only; cross-surface relation deferred — needs an MCP-created property). Pure helpers
+`pxcMentionToken` (email-@ excluded via `(?:^|\s)@`, contiguous token, ReDoS-safe bounded regex) / `pxcFilterMentions`
+(prefix-first) / `pxcInsertMention` (no double-space). The node test caught 2 real bugs pre-review (space-in-token broke
+"trailing space ends mention"; double-space on mid-text insert) — both fixed. Review: **well-built**, caught **1 MED** —
+`mentPick` mutated `c.mentions` without persisting (a pick-then-close on an existing thread could lose it) → fixed with
+`dirty`+`scheduleSave` (not `_commentChanged`, which has no mirror surface for mentions); 2 LOW deferred-work flags noted.
+Keydown no-double-action (Enter inserts, doesn't also send), mousedown-not-blur, scene-only (NOT mirrored — no unknown
+`Mentions` property write), graceful-when-no-users, no leak all confirmed. Tests `pxc_mention` 14; cmtcat/cmtbadge regress green. **Next: more on-theme features.**
+
 ## ✅ v1.150.0 — C7: comment-count badges on cards (see annotated records at a glance) (2026-06-26)
 Bridges both pillars: any card (or PDF page / text note / image) with anchored comments shows a small amber speech-bubble
 pill + count at its top-right, dimmed when all those comments are resolved — the @round "which records carry annotations"

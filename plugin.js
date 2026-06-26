@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.150.0';
+const PLEXUS_VERSION = '1.151.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -344,6 +344,25 @@ const PXC_CMT_CATEGORIES = [
 function pxcCommentCategory(c) {
   if (c && c.category) { const m = PXC_CMT_CATEGORIES.find((x) => x.key === c.category); if (m) return m; }
   const byCol = c && c.color && PXC_CMT_CATEGORIES.find((x) => x.color === c.color); return byCol || PXC_CMT_CATEGORIES[0];
+}
+// C8 @mention: the active "@token" being typed immediately before the caret (the `@` must start the text or follow whitespace,
+// so an email's @ doesn't trigger). Returns {at, token} (at = index of the `@`) or null. Pure.
+function pxcMentionToken(text, caret) {
+  const before = (text || '').slice(0, caret == null ? (text || '').length : caret);
+  const m = before.match(/(?:^|\s)@([\w.\-]{0,40})$/); if (!m) return null; // token is contiguous (no spaces) so a trailing space ENDS the mention; multi-word names still match via includes()
+  return { at: before.length - m[1].length - 1, token: m[1] };
+}
+// Candidates whose name matches the token (case-insensitive contains), prefix-matches first, capped. Pure.
+function pxcFilterMentions(candidates, token, cap) {
+  const t = (token || '').trim().toLowerCase(), cm = cap || 8;
+  const arr = (candidates || []).filter((u) => u && u.name && (!t || u.name.toLowerCase().includes(t)));
+  arr.sort((a, b) => { const ap = a.name.toLowerCase().startsWith(t) ? 0 : 1, bp = b.name.toLowerCase().startsWith(t) ? 0 : 1; return ap - bp || a.name.localeCompare(b.name); });
+  return arr.slice(0, cm);
+}
+// Replace the `@`+token span (at..at+1+tokenLen) with "@Name " and return the new text + caret. Pure.
+function pxcInsertMention(text, at, tokenLen, name) {
+  const t = text || '', tail = t.slice(at + 1 + tokenLen), insert = '@' + name + (tail.startsWith(' ') ? '' : ' '); // no double space when inserting before existing text
+  return { text: t.slice(0, at) + insert + tail, caret: at + insert.length };
 }
 const FILLS = {
   '#1e1e1e': 'transparent', '#64748b': '#f1f5f9', '#7c5cff': '#efeaff', '#6366f1': '#e0e7ff',
@@ -4458,6 +4477,13 @@ class CanvasView {
     return this.camera.worldToScreen(wx, wy);
   }
   _commentAuthorName() { try { const us = this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers(); const u = us && us[0]; if (u) return (u.getName && u.getName()) || u.name || 'You'; } catch (_e) {} return 'You'; }
+  // C8: the @-mention candidates = workspace people (getActiveUsers is sync → no async picker). Cached for the session.
+  _mentionCandidates() {
+    if (this._mentionCache) return this._mentionCache;
+    const out = [], seen = new Set();
+    try { const us = (this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers()) || []; for (const u of us) { let name = ''; try { name = (u.getName && u.getName()) || u.name || ''; } catch (_e) {} let guid = null; try { guid = (u.getGuid && u.getGuid()) || u.guid || u.id || null; } catch (_e) {} name = (name || '').trim(); if (name && !seen.has(name)) { seen.add(name); out.push({ name, guid: guid || name }); } } } catch (_e) {}
+    this._mentionCache = out; return out;
+  }
   // The single seam every comment mutation flows through — C0 just persists the scene; C1 will also enqueue the Thymer mirror here.
   _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ try { this._scheduleReindex(); } catch (_e) {} /* C2: refresh the note-side "Canvas Comments" backref */ try { if (c) this._scheduleCommentMirror(c.id); } catch (_e) {} } // C1: also enqueue the durable Thymer mirror (debounced)
   // Fly the camera to a comment's anchor + pulse it (reuses the cross-ref flash machinery).
@@ -4557,10 +4583,29 @@ class CanvasView {
     box.appendChild(body);
     // compose footer
     const foot = document.createElement('div'); foot.className = 'pxc-cmt-compose';
+    const taWrap = document.createElement('div'); taWrap.className = 'pxc-cmt-tawrap';
     const ta = document.createElement('textarea'); ta.className = 'pxc-cmt-ta'; ta.rows = 2; ta.placeholder = (c.thread || []).length ? 'Reply…' : 'Comment…';
     ta.addEventListener('pointerdown', (e) => e.stopPropagation());
-    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } else if (e.key === 'Escape') { e.preventDefault(); this._closeCommentPopover(); } });
-    foot.appendChild(ta);
+    // C8: @-mention workspace people. A dropdown below the textarea filters as you type "@name"; Enter/Tab/click inserts
+    // "@Name " and records the person on c.mentions (scene-only; cross-surface relation deferred).
+    const ment = document.createElement('div'); ment.className = 'pxc-cmt-mentions'; ment.style.display = 'none';
+    const mst = { open: false, items: [], idx: 0, at: -1, tokenLen: 0 };
+    const mentHide = () => { mst.open = false; ment.style.display = 'none'; ment.innerHTML = ''; };
+    const mentRender = () => { ment.innerHTML = ''; mst.items.forEach((it, i) => { const r = document.createElement('div'); r.className = 'pxc-cmt-mention' + (i === mst.idx ? ' pxc-on' : ''); r.textContent = it.name; r.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); mentPick(it); }); ment.appendChild(r); }); };
+    const mentPick = (it) => { if (!it) return; const r = pxcInsertMention(ta.value, mst.at, mst.tokenLen, it.name); ta.value = r.text; try { ta.setSelectionRange(r.caret, r.caret); } catch (_e) {} if (it.guid) { c.mentions = c.mentions || []; if (!c.mentions.includes(it.guid)) { c.mentions.push(it.guid); this.dirty = true; this.scheduleSave(); } } mentHide(); ta.focus(); }; // dirty+scheduleSave (NOT _commentChanged — no mirror surface for mentions yet) so the push persists even if the user picks then closes without sending. (Append-only: a mention whose @text is later deleted lingers in c.mentions — harmless until cross-surface wires it; revisit then.)
+    const mentRefresh = () => { const tok = pxcMentionToken(ta.value, ta.selectionStart); if (!tok) return mentHide(); const items = pxcFilterMentions(this._mentionCandidates(), tok.token, 8); if (!items.length) return mentHide(); mst.open = true; mst.items = items; mst.idx = 0; mst.at = tok.at; mst.tokenLen = tok.token.length; ment.style.display = 'block'; mentRender(); };
+    const mentNav = (d) => { if (!mst.items.length) return; mst.idx = (mst.idx + d + mst.items.length) % mst.items.length; mentRender(); };
+    ta.addEventListener('input', mentRefresh);
+    ta.addEventListener('keydown', (e) => {
+      if (mst.open) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); return mentNav(1); }
+        if (e.key === 'ArrowUp') { e.preventDefault(); return mentNav(-1); }
+        if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); return mentPick(mst.items[mst.idx]); }
+        if (e.key === 'Escape') { e.preventDefault(); return mentHide(); } // Esc closes the dropdown, NOT the popover
+      }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } else if (e.key === 'Escape') { e.preventDefault(); this._closeCommentPopover(); }
+    });
+    taWrap.appendChild(ta); taWrap.appendChild(ment); foot.appendChild(taWrap);
     const row = document.createElement('div'); row.className = 'pxc-cmt-crow';
     // C6: category chips (color + label) — sets the comment's category AND its color in one click; the active one is the comment's category
     const curCat = pxcCommentCategory(c).key;
@@ -10233,6 +10278,10 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-cmt-empty { color: var(--color-text-600, #9aa3b2); font-style: italic; padding: 2px 0; }
 .pxc-host .pxc-root .pxc-cmt-compose { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--cards-border-color, #333a4a); }
 .pxc-host .pxc-root .pxc-cmt-ta { width: 100%; resize: vertical; min-height: 34px; padding: 6px 8px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 7px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 12px/1.35 system-ui, sans-serif; box-sizing: border-box; }
+.pxc-host .pxc-root .pxc-cmt-tawrap { position: relative; }
+.pxc-host .pxc-root .pxc-cmt-mentions { position: absolute; left: 0; right: 0; top: 100%; margin-top: 2px; max-height: 132px; overflow-y: auto; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 7px; z-index: 6; box-shadow: 0 6px 18px rgba(0,0,0,0.32); }
+.pxc-host .pxc-root .pxc-cmt-mention { padding: 5px 9px; cursor: pointer; color: var(--color-text-400, #cfd3da); font: 12px/1.2 system-ui, sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pxc-host .pxc-root .pxc-cmt-mention.pxc-on, .pxc-host .pxc-root .pxc-cmt-mention:hover { background: var(--sidebar-bg-hover, #232a3a); color: var(--color-text-50, #fff); }
 .pxc-host .pxc-root .pxc-cmt-crow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .pxc-host .pxc-root .pxc-cmt-colors { display: flex; gap: 4px; }
 .pxc-host .pxc-root .pxc-cmt-color { width: 15px; height: 15px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
