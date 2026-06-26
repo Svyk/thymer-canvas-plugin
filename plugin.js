@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.157.0';
+const PLEXUS_VERSION = '1.158.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4870,6 +4870,16 @@ class CanvasView {
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
   // ── D-C: PDF document chrome — page-nav + explode/stack (operates on el.pdf.docId; pages are plain images) ──
   _pdfPagesOf(docId) { return ((this.scene && this.scene.elements) || []).filter((e) => e && e.type === 'image' && e.pdf && e.pdf.docId === docId && !e.isDeleted).sort((a, b) => (a.pdf.page || 0) - (b.pdf.page || 0)); }
+  // C15: select EVERY page of a PDF document as a unit (pages aren't groupIds-grouped, so a click selects only one). Then the
+  // standard select ops (move / delete / align) operate on the whole document. Read-only (selection state only).
+  _selectPdfDocument() {
+    const docId = this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas (drop one, or select a PDF page first).', dismissible: true }); } catch (_e) {} return; }
+    this.selected.clear(); for (const p of pages) this.selected.add(p.id); this.dirty = true;
+    const src = pages[0].pdf && pages[0].pdf.srcName;
+    try { this.plugin.ui.addToaster({ title: 'Selected all ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + (src ? ' of ' + src : ' of the PDF') + '.', dismissible: true }); } catch (_e) {}
+  }
   _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
     if (this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && a.type === 'image' && a.pdf) return a.pdf.docId; }
     const any = ((this.scene && this.scene.elements) || []).find((e) => e && e.type === 'image' && e.pdf && !e.isDeleted); return any ? any.pdf.docId : null;
@@ -8598,6 +8608,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF page (choose one)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPagePicker(); } }); // CP-PDF model-B-lite
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF to grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfExplode(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stack PDF pages (column)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfStack(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Select whole PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._selectPdfDocument(); } }); // C15: select all pages of the PDF as a unit (move/delete/align together)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });

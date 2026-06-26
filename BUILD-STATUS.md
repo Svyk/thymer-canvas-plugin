@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.158.0 — C15: "Select whole PDF document" (operate on a PDF as a unit) (2026-06-26)
+PDF pages are `type:'image'` elements grouped only by `el.pdf.docId` (not `groupIds`), so a click selects just one page —
+there was no easy way to move/delete/align a multi-page PDF as a unit. New command selects ALL pages of the document.
+`_selectPdfDocument` reuses `_activePdfDocId` (selected page's doc, else first PDF) + `_pdfPagesOf` (sorted, non-deleted),
+populates `this.selected` then `dirty`. The no-PDF early return is **before** `selected.clear()` so a misfire never wipes
+the current selection. Review: **SHIP, CLEAN** — no HIGH/MED; the clear-after-guard ordering confirmed, direct selection
+mutation matches the canonical lasso pattern (per-frame `_syncRecPanel`/`_syncPdfNav` gate on `size===1` → multi-select
+self-closes single-select chrome, no extra hooks needed), data-safe (read-only, not serialized, correctly omits
+`scheduleSave`), multi-doc/empty/deleted/`srcName`-missing edges all hold. The 1 LOW (first-PDF fallback when a non-PDF is
+selected) kept as the more-convenient single-PDF default. Tests `pxc_selpdf` 9; pdfpagelabel regress green. **Next: more on-theme features.**
+
 ## ✅ v1.157.0 — C14: PDF page-number labels (orient a multi-page document) (2026-06-26)
 The least-touched pillar (@round PDF docs): a small "p N / M" tag at each PDF page's bottom-left corner, so a laid-out or
 exploded multi-page PDF orients at a glance. `_drawPdfPageBadges` mirrors the comment-badge overlay but uses LAZY init —
