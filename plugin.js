@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.152.0';
+const PLEXUS_VERSION = '1.153.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4646,6 +4646,19 @@ class CanvasView {
     if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); // re-render the thread, keep it open
   }
   _resolveComment(c, val) { if (!c) return; c.resolved = !!val; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); }
+  // C10: bulk resolve/reopen the currently-shown (filtered) comments — the review-workflow capstone. Only flips comments that
+  // actually change state. Deliberately does NOT call _commentChanged per comment: its scheduleSave snapshots the scene + pushes
+  // an undo step SYNCHRONOUSLY (only save/reindex/mirror are debounced), so N calls = N full-scene stringifies + N undo steps
+  // for ONE user action. Instead: per-id mirror in the loop (debounced/coalesced), then a SINGLE settle (one snapshot/undo/save/
+  // reindex) → one Undo reverts the whole batch. Reversible (reopen).
+  _bulkResolveComments(comments, resolve) {
+    let n = 0; for (const c of (comments || [])) { if (!c || c.isDeleted || !!c.resolved === !!resolve) continue; c.resolved = !!resolve; try { this._scheduleCommentMirror(c.id); } catch (_e) {} n++; }
+    if (!n) return;
+    this.dirty = true; this.scheduleSave(); try { this._scheduleReindex(); } catch (_e) {} // ONE snapshot/undo/save + ONE reindex for the whole batch
+    if (this._cmtPopId) { const pc = this._byId(this._cmtPopId); if (pc && pc.type === 'comment') this._buildCommentPopover(pc, false); } // refresh an open popover so its resolve label isn't stale
+    this._cmtRailSig = null; try { this._syncCommentRail(); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: (resolve ? 'Resolved ' : 'Reopened ') + n + ' comment' + (n === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+  }
   _setCommentCategory(c, key) { if (!c) return; const cat = PXC_CMT_CATEGORIES.find((x) => x.key === key); if (!cat) return; c.category = cat.key; c.color = cat.color; c.strokeColor = cat.color; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); } // C6: category sets the color too (pin/rail dot read c.color)
   _deleteComment(c) {
     if (!c) return;
@@ -4682,6 +4695,8 @@ class CanvasView {
     const cwrap = document.createElement('div'); cwrap.className = 'pxc-cmt-railcats';
     const allb = document.createElement('button'); allb.className = 'pxc-cmt-catbtn' + (catF === 'all' ? ' pxc-on' : ''); allb.textContent = 'All ' + statusList.length; allb.title = 'All categories'; allb.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = 'all'; this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(allb);
     for (const cat of PXC_CMT_CATEGORIES) { const n = catCounts[cat.key] || 0; if (!n && catF !== cat.key) continue; const b = document.createElement('button'); b.className = 'pxc-cmt-catchip' + (catF === cat.key ? ' pxc-on' : ''); const dot = document.createElement('span'); dot.className = 'pxc-cmt-chipdot'; dot.style.background = cat.color; b.appendChild(dot); const tx = document.createElement('span'); tx.textContent = cat.label + ' ' + n; b.appendChild(tx); b.title = cat.label; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailCat = (catF === cat.key ? 'all' : cat.key); this._cmtRailSig = null; this._syncCommentRail(); }); cwrap.appendChild(b); } // toggle off if re-clicking the active category
+    // C10: bulk resolve/reopen the SHOWN (filtered) comments — resolve the open ones, or reopen if none are open. Right-aligned.
+    if (shown.length) { const openN = shown.filter((c) => !c.resolved).length, doRes = openN > 0, targets = doRes ? shown.filter((c) => !c.resolved) : shown; const bb = document.createElement('button'); bb.className = 'pxc-cmt-bulk'; bb.textContent = (doRes ? 'Resolve ' : 'Reopen ') + targets.length; bb.title = doRes ? 'Resolve all shown open comments' : 'Reopen all shown comments'; bb.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._bulkResolveComments(targets, doRes); }); cwrap.appendChild(bb); }
     box.appendChild(cwrap);
     const ul = document.createElement('div'); ul.className = 'pxc-cmt-raillist';
     if (!shown.length) { const em = document.createElement('div'); em.className = 'pxc-cmt-railempty'; em.textContent = list.length ? 'No comments match this filter.' : 'No comments yet. Pick the Comment tool and click anything to add one.'; ul.appendChild(em); } // C6: distinguish "filtered out" from "none exist"
@@ -10323,6 +10338,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-cmt-catchip:hover { border-color: var(--color-text-600, #9aa3b2); }
 .pxc-host .pxc-root .pxc-cmt-catchip.pxc-on { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
 .pxc-host .pxc-root .pxc-cmt-chipdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.pxc-host .pxc-root .pxc-cmt-bulk { margin-left: auto; padding: 2px 9px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #cfd3da); cursor: pointer; font: 10px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-cmt-bulk:hover { border-color: var(--color-text-600, #9aa3b2); color: var(--color-text-50, #fff); }
 .pxc-host .pxc-root .pxc-cmt-railclose { width: 22px; height: 22px; border: none; border-radius: 6px; background: transparent; color: var(--color-text-600, #9aa3b2); cursor: pointer; }
 .pxc-host .pxc-root .pxc-cmt-railclose:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); color: var(--color-text-50, #fff); }
 .pxc-host .pxc-root .pxc-cmt-raillist { display: flex; flex-direction: column; overflow-y: auto; padding: 6px; gap: 4px; }

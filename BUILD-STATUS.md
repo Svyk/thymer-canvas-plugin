@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.153.0 — C10: bulk resolve/reopen comments (review-workflow capstone) (2026-06-26)
+The capstone to the comment-review workflow (categories → counts → filters → focus): the rail gets a context-aware
+right-aligned button that resolves all currently-SHOWN (filtered) OPEN comments in one click — or reopens all if none
+are open. So "filter to open · To-do → Resolve" clears exactly those. `_bulkResolveComments` flips only comments that
+actually change state, writes the existing `Status` choice per-comment (reversible, no deletes/source writes). Review
+caught **1 MED** I'd missed: routing the loop through `_commentChanged` triggered N SYNCHRONOUS undo snapshots
+(`JSON.stringify(scene)`) + N undo steps for ONE user action (scheduleSave snapshots eagerly; only save/reindex/mirror
+debounce) → fixed by doing per-id mirror in the loop then a SINGLE settle (one snapshot/undo/save/reindex → one Undo
+reverts the batch); + 1 LOW (refresh an open popover so its resolve label isn't stale). Reviewer confirmed fresh-array
+iteration, change-only skip, per-id mirror coalescing, valid Status write, shown↔targets correctness, one-toast, no leak.
+Tests `pxc_bulkresolve` 11; cmtcounts/cmtcat regress green. **Next: more on-theme features.**
+
 ## ✅ v1.152.0 — C9: spotlight commented cards (review focus mode) (2026-06-26)
 A visual review mode bridging both pillars: toggle to dim the whole board EXCEPT cards that carry anchored comments
 (their pins draw on top → stay lit, + a soft amber ring), so you see what's been annotated at a glance. `_drawCommentFocus`
