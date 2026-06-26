@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.113.0';
+const PLEXUS_VERSION = '1.114.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -7394,7 +7394,19 @@ class Plugin extends AppPlugin {
     // listeners are removed) but Thymer does NOT re-mount the open panel → a dead canvas (no working toolbar, can't pan).
     // Replace each orphaned host with a clear reload prompt instead of a silently-dead UI. A real re-mount (mount() does
     // host.innerHTML='') or a page reload wipes it; harmless on actual page-unload.
-    for (const host of deadHosts) { try { if (host && host.querySelector && host.querySelector('.pxc-root')) host.innerHTML = '<div class="pxc-reload-note" style="padding:28px;font:14px system-ui,sans-serif;text-align:center;opacity:.7">Plexus Canvas was updated — reload this tab (⌘⇧R / Ctrl+Shift+R) to continue.</div>'; } catch (_e) {} }
+    for (const host of deadHosts) {
+      try {
+        if (!host || !host.querySelector || !host.querySelector('.pxc-root')) continue;
+        host.innerHTML = '';
+        const note = document.createElement('div'); note.className = 'pxc-reload-note';
+        note.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;height:100%;min-height:160px;box-sizing:border-box;padding:32px;font:14px system-ui,sans-serif;text-align:center;color:#e6e8ee;background:#1b1f2a';
+        const msg = document.createElement('div'); msg.style.opacity = '.78'; msg.textContent = 'Plexus Canvas was updated. Reload to bring the toolbar back — your drawing is saved.';
+        const btn = document.createElement('button'); btn.textContent = '↻ Reload now'; btn.style.cssText = 'padding:9px 20px;border:0;border-radius:8px;background:#7c5cff;color:#fff;font:600 13px system-ui,sans-serif;cursor:pointer';
+        btn.addEventListener('click', () => { try { location.reload(); } catch (_e) {} });
+        const hint = document.createElement('div'); hint.style.cssText = 'opacity:.45;font-size:12px'; hint.textContent = 'or press ⌘⇧R / Ctrl+Shift+R';
+        note.appendChild(msg); note.appendChild(btn); note.appendChild(hint); host.appendChild(note);
+      } catch (_e) {}
+    } // HOT-RELOAD GUARD (v1.114): one-click reload instead of a text-only note — the dead-canvas state recovers in a single click
     try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */
   }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
