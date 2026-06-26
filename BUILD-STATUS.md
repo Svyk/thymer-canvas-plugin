@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.136.0 — 2nd-degree parallel arrange (azlen "many parallel pages, deeper") (2026-06-26)
+Extends P3.3: a new command **"Arrange related pages — 2 levels deep"** (`_arrangeParallel(2)`) adds a 4th column —
+the pages that the RIGHT (referenced) column itself references — so the canvas fans out two hops of the reference
+graph as parallel, ghost-connected columns. `pxcColumnarLayout` gained a `right2` stack at `fx+2*(CW+COLGAP)`
+(backward-compatible: depth-1 callers pass no `right2N` → empty). 2nd-degree refs are deduped against
+focus∪left∪right (seeded `seen2`), capped 16, fetched in **parallel** (`Promise.all`, page+line order preserved).
+The depth-1 command is unchanged (`_arrangeParallel()`). Review: **SHIP** — no HIGH defects; data-safety clean (reads
+only — `getRecord`/`getLineItems`/segments; `placeCol` find-or-creates + repositions scene cards, never deletes, no
+source write); three columns provably disjoint → no duplicate card; `byGuid` shared+mutated. Applied both reviewer
+notes: parallelized the reads (was up to 12 serial round-trips) and the confirm-gate now weighs **moves + creations**
+(a fresh-canvas depth-2 pull of many NEW cards now prompts — closes the silent-bulk-create gap), with a label that
+states moved/new counts. Tests `pxc_arrange2` 22, `columnar` 14 regress green. **Next: more on-theme visual-thinking features.**
+
 ## ✅ v1.135.0 — directional edge labels on hover (2026-06-26)
 The "what connects them" half of azlen: hover a card → a crisp pill at each focused edge's midpoint shows the
 relationship from the hovered card's view (references / referenced by / linked / related). `_buildRelationalGhosts`

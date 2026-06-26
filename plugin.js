@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.135.0';
+const PLEXUS_VERSION = '1.136.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -133,10 +133,11 @@ function pxcElevate(css, amt) {
 // column, forward-ref pages in the RIGHT column (caller passes them in reading order), each column centered vertically on
 // the focus. Pure: returns {focus:{x,y}, left:[{x,y}…], right:[{x,y}…]} (top-left coords). Connections come from the ghosts.
 function pxcColumnarLayout(focus, leftN, rightN, opts) {
-  const CW = (opts && opts.cw) || 260, CH = (opts && opts.ch) || 170, GAP = (opts && opts.gap) || 24, COLGAP = (opts && opts.colGap) || 90;
+  const CW = (opts && opts.cw) || 260, CH = (opts && opts.ch) || 170, GAP = (opts && opts.gap) || 24, COLGAP = (opts && opts.colGap) || 90, right2N = (opts && opts.right2N) || 0;
   const fx = focus.x, fy = focus.y, fcy = fy + CH / 2; // align the focus's vertical CENTER; columns center on it
   const stack = (n, x) => { const totalH = n > 0 ? (n * CH + (n - 1) * GAP) : 0; let y = fcy - totalH / 2; const out = []; for (let i = 0; i < n; i++) { out.push({ x, y }); y += CH + GAP; } return out; };
-  return { focus: { x: fx, y: fy }, left: stack(leftN, fx - (CW + COLGAP)), right: stack(rightN, fx + CW + COLGAP) };
+  // left | focus | right | right2 (2nd-degree: pages the RIGHT column references) — each column centered on the focus
+  return { focus: { x: fx, y: fy }, left: stack(leftN, fx - (CW + COLGAP)), right: stack(rightN, fx + CW + COLGAP), right2: stack(right2N, fx + 2 * (CW + COLGAP)) };
 }
 function pxcGraphLayout(nodes, edges, opts) {
   const N = nodes.length; if (N < 2) return nodes;
@@ -5486,7 +5487,7 @@ class CanvasView {
   // P3.3: "Arrange related pages (parallel, connected)" — the azlen gesture. The focus page stays put; the pages it
   // references go RIGHT (reading order), the pages that reference it go LEFT, each a live record card (existing ones MOVED,
   // missing ones pulled in). Then rebuild the relational ghosts so the gradient/glow edges connect the columns.
-  async _arrangeParallel() {
+  async _arrangeParallel(depth) {
     const focus = this._singleSel();
     if (!focus || focus.type !== 'record' || !focus.recordGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single record card to arrange around.', dismissible: true }); } catch (_e) {} return; }
     const guid = focus.recordGuid; let rec = null; try { rec = await this.plugin.data.getRecord(guid); } catch (_e) {}
@@ -5496,18 +5497,26 @@ class CanvasView {
     try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && r.guid !== guid && !pseen.has(r.guid)) { pseen.add(r.guid); parents.push(r.guid); } } } catch (_e) {} // backrefs
     const rightGuids = children.slice(0, 12), leftGuids = parents.filter((g) => !cseen.has(g)).slice(0, 12); // a mutual ref stays on the RIGHT (forward)
     if (!leftGuids.length && !rightGuids.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: this page has no references to arrange.', dismissible: true }); } catch (_e) {} return; }
+    // 2nd-degree: the pages the RIGHT column references → a further-right column (azlen "many parallel pages, deeper")
+    let right2Guids = [];
+    if (depth === 2 && rightGuids.length) {
+      const seen2 = new Set([guid, ...leftGuids, ...rightGuids]);
+      const perPage = await Promise.all(rightGuids.map(async (rg) => { let r2 = null; try { r2 = await this.plugin.data.getRecord(rg); } catch (_e) {} if (!r2) return []; const refs = []; try { const items = await r2.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid) refs.push(s.text.guid); } catch (_e) {} return refs; })); // parallel reads; Promise.all preserves page order → reading order intact
+      for (const refs of perPage) { for (const g of refs) if (!seen2.has(g)) { seen2.add(g); right2Guids.push(g); } if (right2Guids.length >= 16) break; } // dedup in reading order
+      right2Guids = right2Guids.slice(0, 16);
+    }
     const byGuid = new Map(); for (const e of this.scene.elements) if (e && !e.isDeleted && e.type === 'record' && e.recordGuid) byGuid.set(e.recordGuid, e);
-    const CW = 260, CH = 170; let moves = 0; for (const g of leftGuids.concat(rightGuids)) if (byGuid.has(g) && byGuid.get(g).id !== focus.id) moves++;
+    const CW = 260, CH = 170; let moves = 0, creations = 0; for (const g of leftGuids.concat(rightGuids, right2Guids)) { if (byGuid.has(g)) { if (byGuid.get(g).id !== focus.id) moves++; } else creations++; } // confirm-gate weighs BOTH disruptive moves and bulk creations (depth-2 can pull many new cards)
     const apply = () => {
       const f = this._byId(focus.id); if (!f || f.isDeleted) return; // the focus card may have been deleted during the confirm dialog → bail (no layout around a ghost)
-      const lay = pxcColumnarLayout({ x: Math.min(f.x, f.x + f.width), y: Math.min(f.y, f.y + f.height) }, leftGuids.length, rightGuids.length, { cw: CW, ch: CH });
+      const lay = pxcColumnarLayout({ x: Math.min(f.x, f.x + f.width), y: Math.min(f.y, f.y + f.height) }, leftGuids.length, rightGuids.length, { cw: CW, ch: CH, right2N: right2Guids.length });
       const placeCol = (guids, pos) => guids.forEach((g, i) => { let el = byGuid.get(g); if (el && el.isDeleted) el = null; if (!el) { el = makeRecordCard(pos[i].x, pos[i].y, CW, CH, g); this.scene.elements.push(el); byGuid.set(g, el); this._invalidateRec(g); } else { el.x = pos[i].x; el.y = pos[i].y; el.width = CW; el.height = CH; } });
-      placeCol(leftGuids, lay.left); placeCol(rightGuids, lay.right);
+      placeCol(leftGuids, lay.left); placeCol(rightGuids, lay.right); placeCol(right2Guids, lay.right2);
       this.selected.clear(); this.selected.add(f.id); this._updateBindings(); try { this._buildRelationalGhosts(true); } catch (_e) {} // ghosts → the gradient/glow edges between the columns (quiet: we toast below)
       this._gridDirty = true; this._cacheValid = false; this.dirty = true; this.scheduleSave();
-      try { this.plugin.ui.addToaster({ title: 'Arranged ' + leftGuids.length + ' ← referencing · ' + rightGuids.length + ' referenced → pages in parallel.', dismissible: true }); } catch (_e) {}
+      try { this.plugin.ui.addToaster({ title: 'Arranged ' + leftGuids.length + ' ← referencing · ' + rightGuids.length + ' referenced →' + (right2Guids.length ? ' · ' + right2Guids.length + ' 2nd-degree →→' : '') + ' in parallel.', dismissible: true }); } catch (_e) {}
     };
-    if (moves > 6) { const sp = this.camera.worldToScreen(focus.x + focus.width / 2, focus.y); this._showNestingChoice('Rearrange ' + moves + ' existing pages into parallel columns?', [{ txt: 'Arrange', fn: () => { this._closeRegionChoice(); apply(); } }, { txt: 'Cancel', fn: () => this._closeRegionChoice() }], sp.x, sp.y); }
+    if (moves + creations > 6) { const sp = this.camera.worldToScreen(focus.x + focus.width / 2, focus.y); const lbl = creations ? ('Place ' + (moves + creations) + ' pages into parallel columns' + (moves ? ' (' + moves + ' moved, ' + creations + ' new)' : ' (' + creations + ' new)') + '?') : ('Rearrange ' + moves + ' existing pages into parallel columns?'); this._showNestingChoice(lbl, [{ txt: 'Arrange', fn: () => { this._closeRegionChoice(); apply(); } }, { txt: 'Cancel', fn: () => this._closeRegionChoice() }], sp.x, sp.y); }
     else apply();
   }
   // GRAPH AUTO-LAYOUT: force-directed (Fruchterman-Reingold) relax of the on-canvas record cards, using the bound CONNECTORS
@@ -8039,6 +8048,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Backlinks (what references this)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._showBacklinks(); } }); // A5 — read-only list of records that back-reference the selected card's record (else this drawing's host)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange graph (force-directed layout)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._layoutGraph(); } }); // graph auto-layout (Fruchterman-Reingold) — untangle the mind-map (Obsidian/NotebookLM graph-view)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages (parallel, connected)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(); } }); // P3.3: the azlen "parallel pages, visibly connected" gesture (refs right / backrefs left, ghosts connect them). ti-layout-board = confirmed-bundled (frame tool)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages — 2 levels deep', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(2); } }); // P3.3b: pull a further-right column of the referenced pages' own references (the deeper "many parallel pages" azlen shows)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }
