@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.121.0 — Phase 1.C2: comments surface on the commented note's Backreferences (2026-06-25)
+An anchored comment on a record/line now appears in that note's native Backreferences as a "Canvas Comments (N)" group
+(💬 amber) → click flips to the drawing, flies to the anchor, and opens the thread. `_reindexBackrefs` comment pass keys
+the backref by the commented note guid (`_commentedRecordGuid`); `_scanRefBadges` record-section filter includes kind
+`comment`; `_injectCanvasRefSection` renders two groups (References + Comments) with a sig that distinguishes comments;
+`_navToCanvasAnchor` routes a comment entry to `_jumpToComment`+`_openCommentThread`; `_commentChanged` also
+`_scheduleReindex()`. Adversarial review: **SHIP** (no index-pass regression, no 💬 leak onto a body line — comments key
+by record guid not line guid, stale-removal + sig correct, kind round-trips through the synced store); 2 LOW cosmetics
+fixed. Tests `pxc_cmtbackref` 14. Commit `8318aea`, pushed. **Phase 1 comments core DONE (C0+C1+C2). Next: C3 polish
+(hover preview, pin-drag nudge, detached handling, entrance animations).**
+
 ## ✅ v1.120.0 — Phase 1.C1: durable Thymer mirror for anchored comments (2026-06-25)
 Each comment now mirrors to a record in the `Canvas Comments` collection (`10V5CTX7WNBY7FTCF9JT4TTY4K`). Scene element =
 HOT source of truth; record = durable/queryable/cross-surface mirror, reconciled scene→record. `_mirrorComment` writes
