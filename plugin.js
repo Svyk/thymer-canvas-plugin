@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.127.0';
+const PLEXUS_VERSION = '1.128.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6581,6 +6581,30 @@ class CanvasView {
     }
     ctx.globalAlpha = 1; ctx.restore();
   }
+  // P3.1 hover-focus (OVERLAY pass — redraws every frame, so it updates live on hover; the static bulk ghosts stay cached).
+  // Hover a card that participates in ghost edges → re-draw ITS edges BRIGHT + SOLID over the faint static ones, and ring
+  // the hovered + connected cards. Reuses the already-tracked _connHover. World-transformed ctx (same as the static ghosts).
+  _drawGhostFocus(ctx, z) {
+    if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length || this._drawGesture) return;
+    const hoverId = (this.tool === 'select' && !this.editingId && this._connHover && !this._connHover.isDeleted) ? this._connHover.id : null; if (!hoverId) return;
+    const inc = this._ghostEdges.filter((ge) => ge.a === hoverId || ge.b === hoverId); if (!inc.length) return; // hovered card has no ghost edge → nothing to focus
+    const farEnds = new Set(); ctx.save(); ctx.lineCap = 'round';
+    for (const ge of inc) {
+      const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
+      farEnds.add(ge.a === hoverId ? ge.b : ge.a);
+      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const base = ge.rel ? '#0ea5e9' : '#f59e0b';
+      const ca = (a.strokeColor && /^#[0-9a-f]{3,6}$/i.test(a.strokeColor)) ? a.strokeColor : base, cb = (b.strokeColor && /^#[0-9a-f]{3,6}$/i.test(b.strokeColor)) ? b.strokeColor : base;
+      let stroke = base; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, ca); g.addColorStop(1, cb); stroke = g; } catch (_e) {}
+      const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cxp, cyp, bx, by);
+      ctx.globalAlpha = 0.98; ctx.strokeStyle = stroke; ctx.lineWidth = 2.8 / z; ctx.setLineDash([]); ctx.stroke(); // bright + SOLID over the faint dashed static version
+    }
+    ctx.lineWidth = 2.5 / z; ctx.strokeStyle = '#7c5cff'; ctx.globalAlpha = 0.9;
+    const ring = (el) => { if (!el) return; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 4 / z, y - 4 / z, Math.abs(el.width) + 8 / z, Math.abs(el.height) + 8 / z, 9 / z); ctx.stroke(); };
+    ring(this._byId(hoverId)); for (const id of farEnds) ring(this._byId(id));
+    ctx.globalAlpha = 1; ctx.restore();
+  }
   // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
   // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
   // Read-only; reuses the existing _ghostEdges/_showGhosts/_drawGhosts machinery (marked rel:true → drawn blue, not amber).
@@ -7510,6 +7534,8 @@ class CanvasView {
       }
       ictx.setTransform(1, 0, 0, 1, 0, 0);
     }
+    // P3.1: ghost-edge hover focus — bright/solid focused edges + rings, on the OVERLAY (live on hover; static bulk stays cached).
+    if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
