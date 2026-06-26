@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.155.0';
+const PLEXUS_VERSION = '1.156.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -156,6 +156,19 @@ function pxcBfsPath(edges, src, dst) {
   for (let h = 0; h < q.length; h++) { const u = q[h]; if (u === dst) break; for (const v of adj.get(u)) if (!prev.has(v)) { prev.set(v, u); q.push(v); } }
   if (!prev.has(dst)) return null;
   const path = []; for (let c = dst; c != null; c = prev.get(c)) path.push(c); return path.reverse();
+}
+// C13: greedy proximity clustering of comment pins (screen-space) so a dense board reads cleanly when zoomed out. Each pin
+// {id,x,y} joins the nearest existing cluster within `radius`, else starts its own; the centroid updates incrementally.
+// Returns [{cx, cy, items:[pin…]}]. Pure → testable. O(n·clusters), fine for tens of comments.
+function pxcClusterPins(pins, radius) {
+  const clusters = [];
+  for (const p of (pins || [])) {
+    let best = null, bd = radius;
+    for (const cl of clusters) { const dd = Math.hypot(p.x - cl.cx, p.y - cl.cy); if (dd <= bd) { bd = dd; best = cl; } }
+    if (best) { best.items.push(p); const k = best.items.length; best.cx += (p.x - best.cx) / k; best.cy += (p.y - best.cy) / k; }
+    else clusters.push({ cx: p.x, cy: p.y, items: [p] });
+  }
+  return clusters;
 }
 // Connected components of an UNDIRECTED edge list (union-find). Returns an array of components, each an array of node ids.
 // Only nodes that appear in at least one edge are included (isolated nodes are not edges → not returned). Pure → testable.
@@ -3357,7 +3370,7 @@ class CanvasView {
       // C0: comment pin → open its thread. Single click, before drawing + before the xref pins (comment pins sit on top).
       if (this._commentPins && this._commentPins.length && (e.button === 0 || e.button === -1) && !this._present) {
         const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top;
-        for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} const cc = this._byId(pin.id); this._cmtPinDown = { id: pin.id, sx: e.clientX, sy: e.clientY, pinDx0: (cc && cc.pinDx) || 0, pinDy0: (cc && cc.pinDy) || 0, moved: false }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // C3: start a potential pin DRAG (nudge); a click with no drag opens the thread (handled in onUp)
+        for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} if (pin.ids) { this._fitToComments(pin.ids); return; } const cc = this._byId(pin.id); this._cmtPinDown = { id: pin.id, sx: e.clientX, sy: e.clientY, pinDx0: (cc && cc.pinDx) || 0, pinDy0: (cc && cc.pinDy) || 0, moved: false }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // C3: start a potential pin DRAG (nudge); a click with no drag opens the thread (handled in onUp). C13: a cluster super-pin (pin.ids) → fit to those comments instead
       }
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
       // last frame (screen-space CSS coords), so an in-image region pin is clickable right on its spot.
@@ -4512,6 +4525,13 @@ class CanvasView {
     }
     if (!anchor) { const r = this._commentAnchorRect(c); if (r) anchor = { region: { x: r.x - 24, y: r.y - 24, w: (r.w || 0) + 48, h: (r.h || 0) + 48 } }; }
     if (anchor) { try { this._flashAnchor(anchor); } catch (_e) {} }
+  }
+  // C13: fit the camera to a set of comments (their anchor rects) — a cluster super-pin click zooms in to separate the pins.
+  _fitToComments(ids) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, any = false;
+    for (const id of (ids || [])) { const c = this._byId(id); if (!c) continue; const r = this._commentAnchorRect(c); if (!r) continue; any = true; x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y); x1 = Math.max(x1, r.x + (r.w || 0)); y1 = Math.max(y1, r.y + (r.h || 0)); }
+    if (!any) return;
+    this._fitToBounds({ x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) }, 120); // clamp degenerate (all at one point) so it doesn't over-zoom
   }
   // C5 review mode: step through the board's comments one at a time (reading order: top→bottom, left→right by anchor),
   // flying + flashing + opening each thread — the @round "review the comments on a doc" gesture. dir ±1, wraps; optionally
@@ -8122,7 +8142,24 @@ class CanvasView {
       if (cs.length) {
         ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
         const now = this._now();
+        // C13: cluster overlapping pins when zoomed OUT (z<0.55) so a dense board reads cleanly. A multi-pin cluster → one
+        // amber "stacked" super-pin with the count; click fits to those comments. Singletons + normal zoom → unchanged below.
+        const absorbed = new Set();
+        if (this.camera.zoom < 0.55 && cs.length > 1) {
+          const pts = []; for (const c of cs) { const sp = this._commentPinScreen(c); if (sp) pts.push({ id: c.id, x: sp.x, y: sp.y, resolved: c.resolved }); }
+          for (const cl of pxcClusterPins(pts, 26)) { if (cl.items.length < 2) continue; for (const it of cl.items) absorbed.add(it.id);
+            const openN = cl.items.filter((it) => !it.resolved).length, cx = cl.cx * d, cy = cl.cy * d, bw = 30 * d, bh = 21 * d, rx = cx - bw / 2, ry = cy - bh - 4 * d;
+            ictx.globalAlpha = openN ? 0.45 : 0.25; ictx.fillStyle = '#f59e0b'; this._rrect(ictx, rx + 3 * d, ry + 3 * d, bw, bh, 6 * d); ictx.fill(); // "stacked" hint behind
+            ictx.globalAlpha = openN ? 1 : 0.5; ictx.beginPath(); ictx.moveTo(rx + 9 * d, ry + bh); ictx.lineTo(rx + 4 * d, ry + bh + 7 * d); ictx.lineTo(rx + 16 * d, ry + bh); ictx.closePath(); ictx.fillStyle = '#f59e0b'; ictx.fill(); // tail
+            this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.fillStyle = '#f59e0b'; ictx.fill(); ictx.lineWidth = 1.4 * d; ictx.strokeStyle = 'rgba(255,255,255,0.92)'; this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.stroke();
+            ictx.fillStyle = '#fff'; ictx.font = '700 ' + (11 * d) + 'px system-ui, sans-serif'; ictx.fillText(String(cl.items.length), rx + bw / 2, ry + bh / 2 + 0.5 * d); ictx.globalAlpha = 1;
+            this._commentPins.push({ x: cl.cx, y: (ry + bh / 2) / d, r: 18, ids: cl.items.map((it) => it.id) }); // hit-entry CENTERED on the drawn rect (the pin draws above the centroid) so the whole pin is clickable, like single pins
+
+          }
+          ictx.globalAlpha = 1;
+        }
         for (const c of cs) {
+          if (absorbed.has(c.id)) continue; // C13: drawn as part of a super-pin
           const sp = this._commentPinScreen(c); if (!sp) continue;
           const cx = sp.x * d, cy = sp.y * d, bw = 24 * d, bh = 19 * d, rx = cx + 6 * d, ry = cy - bh - 6 * d;
           const col = c.color || '#f59e0b';

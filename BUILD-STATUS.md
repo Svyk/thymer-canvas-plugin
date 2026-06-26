@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.156.0 — C13: comment pin clustering at low zoom (declutter dense boards) (2026-06-26)
+(Past the v1.155 checkpoint — the feature space wasn't quite exhausted.) When zoomed OUT (z<0.55), overlapping comment
+pins cluster into one amber "stacked" super-pin with the count (dim if all resolved); clicking it fits the camera to those
+comments (zooming in to separate them). At normal zoom (z≥0.55) NOTHING changes — individual pins/drag/click/hover exactly
+as before. Pure `pxcClusterPins` (greedy proximity, running-mean centroid); the super-pin draws + an `absorbed` set makes
+the existing per-pin loop skip clustered comments; onDown routes a cluster hit (`pin.ids`) to `_fitToComments` instead of a
+single-pin drag. Review: caught **1 MED** I'd flagged — the cluster hit-circle sat at the centroid but the pin draws ~14.5px
+above it, so the pin's top wasn't clickable → fixed by centering the hit-entry on the drawn rect (`(ry+bh/2)/d`, exact, no
+magic number). Reviewer confirmed zero regression at z≥0.55, onDown can't `_byId(undefined)`, hover no-ops cleanly on a
+cluster, `_fitToBounds` clamps (no over-zoom), pure-clustering correctness, data-safe. (1 LOW `_cmtBorn` lingering — nil
+impact, left.) Tests `pxc_pincluster` 13; cmtfocus/cmtbadge regress green. **Next: more on-theme features.**
+
 ## ✅✅✅ CHECKPOINT — VISUAL-THINKING CANVAS, 20-FEATURE ARC (v1.136→v1.155) (2026-06-26)
 Full node suite **72/72 test files green**, plugin.js syntax clean — the whole body of work passes together, zero
 cross-feature regression. This session shipped 20 reviewed+tested features replicating + extending the two seed X posts:
