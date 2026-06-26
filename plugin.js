@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.133.0';
+const PLEXUS_VERSION = '1.134.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -8761,7 +8761,7 @@ class Plugin extends AppPlugin {
   // Granular multi-section settings panel (Excalidraw-parity; see SCRIPTS-ROADMAP "Settings" S1–S14).
   _openSettings() {
     const s = this._settings || (this._settings = loadPlexusSettings());
-    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; if (key === 'linkOpacity') PLEXUS_LINK_ALPHA = (s.linkOpacity == null ? 100 : s.linkOpacity) / 100; if (key === 'imageCacheMax') this._imgCacheEvict(); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v._scheduleBannerText(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; } };
+    const apply = (key) => { savePlexusSettings(s); if (key === 'defaultFont') PLEXUS_DEFAULT_FONT = s.defaultFont || 'system-ui, sans-serif'; if (key === 'linkOpacity') PLEXUS_LINK_ALPHA = (s.linkOpacity == null ? 100 : s.linkOpacity) / 100; if (key === 'imageCacheMax') this._imgCacheEvict(); for (const v of this._views) { v.dirty = true; if (key === 'bannerPreview') { try { v._scheduleBannerText(); } catch (_e) {} } if (key === 'zoomMin') v.camera.zoomMin = s.zoomMin; if (key === 'zoomMax') v.camera.zoomMax = s.zoomMax; if (key === 'edgeGlow' || key === 'edgeDensity' || key === 'edgeTypes') v._cacheValid = false; } }; // P3.6 UI: connection-render settings → re-raster the static layer (ghosts + connector glow live there)
     const wrap = document.createElement('div'); wrap.className = 'pxc-settings-overlay';
     const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-settings-wide';
     const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Plexus Settings'; box.appendChild(title);
@@ -8805,6 +8805,15 @@ class Plugin extends AppPlugin {
     color(grid, 'Grid colour', 'gridColor', 'Dot colour (when dynamic is off).');
     range(grid, 'Grid opacity (%)', 'gridOpacity', '0–100.', 0, 100, 1);
     toggle(grid, 'Dynamic grid colour', 'gridDynamic', 'Grid follows light/dark instead of the fixed colour.');
+
+    const conn = section('Connections'); // P3.6 UI: surfaces the P3.0–P3.6 "visibly connected" controls (were command-palette only)
+    toggle(conn, 'Edge glow', 'edgeGlow', 'A soft glow on connections + inferred ghost links (the “visibly connected” look).');
+    select(conn, 'Edge density', 'edgeDensity', 'Hovered-only hides the bulk inferred links — they appear when you hover a card (auto-on past ~150).', [
+      { v: 'all', l: 'Show all' }, { v: 'focus', l: 'Hovered-only (declutter)' },
+    ]);
+    select(conn, 'Inferred-link types', 'edgeTypes', 'Filter the auto ghost edges by kind (each canvas shows one kind at a time).', [
+      { v: 'all', l: 'All' }, { v: 'rel', l: 'References / backrefs' }, { v: 'semantic', l: 'Semantic similarity' },
+    ]);
 
     const fonts = section('Fonts');
     select(fonts, 'Default text font', 'defaultFont', 'Applies to new text (and existing text on the system default).', [
