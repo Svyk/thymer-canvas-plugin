@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.164.0 — C21: "Fit whole canvas" command (complete the fit set) (2026-06-26)
+Small gap-fill: `_fitToScene` (frame the whole board) existed but was only invoked on-open / for slides — not re-invokable.
+Exposed it as a command so the fit set is complete: **Fit whole canvas** (C21) · **Fit to PDF document** (C16) · **Fit to
+selection** (C19). Pure reuse of the already-reviewed/exercised `_fitToScene` (`_sceneBounds` → `_fitToBounds`, read-only,
+empty-guarded) — one command registration, no new logic, so no test/review needed (the method is unchanged). Syntax clean.
+**Next: more on-theme features.**
+
 ## ✅ v1.163.0 — C20: PDF document title labels (identify multiple PDFs) (2026-06-26)
 Extends C14: on each PDF's FIRST page, draws the filename (`el.pdf.srcName`, truncated at 30 chars) in a purple pill at
 the top-left, so multiple regulatory PDFs on a board are identifiable at a glance (QA use case). Added INSIDE the C14

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.163.0';
+const PLEXUS_VERSION = '1.164.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -8653,6 +8653,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Select whole PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._selectPdfDocument(); } }); // C15: select all pages of the PDF as a unit (move/delete/align together)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });
