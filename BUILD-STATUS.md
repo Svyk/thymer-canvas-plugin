@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.119.0 — Phase 1.C0: scene-only anchored comments (2026-06-25)
+First ship of the **Visual-Thinking Canvas** roadmap (`~/.claude/plans/staged-finding-ritchie.md`): anchored, threaded
+comments / margin notes (azlen "parallel pages, visibly connected" + round's PDF/comment demo). A `type:'comment'`
+scene element anchored via the existing `_bindingFor` 5-type binding (whole card / body LINE / image REGION / inline
+REF / free margin note); pin derived from the live anchor each frame (`_commentAnchorRect`) so it tracks
+move/resize/scroll/rotate; detached anchor → kept in the rail. Speech-bubble PINS (reply-count badge, resolved ✓),
+THREAD popover (compose/replies/color/resolve/delete, Enter-send), toggleable right RAIL (All/Open/Resolved,
+click-to-fly+flash). Comment tool + palette commands. Inert in the shape pipeline (drawElement no-op + skipped in
+hit-test/lasso/grid/sceneBounds/minimap/export); append-only; confirm-gated delete; empty discard; destroy() teardown.
+Adversarial review: HIGH (build-time empty-discard soft-deleted a fresh comment + lost the first reply) + 2 MED
+(minimap/sceneBounds) + 2 LOW — all fixed; invariant locked by `pxc_comments` (21). Commit `5233706`, pushed.
+**Storage is scene-only this ship — the Thymer "Canvas Comments" record mirror is C1 (next), which needs the
+collection created via MCP first.** Reinstall+reload to use it: pick the Comment tool (or ⌘K "Plexus: Comment") →
+click a card / body line / image region / empty space → type → Enter.
+
 ## ✅ v1.118.0 — transclusions now show up in "Canvas References" (2026-06-25)
 User report: a **text ref** to "Ford Five Hundred" appeared under a record's Backreferences → Canvas References, but a
 **transclusion** of it on the board did NOT. Root cause: `_reindexBackrefs` indexed inline text refs (`el.runs` `t:'ref'`),
