@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.161.0 — C18: make the panel connection count actionable (click → bring connections onto canvas) (2026-06-26)
+Turns C17's info into action: when the inspected card HAS connections, the "↗ N references · ↙ M backreferences" row
+becomes clickable (a "→" cue + hover affordance) → `_pullInNeighbours()` brings those connected pages onto the canvas.
+Wired at the end of the C17 async IIFE, so the stale-write guard already protects it (a late-resolving IIFE for a
+superseded panel returns before adding the listener). Review: **SHIP, CLEAN** — no HIGH/MED; `_pullInNeighbours` reads the
+CURRENT `_singleSel()` (not a captured card) and the panel only persists while its card stays selected (per-frame
+`_syncRecPanel`), so the click always acts on the shown card; the listener dies with the rebuilt node (no leak); the build
+stays read-only (mutation is the same user-initiated path as the Expand-neighbours command/nub); and crucially
+`_pullInNeighbours` DEDUPS against on-canvas cards → double-click can't duplicate (only a harmless redundant toast). 2 LOW
+(redundant double-click toast; div-not-button a11y matching the sibling Datacore rows) — both left as local convention.
+Tests `pxc_panelconn` 12; fitpdf/selpdf regress green. **Next: more on-theme features.**
+
 ## ✅ v1.160.0 — C17: connection counts in the record panel (a note's graph role at a glance) (2026-06-26)
 When you select a record card to inspect it, the panel now shows its TRUE graph degree — "↗ N references · ↙ M
 backreferences" — how many notes it references and how many reference it (complements the on-canvas hub badge, which is

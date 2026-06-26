@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.160.0';
+const PLEXUS_VERSION = '1.161.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5027,6 +5027,9 @@ class CanvasView {
       if (this._recPanelEl !== box) return; // a newer panel replaced this one during the async count → don't write a stale node
       if (!okF && !okB) return; // both fetches failed → leave the "↗ … · ↙ …" placeholder, not a false "0 · 0"
       connRow.textContent = '↗ ' + fwd + ' reference' + (fwd === 1 ? '' : 's') + '  ·  ↙ ' + back + ' backreference' + (back === 1 ? '' : 's');
+      // C18: when the card HAS connections, make the row actionable → bring those connected pages onto the canvas (the panel
+      // is for the selected card, and the panel swallows pointerdown so the card stays selected → _pullInNeighbours acts on it).
+      if (fwd + back > 0) { connRow.classList.add('pxc-rp-conn-act'); connRow.title = 'Bring connected pages onto the canvas'; connRow.textContent += '  →'; connRow.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._pullInNeighbours(); }); }
     })();
     // Property rows REMOVED (user): they duplicated the card's inline properties, which are now shown + EDITABLE INLINE on the
     // card itself (dblclick a row → _editCardProp). The panel keeps only Title + Open/Move/Template + the Datacore field.
@@ -10485,6 +10488,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn { padding: 4px 9px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 11px/1.1 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-conn { font: 11px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); opacity: .8; padding: 1px 0; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-conn-act { cursor: pointer; border-radius: 5px; padding: 2px 5px; margin: 0 -5px; }
+.pxc-host .pxc-root .pxc-recpanel .pxc-rp-conn-act:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); opacity: 1; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-list { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-lab { font-size: 11px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
