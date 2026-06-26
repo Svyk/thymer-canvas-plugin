@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.128.0';
+const PLEXUS_VERSION = '1.129.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6589,6 +6589,7 @@ class CanvasView {
     const hoverId = (this.tool === 'select' && !this.editingId && this._connHover && !this._connHover.isDeleted) ? this._connHover.id : null; if (!hoverId) return;
     const inc = this._ghostEdges.filter((ge) => ge.a === hoverId || ge.b === hoverId); if (!inc.length) return; // hovered card has no ghost edge → nothing to focus
     const farEnds = new Set(); ctx.save(); ctx.lineCap = 'round';
+    const flowT = ((this._now() % 1400) / 1400), heavyHub = inc.length > 12; // P3.2: particle parameter (0→1 every 1.4s); on a dense hub drop the per-particle shadow (60fps)
     for (const ge of inc) {
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
       farEnds.add(ge.a === hoverId ? ge.b : ge.a);
@@ -6599,11 +6600,16 @@ class CanvasView {
       const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cxp, cyp, bx, by);
       ctx.globalAlpha = 0.98; ctx.strokeStyle = stroke; ctx.lineWidth = 2.8 / z; ctx.setLineDash([]); ctx.stroke(); // bright + SOLID over the faint dashed static version
+      // P3.2: a glowing particle traveling OUTWARD from the hovered card → the far end (shows direction of the relationship)
+      const sx = (ge.a === hoverId) ? ax : bx, sy = (ge.a === hoverId) ? ay : by, ex = (ge.a === hoverId) ? bx : ax, ey = (ge.a === hoverId) ? by : ay;
+      const u = 1 - flowT, px = u * u * sx + 2 * u * flowT * cxp + flowT * flowT * ex, py = u * u * sy + 2 * u * flowT * cyp + flowT * flowT * ey;
+      ctx.beginPath(); ctx.arc(px, py, 4 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.95; if (!heavyHub) { ctx.shadowColor = pxcMixHex(ca, cb, 0.5); ctx.shadowBlur = 8; } ctx.fill(); ctx.shadowBlur = 0;
     }
-    ctx.lineWidth = 2.5 / z; ctx.strokeStyle = '#7c5cff'; ctx.globalAlpha = 0.9;
+    ctx.shadowBlur = 0; ctx.lineWidth = 2.5 / z; ctx.strokeStyle = '#7c5cff'; ctx.globalAlpha = 0.9; // shadow off for the ring pass (belt-and-suspenders)
     const ring = (el) => { if (!el) return; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 4 / z, y - 4 / z, Math.abs(el.width) + 8 / z, Math.abs(el.height) + 8 / z, 9 / z); ctx.stroke(); };
     ring(this._byId(hoverId)); for (const id of farEnds) ring(this._byId(id));
     ctx.globalAlpha = 1; ctx.restore();
+    this.dirty = true; // P3.2: re-arm the loop so the particle keeps animating WHILE hovering; when hover clears, this isn't called → loop idles at 0% CPU
   }
   // RELATIONAL GHOST-EDGES (Obsidian/ExcaliBrain "show inferred links"): faint dashed edges between on-canvas record cards that
   // ARE related (a forward ref OR a backref) but are NOT already joined by an explicit bound connector — surfaces hidden links.
