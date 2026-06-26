@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.129.0 — Phase 3.P3.2: animated flow on the hovered edge (2026-06-25)
+A glowing particle travels along each focused ghost edge OUTWARD from the hovered card (quad-Bezier B(t), 0→1 every
+1.4s) — shows relationship direction. `dirty`-rearmed in `_drawGhostFocus` so it animates while hovering; idles to **0%
+CPU** when hover clears (the GUARDRAILS animation-leak property — re-arm after all early-returns; verified). Review:
+**SHIP** — idle-to-0 + particle-on-curve (both orientations) + state balance pass; MED fixed (per-frame shadowBlur dropped
+on a >12-edge hub) + LOW. Tests `pxc_edgeflow` 12. Commit `3148636`, pushed. **Next: P3.3 — columnar "Arrange related
+pages (parallel, connected)" — the literal azlen gesture (focus page center, refs right in reading order, backrefs left).**
+
 ## ✅ v1.128.0 — Phase 3.P3.1: ghost-edge hover-focus (2026-06-25)
 Hover a card with ghost edges → its incident edges go BRIGHT+SOLID + the hovered/connected cards get a focus ring.
 Two-tiered correctly: bulk gradient/glow ghosts stay in the static raster (P3.0); hover-focus is `_drawGhostFocus` on the
