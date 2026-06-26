@@ -11,9 +11,18 @@ click-to-fly+flash). Comment tool + palette commands. Inert in the shape pipelin
 hit-test/lasso/grid/sceneBounds/minimap/export); append-only; confirm-gated delete; empty discard; destroy() teardown.
 Adversarial review: HIGH (build-time empty-discard soft-deleted a fresh comment + lost the first reply) + 2 MED
 (minimap/sceneBounds) + 2 LOW — all fixed; invariant locked by `pxc_comments` (21). Commit `5233706`, pushed.
-**Storage is scene-only this ship — the Thymer "Canvas Comments" record mirror is C1 (next), which needs the
-collection created via MCP first.** Reinstall+reload to use it: pick the Comment tool (or ⌘K "Plexus: Comment") →
-click a card / body line / image region / empty space → type → Enter.
+**Storage is scene-only this ship — the Thymer "Canvas Comments" record mirror is C1 (next).** Reinstall+reload to
+use it: pick the Comment tool (or ⌘K "Plexus: Comment") → click a card / body line / image region / empty space →
+type → Enter.
+
+### C1 prerequisite DONE (collection provisioned via MCP, workspace `svy` WEJ9EZW6ADT58SJC3EQMNETSW6)
+`Canvas Comments` collection = **`10V5CTX7WNBY7FTCF9JT4TTY4K`** (icon ti-message). Fields:
+Comment Text (text) · Author (user) · Drawing (record→relation, set to the backing Plexus Drawings `1M80FGPHDZ58M4P5AEPBB91B67`) ·
+Commented Record (record→relation, the note the anchor targets) · Anchor Kind (choice element/line/region/ref/free) ·
+Anchor Data (text JSON) · Status (choice open/resolved) · Created At (datetime) · Scene Element Id (text, the hot↔durable join key).
+C1 plugin work (next ship): `_commentsCollection()` (find-by-name, cache), `_mirrorComment` (create/append-replies-as-body-
+lines/resolve via the debounced flusher), `Scene Element Id` join + `_reconcileComments` cold-start rejoin, in-flight guard.
+Relation writes via the verified set-object→read-back-`pxcRelValues`-retry idiom; reads via `pxcRelValues` (never linkedRecords).
 
 ## ✅ v1.118.0 — transclusions now show up in "Canvas References" (2026-06-25)
 User report: a **text ref** to "Ford Five Hundred" appeared under a record's Backreferences → Canvas References, but a
