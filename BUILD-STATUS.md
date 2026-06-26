@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.120.0 — Phase 1.C1: durable Thymer mirror for anchored comments (2026-06-25)
+Each comment now mirrors to a record in the `Canvas Comments` collection (`10V5CTX7WNBY7FTCF9JT4TTY4K`). Scene element =
+HOT source of truth; record = durable/queryable/cross-surface mirror, reconciled scene→record. `_mirrorComment` writes
+Comment Text/Status/Anchor Kind/Anchor Data/Created At/Author/Drawing+Commented Record relations/Scene Element Id, with
+the reply thread as APPEND-ONLY body lines (deduped vs the record's live body-line count). Debounced flusher (800ms,
+coalesced) via `_commentChanged`; create-once (in-flight Map + post-await guid re-check); cold-start `_reconcileComments`
+(match Scene Element Id under Drawing==recordGuid) rejoins not dupes. Relations via the set→read-back-`pxcRelValues`→retry
+idiom; datetime via `parseDateTimeString(pxcTodayISO()).value()`; graceful scene-only no-op if the collection is absent.
+Adversarial review: **HIGH** (delete path was dead — `_byId` filtered the deleted element so trash never ran → leaked an
+open record per delete) + **MED** (Drawing reconcile-key written last → orphan+dup kill-window) + LOWs; HIGH+MED fixed
+(flush resolves deleted comments; both reconcile keys written before any other property). Tests `pxc_cmtmirror` 27 /
+`pxc_comments` 21. Commit `80c949f`, pushed. **Next: C2 — surface the comment on the commented note's Backreferences.**
+
 ## ✅ v1.119.0 — Phase 1.C0: scene-only anchored comments (2026-06-25)
 First ship of the **Visual-Thinking Canvas** roadmap (`~/.claude/plans/staged-finding-ritchie.md`): anchored, threaded
 comments / margin notes (azlen "parallel pages, visibly connected" + round's PDF/comment demo). A `type:'comment'`
