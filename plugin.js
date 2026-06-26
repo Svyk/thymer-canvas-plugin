@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.117.0';
+const PLEXUS_VERSION = '1.117.1';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1844,11 +1844,12 @@ class CanvasView {
     this.staticCv = document.createElement('canvas'); this.staticCv.className = 'pxc-layer pxc-static';
     this.iCv = document.createElement('canvas'); this.iCv.className = 'pxc-layer pxc-interactive'; this.iCv.tabIndex = 0;
     wrap.appendChild(this.staticCv); wrap.appendChild(this.iCv);
+    this.wrap = wrap; // MUST precede _buildToolbar — _wireToolbarTips appends its tip node to this.wrap (v1.117 blank-canvas fix)
     wrap.appendChild(this._buildToolbar());
     wrap.appendChild(this._buildPropPanel());
     const hint = document.createElement('div'); hint.className = 'pxc-hint';
     hint.textContent = 'V select · R/O/D shapes · handles resize/rotate · drag = pan · scroll = zoom · ⌫ delete';
-    wrap.appendChild(hint); host.appendChild(wrap); this.wrap = wrap;
+    wrap.appendChild(hint); host.appendChild(wrap);
     wrap.__pxcView = this; // DEBUG/VERIFY: a DOM-discoverable handle on the rendered view, so test.dump/automate can reach the LIVE view even when a hot-reload leak leaves the plugin's _views empty (the rendered view belongs to a prior instance)
     this._resize();
     const ro = new ResizeObserver(() => { this._resize(); this.dirty = true; });
@@ -1910,15 +1911,16 @@ class CanvasView {
     }
     if (!bar.children.length) bar.style.display = 'none'; // everything hidden → no empty pill (gear stays in the command palette)
     this._toolbarEl = bar;
-    this._wireToolbarTips(bar); // hover tooltips for every button
+    try { this._wireToolbarTips(bar); } catch (_e) {} // hover tooltips — cosmetic; MUST NOT be able to throw out of the build (a thrown _buildToolbar blanks the whole canvas)
     setTimeout(() => this._syncToolbar(), 0); return bar;
   }
   // Hover tooltips on the toolbar — a styled, INSTANT tip (the native `title` delay is long and is unreliable in the
   // Thymer/Electron host). Delegated on the bar; reads each `.pxc-tool`'s existing `title`, and temporarily removes that
   // `title` while the custom tip is shown so there's no double-tooltip. Positioned above the button (or below if it'd clip).
   _wireToolbarTips(bar) {
+    const host = this.wrap || (bar && bar.parentNode) || this.host; if (!host) return; // never assume this.wrap is set — a missing host must skip tips, never throw
     let tip = this._tipEl;
-    if (!tip || !tip.isConnected) { tip = document.createElement('div'); tip.className = 'pxc-tip'; this.wrap.appendChild(tip); this._tipEl = tip; }
+    if (!tip || !tip.isConnected) { tip = document.createElement('div'); tip.className = 'pxc-tip'; host.appendChild(tip); this._tipEl = tip; }
     let cur = null, t = null;
     const restore = () => { if (cur && cur.dataset && cur.dataset.tip != null) { cur.setAttribute('title', cur.dataset.tip); delete cur.dataset.tip; } };
     const hide = () => { if (t) { clearTimeout(t); t = null; } restore(); cur = null; tip.classList.remove('pxc-tip-on'); };
@@ -1926,7 +1928,7 @@ class CanvasView {
       const txt = btn.getAttribute('title') || (btn.dataset && btn.dataset.tip); if (!txt) return;
       cur = btn; btn.dataset.tip = txt; btn.removeAttribute('title'); // suppress the native tooltip while ours shows
       tip.textContent = txt; tip.classList.add('pxc-tip-on');
-      const r = btn.getBoundingClientRect(), wr = this.wrap.getBoundingClientRect(), tw = tip.offsetWidth || 120, th = tip.offsetHeight || 24;
+      const r = btn.getBoundingClientRect(), wr = (tip.offsetParent || host).getBoundingClientRect(), tw = tip.offsetWidth || 120, th = tip.offsetHeight || 24;
       let left = (r.left - wr.left) + r.width / 2 - tw / 2; left = Math.max(4, Math.min(left, wr.width - tw - 4));
       let top = (r.top - wr.top) - th - 8; if (top < 4) top = (r.bottom - wr.top) + 8; // flip below if it would clip the top
       tip.style.left = left + 'px'; tip.style.top = top + 'px';
