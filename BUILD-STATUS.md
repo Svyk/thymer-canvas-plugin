@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## 🛠 v1.117.1 — HOTFIX: blank canvas on flip-to-drawing (2026-06-25)
+User flipped a note → drawing and got a **completely blank canvas** (no toolbar, no content). Root cause: a 1.117.0 regression —
+`mount()` calls `_buildToolbar()` (line 1847) BEFORE assigning `this.wrap` (was line 1851), and the new `_wireToolbarTips`
+appended its tip node to `this.wrap` → on a FRESH mount `this.wrap` was `undefined` → `TypeError` → `_buildToolbar` threw →
+the whole canvas mounted blank. Slipped through because a toolbar REBUILD already has `this.wrap` set (only first-mount/flip hit it).
+Fixes: (1) set `this.wrap = wrap` BEFORE the `_buildToolbar()` append; (2) `try/catch` the `_wireToolbarTips` call — a cosmetic
+tooltip must never throw out of the build; (3) `_wireToolbarTips` appends to `this.wrap || bar.parentNode || this.host` and bails
+if none, positioning via `tip.offsetParent`. Syntax OK; pxc_mmkeys 11 / pxc_mmpaste 18 / pxc_aimindmap 16. Commit `65676a5`, pushed.
+
 ## ✅ v1.117.0 — mind-map discoverability: toolbar button + hover tooltips + keyboard nav (2026-06-25)
 Follow-up to the user's "how do I build a mind map? I don't see a button" + "add tooltips on hover" + "shift-tab to go back,
 arrows to jump between nodes." Three changes, all UI/keyboard (no scene-data writes beyond the existing append-only `_newMindMap`):
