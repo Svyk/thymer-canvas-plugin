@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.149.0';
+const PLEXUS_VERSION = '1.150.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -37,6 +37,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   connBadges: true,
   // P3.12 connection legend: a small bottom-left key for the edge/badge visual language while the connection layer is shown
   connLegend: true,
+  // C7 comment badges: a small comment-count speech-bubble on any card that has anchored comments
+  commentBadges: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -6888,6 +6890,34 @@ class CanvasView {
       ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(bx, by, cw, ch, 7 * d); else ctx.rect(bx, by, cw, ch); ctx.globalAlpha = 0.92; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1; ctx.lineWidth = 1 * d; ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.stroke(); ctx.fillStyle = '#fff'; ctx.fillText(txt, bx + pad, by + ch / 2 + 0.5 * d); }
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore();
   }
+  // C7 comment badges: a small amber speech-bubble pill with the comment count at the top-RIGHT of any card that has anchored
+  // comments (dimmed if they're all resolved) — see which records carry annotations at a glance (@round). Overlay-only, screen-
+  // space, no animation. Skips free margin-notes (no elementId) + the single-selected card (its rec-panel/popover covers it).
+  _drawCommentBadges(ctx, z, d) {
+    const S = this.plugin._settings;
+    if ((S && S.commentBadges === false) || this._drawGesture || this._camAnim) return;
+    if (z < 0.4) return; // LOD
+    // ONE allocation-free pass over the scene (no per-frame `_comments()` array — a comment-free board pays only this cheap
+    // scan, no GC churn during pan/zoom; a maintained flag would go stale on scene-load/undo, which don't hit _commentChanged).
+    const cnt = new Map(), open = new Map();
+    for (const c of this.scene.elements) { if (!c || c.isDeleted || c.type !== 'comment') continue; const eid = c.anchor && c.anchor.elementId; if (!eid) continue; cnt.set(eid, (cnt.get(eid) || 0) + 1); if (!c.resolved) open.set(eid, (open.get(eid) || 0) + 1); } // anchored comments only (skip free notes)
+    if (!cnt.size) return;
+    const selId = (this.selected.size === 1) ? this.selected.values().next().value : null;
+    const byId = new Map(); for (const e of this.scene.elements) if (e && !e.isDeleted) byId.set(e.id, e); // index over ALL element types (comments anchor to text/image/region too, not just record cards — do NOT restrict to 'record')
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.save();
+    ctx.font = '700 ' + (10 * d) + 'px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const W = this.iCv.width, H = this.iCv.height;
+    for (const [id, n] of cnt) { if (id === selId) continue; const el = byId.get(id); if (!el) continue;
+      const xr = Math.max(el.x, el.x + el.width), yt = Math.min(el.y, el.y + el.height), sp = this.camera.worldToScreen(xr, yt), rxp = sp.x * d, typ = sp.y * d;
+      if (rxp < -60 || typ < -60 || rxp > W + 60 || typ > H + 60) continue; // cull off-screen
+      const allResolved = !open.get(id), txt = '' + n, pad = 4.5 * d, ch = 15 * d, cw = ctx.measureText(txt).width + pad * 2, bx = rxp - cw + 3 * d, by = typ - ch - 3 * d; // pill at the card's top-right, outset above (the ⇄ chip is selected-only, and we skip the selected card → no overlap)
+      ctx.globalAlpha = allResolved ? 0.5 : 0.94; ctx.fillStyle = '#f59e0b';
+      ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(bx, by, cw, ch, 7 * d); else ctx.rect(bx, by, cw, ch); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(bx + 5 * d, by + ch - 1 * d); ctx.lineTo(bx + 5 * d, by + ch + 4 * d); ctx.lineTo(bx + 11 * d, by + ch - 1 * d); ctx.closePath(); ctx.fill(); // speech-bubble tail → reads as a comment
+      ctx.fillStyle = '#fff'; ctx.fillText(txt, bx + pad, by + ch / 2 + 0.5 * d); ctx.globalAlpha = 1;
+    }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.restore();
+  }
   // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
   _ghostEdgeAt(wx, wy) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
@@ -7894,6 +7924,7 @@ class CanvasView {
     if (this._spotlightId && !this._drawGesture) { try { this._drawSpotlight(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // P3.9: hub badges — degree-count pill per connected card (screen-space; method self-gates on settings/focus-modes/LOD).
     if (this._showGhosts) { try { this._drawConnBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    if (!this.plugin._settings || this.plugin._settings.commentBadges !== false) { try { this._drawCommentBadges(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C7: comment-count badges on annotated cards
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
@@ -9100,6 +9131,7 @@ class Plugin extends AppPlugin {
     toggle(gen, 'Show drawing preview as the record banner', 'bannerPreview', 'Off keeps the note header clean; the preview PNG still saves.');
     toggle(gen, 'Force dark canvas (override theme)', 'darkMode', 'Dark mode auto-follows your Thymer theme; turn this on to force a dark canvas even on a light theme.');
     toggle(gen, 'Invert images in dark mode', 'invertImagesDark', 'Auto-inverts raster/SVG figures so they read on a dark canvas (zsviczian-style). Opt a single image out via the “Toggle image dark-invert” command.');
+    toggle(gen, 'Comment badges on cards', 'commentBadges', 'A small speech-bubble count on any card with anchored comments (dimmed when all are resolved) — see annotated records at a glance.');
 
     const beh = section('Canvas behavior');
     toggle(beh, 'Double-click to create / edit text', 'dblClickText', 'Off disables double-click text editing (handy on touch).');

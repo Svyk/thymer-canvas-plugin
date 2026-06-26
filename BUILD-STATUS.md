@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.150.0 — C7: comment-count badges on cards (see annotated records at a glance) (2026-06-26)
+Bridges both pillars: any card (or PDF page / text note / image) with anchored comments shows a small amber speech-bubble
+pill + count at its top-right, dimmed when all those comments are resolved — the @round "which records carry annotations"
+signal without opening the rail. `_drawCommentBadges` mirrors the reviewed-clean hub-badge pattern (overlay, screen-space,
+LOD + off-screen cull, no animation); skips free margin-notes (no `anchor.elementId`) + the single-selected card (so the
+⇄ chip / rec-panel never overlap). New `commentBadges` setting (default on) + General toggle. Review: caught **1 MED** (the
+hook ran a per-frame `_comments()` array alloc even on comment-free boards — GC churn during pan/zoom; the suggested
+maintained-flag fix is fragile since scene-load/undo skip `_commentChanged`) → fixed with a single allocation-free scan; +
+1 LOW doc note (the index spans ALL element types intentionally — comments anchor to text/image too). save/restore+alpha
+balance, no-overlap guarantee, anchor-field, dim semantics, data-safety, settings backfill all confirmed clean. Tests
+`pxc_cmtbadge` 11; hubbadge/cmtcat regress green. **Next: more on-theme features.**
+
 ## ✅ v1.149.0 — C6b: comment category count chips (distribution at a glance) (2026-06-26)
 Refines the v1.148 category filter: bare color dots → labelled **"●Label N"** count chips showing the comment distribution
 (respecting the status filter), only for non-empty categories (+ the active one even at 0, so it stays un-toggleable),
