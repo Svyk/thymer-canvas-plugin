@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.135.0 — directional edge labels on hover (2026-06-26)
+The "what connects them" half of azlen: hover a card → a crisp pill at each focused edge's midpoint shows the
+relationship from the hovered card's view (references / referenced by / linked / related). `_buildRelationalGhosts`
+tracks a directed set → `aRefsB`/`bRefsA` per edge; `_drawGhostFocus(ctx,z,d)` renders screen-space labels (≤12-edge
+gate). Review: **SHIP** (no defects — direction correct both orderings, backward-compat safe, render-state balanced,
+DPR-correct, perf bounded). Tests `pxc_edgelabel` 13. Commit `9d6b1c6`, pushed. **Next: 2nd-degree arrange expansion.**
+
 ## ✅ v1.134.0 — Connections settings panel (2026-06-25)
 Surfaces the P3.0–P3.6 connection controls (Edge glow / Edge density all↔hovered-only / Inferred-link types
 all/references/semantic) in the Settings modal — were command-palette only. `apply()` invalidates the static cache for
