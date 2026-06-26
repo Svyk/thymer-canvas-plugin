@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.118.0';
+const PLEXUS_VERSION = '1.119.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -304,6 +304,7 @@ const TOOLS = [
   { id: 'laser', icon: 'ti-target', title: 'Laser pointer (L) — a fading trail for presenting' },
   { id: 'lasso', icon: 'ti-select', title: 'Lasso select (S) — drag a freeform loop to select exactly what it encloses' },
   { id: 'card', icon: 'ti-id', title: 'New record card — click to drop a new note/record (edit its properties on the right)' },
+  { id: 'comment', icon: 'ti-message', title: 'Comment — anchor a threaded note to a card, a body line, an image region, or empty space' },
   { id: 'datacore', icon: 'ti-table', title: 'Datacore card — click to drop a live query (dc: …); select it for the interactive view' },
 ];
 const HANDLE_KEYS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -977,6 +978,7 @@ function drawLinear(ctx, el) {
   ctx.restore();
 }
 function drawElement(ctx, el) {
+  if (el.type === 'comment') return; // C0: comments render only as overlay pins (in the interactive pass), never as a shape — inert in static/export/minimap
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
   const rotated = !!el.angle && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'freedraw';
   if (rotated) { ctx.save(); const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
@@ -1063,6 +1065,8 @@ function linearBBox(el) {
 }
 let _fileIdC = 0;
 function newFileId() { return 'f' + Date.now().toString(36) + (_fileIdC++).toString(36); }
+// C0: relative time for comment bubbles/rail ("just now", "5m", "3h", "2d").
+function pxcRelTime(ts) { if (!ts) return ''; const s = Math.max(0, (Date.now() - ts) / 1000); if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm'; if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd'; }
 // SCALE/relational: read a record-relation property's target guids robustly. PluginProperty.values() may yield guid
 // strings, {guid} objects, or a one-element array holding a JSON-string of guids (how an MCP-written relation lands);
 // linkedRecords() returns [] for stored-but-unresolved relations (the gotcha), so we parse values() instead.
@@ -1096,6 +1100,21 @@ function makeRecordCard(x, y, w, h, recordGuid) {
     id: newId(), type: 'record', x, y, width: w, height: h, angle: 0, recordGuid,
     strokeColor: '#7c5cff', backgroundColor: '#ffffff', fillStyle: 'solid', strokeWidth: 1.5,
     roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+  };
+}
+// PHASE-1 (C0): an anchored comment / margin note. It's a scene element (rides chunked save + undo) but renders ONLY as
+// an overlay pin (drawElement is a no-op for it — see below), so it stays out of the shape pipeline. `anchor` is the exact
+// _bindingFor shape (whole-element / record body line / image region / inline ref); a falsy anchor = a free margin note at
+// x,y. The pin position is DERIVED from the live anchor each frame (_commentAnchorRect), so it tracks its target.
+function makeComment(anchor, wx, wy, style) {
+  return {
+    id: newId(), type: 'comment', x: wx, y: wy, width: 0, height: 0, angle: 0,
+    anchor: anchor || null, pinDx: 0, pinDy: 0,
+    color: (style && style.color) || '#f59e0b', resolved: false,
+    thread: (style && style.thread) || [], // [{author, text, ts}] — root + replies; the canvas is the hot source of truth
+    authorGuid: (style && style.authorGuid) || null, commentGuid: null, // commentGuid = the durable Thymer mirror (filled in C1)
+    strokeColor: (style && style.color) || '#f59e0b', backgroundColor: 'transparent', fillStyle: 'solid',
+    strokeWidth: 1, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
   };
 }
 // SUBGRAPH→CANVAS: Brain role → card/arrow colour (matches the Brain's relColor families).
@@ -1254,7 +1273,7 @@ function normRect(el) {
 function sceneBounds(scene) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const el of scene.elements) {
-    if (el.isDeleted || el.secHidden) continue;
+    if (el.isDeleted || el.secHidden || el.type === 'comment') continue; // C0: comments are zero-size overlay pins — never widen fit/export/minimap bounds (a free margin note would balloon them with whitespace)
     // approximate rotated bbox via the 4 rotated corners
     const cx = el.x + el.width / 2, cy = el.y + el.height / 2, a = el.angle || 0, c = Math.cos(a), s = Math.sin(a);
     for (const [lx, ly] of [[el.x, el.y], [el.x + el.width, el.y], [el.x + el.width, el.y + el.height], [el.x, el.y + el.height]]) {
@@ -2003,6 +2022,7 @@ class CanvasView {
     let collapsedFrames = null; for (let j = 0; j < els.length; j++) { const f = els[j]; if (!f.isDeleted && f.type === 'frame' && f.collapsed) (collapsedFrames || (collapsedFrames = new Set())).add(f.id); }
     for (let i = 0; i < els.length; i++) {
       const el = els[i]; zi.set(el.id, i); if (el.isDeleted) continue;
+      if (el.type === 'comment') continue; // C0: comment pins are overlay-only — keep them out of the spatial grid AND the scene-bounds cache (no hit/render/bounds consumer uses them)
       if (el.secHidden) { if (collapsedFrames && collapsedFrames.has(el.secHidden)) continue; delete el.secHidden; } // hidden child → skip; orphan → un-hide
       let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
       if (el.angle) bb = rotatedAABB(bb, el.angle); // index the rotated footprint so rotated shapes stay hittable
@@ -2420,7 +2440,7 @@ class CanvasView {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
     for (const el of this.scene.elements) {
-      if (el.isDeleted || el.secHidden || el.type === 'frame' || el.id === excludeId) continue; // SECTIONS: lasso/marquee skips collapsed-section children (this path scans the full scene, not the grid)
+      if (el.isDeleted || el.secHidden || el.type === 'frame' || el.type === 'comment' || el.id === excludeId) continue; // SECTIONS: lasso/marquee skips collapsed-section children (this path scans the full scene, not the grid); C0: skip comment pins (overlay-only)
       if (skipConnectors && (el.type === 'arrow' || el.type === 'line')) continue; // group-lasso skips connectors; the lasso SELECT tool keeps them (parity with the old grid path)
       if (el.type === 'text') { try { measureRuns(el); } catch (_e) {} } // ensure width/height are current → correct bbox (was the bug)
       let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
@@ -2856,6 +2876,7 @@ class CanvasView {
     // click is in the band the frame's cells are BELOW the click → reach down to them (expanding up misses the frame).
     for (const el of this._gridTopFirst(wx - tol, wy - tol, tol * 2, tol * 2 + labelH)) {
       if (el.isDeleted || el.mmHidden) continue;
+      if (el.type === 'comment') continue; // C0: a comment is hit via its overlay pin, not as a (zero-size) shape
       if (el.type === 'frame') { if (hitFrameBorder(el, wx, wy, tol, labelH)) return el; continue; }
       if (hitElement(el, wx, wy, tol)) return el;
     }
@@ -3225,6 +3246,11 @@ class CanvasView {
       if (this._panMode) { this._panMode = false; if (this._panEndT) { clearTimeout(this._panEndT); this._panEndT = null; } } // a new gesture (drag/click) ends any wheel-pan still in compositor mode → the next render re-rasters crisp (HIGH: review)
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
+      // C0: comment pin → open its thread. Single click, before drawing + before the xref pins (comment pins sit on top).
+      if (this._commentPins && this._commentPins.length && (e.button === 0 || e.button === -1) && !this._present) {
+        const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top;
+        for (const pin of this._commentPins) { if (Math.hypot(px - pin.x, py - pin.y) <= pin.r) { try { e.preventDefault(); } catch (_e) {} this._openCommentThread(pin.id, false); return; } }
+      }
       // Cross-ref ↗ pin → page-flip to the citing note. Single click, before drawing. Hit-tests the pins drawn
       // last frame (screen-space CSS coords), so an in-image region pin is clickable right on its spot.
       if (this._xrefPins && this._xrefPins.length && (e.button === 0 || e.button === -1) && !this._present) {
@@ -3329,6 +3355,13 @@ class CanvasView {
         this.tool = 'select'; this._syncToolbar(); this._editText(el); this.dirty = true; return;
       } else if (this.tool === 'card') {
         this.tool = 'select'; this._syncToolbar(); this._newRecordCardAt(down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-2: click to drop a new record card (default Notes/Captures); the property panel opens on its selection
+      } else if (this.tool === 'comment') {
+        this.tool = 'select'; this._syncToolbar(); // C0: click a target → anchor a comment there (record / body line / image region / inline ref); empty space → a free margin note
+        const hit = this._hitTopAt(down.x, down.y);
+        const anchor = (hit && hit.type !== 'comment') ? this._bindingFor(hit, down.x, down.y) : null;
+        const c = makeComment(anchor, down.x, down.y, { color: '#f59e0b', authorGuid: null });
+        this.scene.elements.push(c); this.selected.clear(); this.dirty = true; this.scheduleSave();
+        this._openCommentThread(c.id, true); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return;
       } else if (this.tool === 'datacore') {
         this.tool = 'select'; this._syncToolbar(); this._insertQueryNode('dc: @task', down.x, down.y); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; // EDIT-4: drop a Datacore query node; selecting it mounts the live interactive view
       } else if (this.tool === 'arrow' || this.tool === 'line') {
@@ -4296,6 +4329,176 @@ class CanvasView {
       this._invalidateRec(guid); this.dirty = true; this.scheduleSave();
     } catch (_e) {}
   }
+  // ── PHASE 1 (C0): anchored comments / margin notes ───────────────────────────────────────────
+  // Live list of non-deleted comment elements.
+  _comments() { return (this.scene && this.scene.elements || []).filter((e) => e && e.type === 'comment' && !e.isDeleted); }
+  // The live world rect the comment is anchored to (dispatches on the binding exactly like _bindTargetShape).
+  // null ⇒ the anchor element was deleted (DETACHED — render in rail only, never lose the comment). No anchor ⇒ a free margin note at x,y.
+  _commentAnchorRect(c) {
+    const b = c && c.anchor;
+    if (!b || !b.elementId) return { x: c.x, y: c.y, w: 0, h: 0 }; // free margin note
+    const el = this._byId(b.elementId); if (!el || el.isDeleted) return null; // detached
+    if (b.lineGuid && el.type === 'record') { const r = this._lineRectWorld(el, b.lineGuid); if (r) return r; }
+    if (b.refGuidTarget && el.type === 'text') { const r = this._refRunRectWorld(el, b.refGuidTarget); if (r) return r; }
+    if (b.frac) { const q = this._regionShapeWorld(el, b.frac, b.fracPoly); if (q && q.length) return this._polyBBox(q); }
+    const bb = this._elBBox(el); return bb ? { x: bb.x, y: bb.y, w: bb.w, h: bb.h } : null;
+  }
+  // The pin's SCREEN point (top-right of the anchor rect + manual nudge). null when detached.
+  _commentPinScreen(c) {
+    const r = this._commentAnchorRect(c); if (!r) return null;
+    const wx = r.x + (r.w || 0) + (c.pinDx || 0), wy = r.y + (c.pinDy || 0);
+    return this.camera.worldToScreen(wx, wy);
+  }
+  _commentAuthorName() { try { const us = this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers(); const u = us && us[0]; if (u) return (u.getName && u.getName()) || u.name || 'You'; } catch (_e) {} return 'You'; }
+  // The single seam every comment mutation flows through — C0 just persists the scene; C1 will also enqueue the Thymer mirror here.
+  _commentChanged(c) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; /* invalidate so the open rail rebuilds on next sync (does NOT close it) */ }
+  // Fly the camera to a comment's anchor + pulse it (reuses the cross-ref flash machinery).
+  _jumpToComment(c) {
+    if (!c) return; const b = c.anchor; let anchor = null;
+    if (b && b.elementId) { const el = this._byId(b.elementId);
+      if (el && !el.isDeleted) {
+        if (b.lineGuid && el.type === 'record') { const lr = this._lineRectWorld(el, b.lineGuid); anchor = lr ? { el: el.id, region: { x: lr.x, y: lr.y, w: lr.w, h: lr.h } } : { el: el.id }; }
+        else if (b.frac) anchor = { el: el.id, frac: b.frac, fracPoly: b.fracPoly, inImage: true };
+        else if (b.refGuidTarget && el.type === 'text') { const rr = this._refRunRectWorld(el, b.refGuidTarget); anchor = rr ? { el: el.id, region: { x: rr.x, y: rr.y, w: rr.w, h: rr.h } } : { el: el.id }; }
+        else anchor = { el: el.id };
+      }
+    }
+    if (!anchor) { const r = this._commentAnchorRect(c); if (r) anchor = { region: { x: r.x - 24, y: r.y - 24, w: (r.w || 0) + 48, h: (r.h || 0) + 48 } }; }
+    if (anchor) { try { this._flashAnchor(anchor); } catch (_e) {} }
+  }
+  // ── thread popover (compose + replies) — cloned from the connection-style popover chrome ──
+  _openCommentThread(id, compose) {
+    const c = this._byId(id); if (!c || c.isDeleted) return;
+    this._closeCommentPopover(); this._cmtPopId = id; this._cmtPopCompose = !!compose;
+    this._buildCommentPopover(c, !!compose);
+  }
+  _themePanel(box) { // shared theme-match: override the Thymer tokens from the EFFECTIVE canvas backdrop (same as _buildRecPanel)
+    const dark = this._canvasDark();
+    box.style.setProperty('--cards-bg', this._cardSurfaceColor(dark));
+    box.style.setProperty('--cards-border-color', dark ? '#333a4a' : '#d6dae2');
+    box.style.setProperty('--input-bg-color', dark ? '#232838' : '#ffffff');
+    box.style.setProperty('--color-text-400', dark ? '#e6e8ee' : '#1e1e1e');
+    box.style.setProperty('--color-text-50', dark ? '#ffffff' : '#1e1e1e');
+    box.style.setProperty('--color-text-600', dark ? '#9aa3b2' : '#5b6472');
+    box.style.setProperty('--sidebar-bg-hover', dark ? 'rgba(255,255,255,.10)' : 'rgba(0,0,0,.06)');
+  }
+  _buildCommentPopover(c, compose) {
+    if (this._cmtPopEl) { try { this._cmtPopEl.remove(); } catch (_e) {} this._cmtPopEl = null; } // remove only the prior DOM — do NOT run _closeCommentPopover's empty-discard here (it would soft-delete the comment we're about to compose)
+    this._cmtPopId = c.id;
+    const box = document.createElement('div'); box.className = 'pxc-cmtpop'; this._cmtPopEl = box; this._themePanel(box);
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    // header: color dot + author/time of the root + resolve + delete + close
+    const head = document.createElement('div'); head.className = 'pxc-cmt-head';
+    const dot = document.createElement('span'); dot.className = 'pxc-cmt-dot'; dot.style.background = c.color || '#f59e0b'; head.appendChild(dot);
+    const root = c.thread && c.thread[0];
+    const meta = document.createElement('div'); meta.className = 'pxc-cmt-meta'; meta.textContent = root ? (root.author || 'You') : 'New comment'; head.appendChild(meta);
+    const sp = document.createElement('div'); sp.className = 'pxc-cmt-spacer'; head.appendChild(sp);
+    const mkb = (txt, title, fn, cls) => { const b = document.createElement('button'); b.className = 'pxc-cmt-hbtn' + (cls ? ' ' + cls : ''); b.textContent = txt; b.title = title; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); head.appendChild(b); return b; };
+    mkb(c.resolved ? '↺' : '✓', c.resolved ? 'Reopen' : 'Resolve', () => this._resolveComment(c, !c.resolved));
+    mkb('🗑', 'Delete this comment', () => this._deleteComment(c));
+    mkb('✕', 'Close', () => this._closeCommentPopover());
+    box.appendChild(head);
+    // thread body
+    const body = document.createElement('div'); body.className = 'pxc-cmt-thread';
+    for (const m of (c.thread || [])) {
+      const bub = document.createElement('div'); bub.className = 'pxc-cmt-bub';
+      const mh = document.createElement('div'); mh.className = 'pxc-cmt-bubhead'; mh.textContent = (m.author || 'You') + ' · ' + pxcRelTime(m.ts); bub.appendChild(mh);
+      const tx = document.createElement('div'); tx.className = 'pxc-cmt-bubtext'; tx.textContent = m.text || ''; bub.appendChild(tx);
+      body.appendChild(bub);
+    }
+    if (!(c.thread || []).length) { const ph = document.createElement('div'); ph.className = 'pxc-cmt-empty'; ph.textContent = 'Write a comment…'; body.appendChild(ph); }
+    box.appendChild(body);
+    // compose footer
+    const foot = document.createElement('div'); foot.className = 'pxc-cmt-compose';
+    const ta = document.createElement('textarea'); ta.className = 'pxc-cmt-ta'; ta.rows = 2; ta.placeholder = (c.thread || []).length ? 'Reply…' : 'Comment…';
+    ta.addEventListener('pointerdown', (e) => e.stopPropagation());
+    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } else if (e.key === 'Escape') { e.preventDefault(); this._closeCommentPopover(); } });
+    foot.appendChild(ta);
+    const row = document.createElement('div'); row.className = 'pxc-cmt-crow';
+    // color swatch strip
+    const sw = document.createElement('div'); sw.className = 'pxc-cmt-colors';
+    for (const col of ['#f59e0b', '#7c5cff', '#0ea5e9', '#10b981', '#ef4444', '#a855f7']) { const b = document.createElement('button'); b.className = 'pxc-cmt-color' + (c.color === col ? ' pxc-on' : ''); b.style.background = col; b.title = col; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._setCommentColor(c, col); }); sw.appendChild(b); }
+    row.appendChild(sw);
+    const sbtn = document.createElement('button'); sbtn.className = 'pxc-cmt-send'; sbtn.textContent = (c.thread || []).length ? 'Reply' : 'Comment';
+    const send = () => { const v = (ta.value || '').trim(); if (!v) { this._closeCommentPopover(); return; } this._addCommentReply(c, v); ta.value = ''; }; // empty → close (an empty never-sent comment is discarded silently by _closeCommentPopover)
+    sbtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); send(); });
+    row.appendChild(sbtn); foot.appendChild(row);
+    box.appendChild(foot);
+    this.wrap.appendChild(box);
+    this._syncCommentPopover();
+    if (compose) setTimeout(() => { try { ta.focus(); } catch (_e) {} }, 0);
+  }
+  _syncCommentPopover() {
+    if (!this._cmtPopEl) return;
+    const c = this._byId(this._cmtPopId);
+    if (!c || c.isDeleted) { this._closeCommentPopover(); return; }
+    const sp = this._commentPinScreen(c); if (!sp) return; // detached → leave the popover where it last sat
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600;
+    const bw = this._cmtPopEl.offsetWidth || 260, bh = this._cmtPopEl.offsetHeight || 160;
+    let left = sp.x + 14, top = sp.y - 8;
+    if (left + bw > ww - 6) left = sp.x - bw - 14;       // flip left if it would clip
+    left = Math.max(6, Math.min(left, ww - bw - 6));
+    top = Math.max(6, Math.min(top, wh - bh - 6));
+    this._cmtPopEl.style.left = left + 'px'; this._cmtPopEl.style.top = top + 'px';
+  }
+  _closeCommentPopover() {
+    const c = this._cmtPopId && this._byId(this._cmtPopId);
+    if (c && !c.isDeleted && c.type === 'comment' && (!c.thread || !c.thread.length)) { c.isDeleted = true; this._commentChanged(c); } // discard an empty, never-sent comment silently (no orphan pin, no confirm)
+    if (this._cmtPopEl) { try { this._cmtPopEl.remove(); } catch (_e) {} this._cmtPopEl = null; } this._cmtPopId = null; this.dirty = true;
+  }
+  _addCommentReply(c, text) {
+    if (!c || !text) return; if (!Array.isArray(c.thread)) c.thread = [];
+    c.thread.push({ author: this._commentAuthorName(), text: String(text), ts: Date.now() }); // APPEND-ONLY
+    this._commentChanged(c);
+    if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); // re-render the thread, keep it open
+  }
+  _resolveComment(c, val) { if (!c) return; c.resolved = !!val; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); }
+  _setCommentColor(c, col) { if (!c) return; c.color = col; c.strokeColor = col; this._commentChanged(c); if (this._cmtPopId === c.id) this._buildCommentPopover(c, false); }
+  _deleteComment(c) {
+    if (!c) return;
+    const doDel = () => { c.isDeleted = true; this._closeCommentPopover(); this._commentChanged(c); try { this.plugin.ui.addToaster({ title: 'Comment deleted.', dismissible: true }); } catch (_e) {} };
+    const sp = this._commentPinScreen(c);
+    this._showNestingChoice('Delete this comment?', [ { txt: 'Delete', fn: () => { this._closeRegionChoice(); doDel(); } }, { txt: 'Cancel', fn: () => this._closeRegionChoice() } ], sp ? sp.x : (this.wrap.clientWidth || 800) / 2, sp ? sp.y : (this.wrap.clientHeight || 600) / 2);
+  }
+  // ── right-side comments rail (toggleable) ──
+  _toggleCommentRail() { if (this._cmtRailEl) this._closeCommentRail(); else { this._cmtRailOpen = true; this._syncCommentRail(); } }
+  _closeCommentRail() { this._cmtRailOpen = false; if (this._cmtRailEl) { try { this._cmtRailEl.remove(); } catch (_e) {} this._cmtRailEl = null; } this._cmtRailSig = null; }
+  _syncCommentRail() {
+    if (!this._cmtRailOpen) { if (this._cmtRailEl) this._closeCommentRail(); return; }
+    const list = this._comments();
+    const filt = this._cmtRailFilter || 'all';
+    const shown = list.filter((c) => filt === 'all' ? true : filt === 'open' ? !c.resolved : c.resolved);
+    const sig = filt + '|' + shown.map((c) => c.id + ':' + (c.resolved ? 'r' : 'o') + ':' + (c.color || '') + ':' + (c.thread ? c.thread.length : 0) + ':' + (c.thread && c.thread[0] ? (c.thread[0].text || '').slice(0, 24) : '')).join(',');
+    if (this._cmtRailEl && this._cmtRailSig === sig) return; // unchanged → don't rebuild (keeps scroll)
+    this._closeCommentRailEl();
+    this._cmtRailSig = sig;
+    const box = document.createElement('div'); box.className = 'pxc-cmt-rail'; this._cmtRailEl = box; this._themePanel(box);
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    const head = document.createElement('div'); head.className = 'pxc-cmt-railhead';
+    const ti = document.createElement('div'); ti.className = 'pxc-cmt-railtitle'; ti.textContent = 'Comments (' + list.filter((c) => !c.resolved).length + ')'; head.appendChild(ti);
+    const fwrap = document.createElement('div'); fwrap.className = 'pxc-cmt-railfilter';
+    for (const f of ['all', 'open', 'resolved']) { const b = document.createElement('button'); b.className = 'pxc-cmt-fbtn' + (filt === f ? ' pxc-on' : ''); b.textContent = f[0].toUpperCase() + f.slice(1); b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._cmtRailFilter = f; this._cmtRailSig = null; this._syncCommentRail(); }); fwrap.appendChild(b); }
+    head.appendChild(fwrap);
+    const x = document.createElement('button'); x.className = 'pxc-cmt-railclose'; x.textContent = '✕'; x.title = 'Close'; x.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closeCommentRail(); }); head.appendChild(x);
+    box.appendChild(head);
+    const ul = document.createElement('div'); ul.className = 'pxc-cmt-raillist';
+    if (!shown.length) { const em = document.createElement('div'); em.className = 'pxc-cmt-railempty'; em.textContent = 'No comments yet. Pick the Comment tool and click anything to add one.'; ul.appendChild(em); }
+    for (const c of shown) {
+      const r = this._commentAnchorRect(c); const detached = (r === null);
+      const row = document.createElement('div'); row.className = 'pxc-cmt-railrow' + (c.resolved ? ' pxc-resolved' : '');
+      const dot = document.createElement('span'); dot.className = 'pxc-cmt-rdot'; dot.style.background = c.color || '#f59e0b'; row.appendChild(dot);
+      const mid = document.createElement('div'); mid.className = 'pxc-cmt-rmid';
+      const root = c.thread && c.thread[0];
+      const t1 = document.createElement('div'); t1.className = 'pxc-cmt-rtext'; t1.textContent = root ? (root.text || '') : '(empty)'; mid.appendChild(t1);
+      const t2 = document.createElement('div'); t2.className = 'pxc-cmt-rmeta'; t2.textContent = (root ? (root.author || 'You') + ' · ' + pxcRelTime(root.ts) : '') + ((c.thread && c.thread.length > 1) ? ' · ' + (c.thread.length - 1) + ' repl' + (c.thread.length - 1 === 1 ? 'y' : 'ies') : '') + (detached ? ' · detached' : ''); mid.appendChild(t2);
+      row.appendChild(mid);
+      row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (!detached) this._jumpToComment(c); this._openCommentThread(c.id, false); });
+      ul.appendChild(row);
+    }
+    box.appendChild(ul);
+    this.wrap.appendChild(box);
+  }
+  _closeCommentRailEl() { if (this._cmtRailEl) { try { this._cmtRailEl.remove(); } catch (_e) {} this._cmtRailEl = null; } }
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
   // ── EDIT-4c: a LIVE interactive Datacore view mounted over a selected dc: query node (via window.__plexusDatacore.mountView) ──
   _closeDcOverlay() { if (this._dcMounted) { try { this._dcMounted.destroy && this._dcMounted.destroy(); } catch (_e) {} this._dcMounted = null; } if (this._dcOverlayEl) { try { this._dcOverlayEl.remove(); } catch (_e) {} this._dcOverlayEl = null; } this._dcOverlayId = null; }
@@ -6829,6 +7032,7 @@ class CanvasView {
   _restore(json) {
     try { this.scene = JSON.parse(json); } catch (_e) { return; }
     this._cacheValid = false; this._gridDirty = true; this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; try { this._closeRegionChoice(); } catch (_e) {} // undo/redo replaced the scene → cache + index + pending region/group/draw/source state stale (F2/C3/round-5 B/D/F)
+    this._cmtRailSig = null; try { this._closeCommentPopover(); } catch (_e) {} // C0: the scene was replaced → rebuild the comments rail; a popover pointing at a now-stale comment object must close
     this._committed = json; this.selected.clear(); if (this.editingId) { try { this._ta && this._ta.remove(); } catch (_e) {} this.editingId = null; this._ta = null; }
     this.dirty = true;
     if (this.rec && !this.destroyed) {
@@ -7035,6 +7239,8 @@ class CanvasView {
     try { this._syncConnStyle(); } catch (_e) {} // round-5 C: the connection-style popover (typed relationship presets + line style + arrowheads + colour) on single-select
     try { this._syncRecPanel(); } catch (_e) {} // EDIT-1: the editable record-card property panel (view/edit typed properties · Move…) on single-select of a record card
     try { this._syncDcOverlay(); } catch (_e) {} // EDIT-4: the live interactive Datacore view over a selected dc: query node
+    try { this._syncCommentRail(); } catch (_e) {} // C0: the right-side comments rail (when toggled open)
+    try { this._syncCommentPopover(); } catch (_e) {} // C0: keep an open comment thread popover anchored to its pin during pan/zoom
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -7092,6 +7298,31 @@ class CanvasView {
         this._xrefPins.push({ x: p.x, y: p.y, r: 11, lineGuid: cite.lineGuid });
       }
       ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
+    }
+    // C0: anchored-comment pins — a speech-bubble per comment at its live anchor's top-right corner (tracks move/resize/
+    // scroll/rotate via _commentAnchorRect). A detached comment (anchor element deleted) draws no pin — it lives in the rail.
+    this._commentPins = [];
+    {
+      const cs = this._comments();
+      if (cs.length) {
+        ictx.setTransform(1, 0, 0, 1, 0, 0); ictx.textAlign = 'center'; ictx.textBaseline = 'middle';
+        for (const c of cs) {
+          const sp = this._commentPinScreen(c); if (!sp) continue;
+          const cx = sp.x * d, cy = sp.y * d, bw = 24 * d, bh = 19 * d, rx = cx + 6 * d, ry = cy - bh - 6 * d;
+          const col = c.color || '#f59e0b'; ictx.globalAlpha = c.resolved ? 0.4 : 1;
+          ictx.beginPath(); ictx.moveTo(rx + 7 * d, ry + bh); ictx.lineTo(rx + 2 * d, ry + bh + 7 * d); ictx.lineTo(rx + 14 * d, ry + bh); ictx.closePath(); ictx.fillStyle = col; ictx.fill(); // tail
+          this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.fillStyle = col; ictx.fill();
+          ictx.lineWidth = 1.4 * d; ictx.strokeStyle = 'rgba(255,255,255,0.92)'; this._rrect(ictx, rx, ry, bw, bh, 6 * d); ictx.stroke();
+          if (this._cmtPopId === c.id) { ictx.lineWidth = 2 * d; ictx.strokeStyle = col; this._rrect(ictx, rx - 3 * d, ry - 3 * d, bw + 6 * d, bh + 6 * d, 8 * d); ictx.stroke(); }
+          const n = (c.thread && c.thread.length) || 0; ictx.fillStyle = '#fff';
+          if (c.resolved) { ictx.font = '700 ' + (12 * d) + 'px system-ui, sans-serif'; ictx.fillText('✓', rx + bw / 2, ry + bh / 2 + 0.5 * d); }
+          else if (n > 1) { ictx.font = '700 ' + (11 * d) + 'px system-ui, sans-serif'; ictx.fillText(String(n), rx + bw / 2, ry + bh / 2 + 0.5 * d); }
+          else { ictx.beginPath(); ictx.arc(rx + bw / 2, ry + bh / 2, 2.6 * d, 0, 7); ictx.fill(); }
+          ictx.globalAlpha = 1;
+          this._commentPins.push({ x: (rx + bw / 2) / d, y: (ry + bh / 2) / d, r: 15, id: c.id });
+        }
+        ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
+      }
     }
     // Flash — a fast, attention-grabbing pulse on a navigated cross-ref target. For an in-image region:
     // SPOTLIGHT (dim the rest, region stays lit) + a glowing accent ring, recomputed LIVE so it tracks the image.
@@ -7230,7 +7461,7 @@ class CanvasView {
     cv.width = Math.max(1, Math.ceil(r.w * d)); cv.height = Math.max(1, Math.ceil(r.h * d));
     const c = cv.getContext('2d'); c.setTransform(d, 0, 0, d, 0, 0); c.clearRect(0, 0, r.w, r.h); c.globalAlpha = 0.62;
     let n = 0; const cap = 4000;
-    for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden) continue; if (++n > cap) break;
+    for (const el of this.scene.elements) { if (el.isDeleted || el.secHidden || el.type === 'comment') continue; if (++n > cap) break; // C0: comments are overlay pins — no minimap dot
       const x = mapp.ox + (el.x || 0) * mapp.scale, y = mapp.oy + (el.y || 0) * mapp.scale;
       const w = Math.max(1.4, Math.abs(el.width || 0) * mapp.scale), h = Math.max(1.4, Math.abs(el.height || 0) * mapp.scale);
       c.fillStyle = el.type === 'frame' ? 'rgba(154,160,166,0.7)' : (el.strokeColor || '#7c5cff');
@@ -7307,7 +7538,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -7337,6 +7568,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: "Plexus: Open today's whiteboard", icon: 'ti-calendar', onSelected: () => this._openTodayWhiteboard() }); // IO-2
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Add task', icon: 'ti-checkbox', onSelected: () => { const v = this._activeView(); if (v) v._addTaskNode(); } }); // IO-1
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Cite selection (copy reference)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._copyImageRefToClip(); } });
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment (anchor a note)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v.tool = 'comment'; v._syncToolbar(); try { this.ui.addToaster({ title: 'Click a card, a body line, an image region, or empty space to anchor a comment.', dismissible: true }); } catch (_e) {} } } }); // C0
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle comments panel', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._toggleCommentRail(); } }); // C0
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
@@ -9182,6 +9415,44 @@ const BASE_CSS = `
 /* round-5 C: connection-style popover (typed relationship presets + line style + arrowheads + colour) */
 /* EDIT-1: editable record-card property panel */
 .pxc-host .pxc-root .pxc-recpanel { position: absolute; z-index: 8; display: flex; flex-direction: column; gap: 6px; padding: 9px; width: 248px; max-height: 70vh; overflow-y: auto; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 11px; box-shadow: 0 10px 30px rgba(0,0,0,.42); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
+/* ── C0: anchored comments — thread popover + right rail (theme-matched to the canvas via inline --vars) ── */
+.pxc-host .pxc-root .pxc-cmtpop { position: absolute; z-index: 9; display: flex; flex-direction: column; width: 270px; max-height: 64vh; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 12px; box-shadow: 0 12px 34px rgba(0,0,0,.46); font: 12px/1.4 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); overflow: hidden; }
+.pxc-host .pxc-root .pxc-cmt-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border-bottom: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-cmt-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.pxc-host .pxc-root .pxc-cmt-meta { font-weight: 600; color: var(--color-text-50, #fff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pxc-host .pxc-root .pxc-cmt-spacer { flex: 1 1 auto; }
+.pxc-host .pxc-root .pxc-cmt-hbtn { width: 24px; height: 22px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--color-text-600, #9aa3b2); cursor: pointer; font-size: 13px; line-height: 1; }
+.pxc-host .pxc-root .pxc-cmt-hbtn:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); color: var(--color-text-50, #fff); }
+.pxc-host .pxc-root .pxc-cmt-thread { display: flex; flex-direction: column; gap: 7px; padding: 9px 10px; overflow-y: auto; }
+.pxc-host .pxc-root .pxc-cmt-bub { background: var(--input-bg-color, #232838); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; padding: 6px 8px; }
+.pxc-host .pxc-root .pxc-cmt-bubhead { font-size: 10px; color: var(--color-text-600, #9aa3b2); margin-bottom: 2px; }
+.pxc-host .pxc-root .pxc-cmt-bubtext { color: var(--color-text-400, #e6e8ee); white-space: pre-wrap; word-break: break-word; }
+.pxc-host .pxc-root .pxc-cmt-empty { color: var(--color-text-600, #9aa3b2); font-style: italic; padding: 2px 0; }
+.pxc-host .pxc-root .pxc-cmt-compose { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-cmt-ta { width: 100%; resize: vertical; min-height: 34px; padding: 6px 8px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 7px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 12px/1.35 system-ui, sans-serif; box-sizing: border-box; }
+.pxc-host .pxc-root .pxc-cmt-crow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pxc-host .pxc-root .pxc-cmt-colors { display: flex; gap: 4px; }
+.pxc-host .pxc-root .pxc-cmt-color { width: 15px; height: 15px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.pxc-host .pxc-root .pxc-cmt-color.pxc-on { border-color: var(--color-text-50, #fff); }
+.pxc-host .pxc-root .pxc-cmt-send { padding: 5px 13px; border: none; border-radius: 7px; background: var(--button-primary-bg-color, #7c5cff); color: #fff; cursor: pointer; font: 600 12px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-cmt-send:hover { filter: brightness(1.08); }
+.pxc-host .pxc-root .pxc-cmt-rail { position: absolute; right: 10px; top: 56px; z-index: 8; display: flex; flex-direction: column; width: 264px; max-height: calc(100% - 72px); background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.42); font: 12px/1.35 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); overflow: hidden; }
+.pxc-host .pxc-root .pxc-cmt-railhead { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-bottom: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-cmt-railtitle { font-weight: 600; color: var(--color-text-50, #fff); flex: 1 1 auto; }
+.pxc-host .pxc-root .pxc-cmt-railfilter { display: flex; gap: 3px; }
+.pxc-host .pxc-root .pxc-cmt-fbtn { padding: 3px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-600, #9aa3b2); cursor: pointer; font: 10px/1.1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-cmt-fbtn.pxc-on { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-cmt-railclose { width: 22px; height: 22px; border: none; border-radius: 6px; background: transparent; color: var(--color-text-600, #9aa3b2); cursor: pointer; }
+.pxc-host .pxc-root .pxc-cmt-railclose:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); color: var(--color-text-50, #fff); }
+.pxc-host .pxc-root .pxc-cmt-raillist { display: flex; flex-direction: column; overflow-y: auto; padding: 6px; gap: 4px; }
+.pxc-host .pxc-root .pxc-cmt-railempty { color: var(--color-text-600, #9aa3b2); font-style: italic; padding: 10px 6px; }
+.pxc-host .pxc-root .pxc-cmt-railrow { display: grid; grid-template-columns: 12px 1fr; gap: 8px; align-items: start; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+.pxc-host .pxc-root .pxc-cmt-railrow:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.10)); }
+.pxc-host .pxc-root .pxc-cmt-railrow.pxc-resolved { opacity: .55; }
+.pxc-host .pxc-root .pxc-cmt-rdot { width: 9px; height: 9px; border-radius: 50%; margin-top: 3px; }
+.pxc-host .pxc-root .pxc-cmt-rmid { min-width: 0; }
+.pxc-host .pxc-root .pxc-cmt-rtext { color: var(--color-text-400, #e6e8ee); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pxc-host .pxc-root .pxc-cmt-rmeta { font-size: 10px; color: var(--color-text-600, #9aa3b2); margin-top: 1px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
