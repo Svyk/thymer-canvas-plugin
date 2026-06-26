@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.130.0 — Phase 3.P3.3: "Arrange related pages (parallel, connected)" (2026-06-25)
+The azlen centerpiece, as a command: select a record card → forward-ref pages stack RIGHT (reading order), referencing
+pages stack LEFT, focus centered; existing cards MOVED+sized into columns, missing ones pulled in; relational ghosts
+rebuilt → the P3.0/P3.1 gradient/glow edges connect the columns. Pure `pxcColumnarLayout` + `_arrangeParallel` + command
+(`ti-layout-board`, bundled). Confirm-gated when relocating >6 cards; fully undoable; geometry-only (never edits/deletes
+content); mutual ref stays RIGHT; 12/column cap. Review: **SHIP** (no HIGH/MED — data-safety/undo/confirm/ref-fetch all
+correct); 2 LOW fixed (silent ghost rebuild → no double toaster; stale-focus-closure guard). Tests `pxc_columnar` 14.
+Commit `90c7bb3`, pushed. **Next: P3.4 — promote ghost→real (click a ghost edge → a persistent labeled connector).**
+
 ## ✅ v1.129.0 — Phase 3.P3.2: animated flow on the hovered edge (2026-06-25)
 A glowing particle travels along each focused ghost edge OUTWARD from the hovered card (quad-Bezier B(t), 0→1 every
 1.4s) — shows relationship direction. `dirty`-rearmed in `_drawGhostFocus` so it animates while hovering; idles to **0%
