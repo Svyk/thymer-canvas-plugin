@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.148.0 — C6: comment categories (Note/Question/To-do/Idea/Done/Decision) + rail filter (2026-06-26)
+The @round "review the comments on a doc" pillar gains organization: anchored comments get named, color-coded categories;
+the popover's old free color swatch becomes category chips (sets category + color in one click), and the rail gains a
+category filter that ANDs with All/Open/Resolved. Pure `pxcCommentCategory(c)` (explicit `category` → infer-from-color →
+Note default), so existing colored comments classify for free (the 6 category colors ARE the old swatch colors — zero
+migration). Category is a SCENE field (rides the whole-element scene save) — NOT mirrored, so no unknown-`Category`-property
+write (plugin can't create properties). Review: **SHIP, CLEAN** — no HIGH/MED; data-safety (scene-only, mirror untouched),
+back-compat, single-active-chip, rail-sig completeness, filter composition, theme-safe CSS all confirmed. Folded all 3
+LOWs: deleted the now-dead `_setCommentColor`, filter-aware empty-state copy ("No comments match this filter"), catdot
+hover affordance. Tests `pxc_cmtcat` 16; cmtreview/legend regress green. **Next: more on-theme features.**
+
 ## ✅ v1.147.0 — P3.12: connection legend (read the visual language) (2026-06-26)
 A small theme-aware key (bottom-left, shown only while the connection layer is on) for the edge/badge visual language, so
 the rich connection encodings are readable. Pure `_connLegendRows()` reflects the active edge-type filter + badge state;
