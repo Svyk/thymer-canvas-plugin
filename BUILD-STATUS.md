@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.141.0 — C5: comment review navigation (step through comments) (2026-06-26)
+The @round "review the comments on a doc" gesture for the comments pillar: three commands — **Next comment**, **Previous
+comment**, **Next unresolved comment** — step through the board's anchored comments one at a time in reading order
+(top→bottom, left→right by anchor), flying + flashing + opening each thread. `_commentReviewStep(dir, unresolvedOnly)`
+reuses `_jumpToComment` (camera reveal+flash) + `_openCommentThread(id,false)`; tracks `_cmtReviewId` so steps advance
+from the last, wraps at the ends, restarts cleanly if the tracked comment was deleted/resolved/detached. Read-only.
+Review: **SHIP, CLEAN for C5** — no HIGH/MED; data-safety (no writes), stale-id resume, NaN-free comparator, empty-cases,
+leak-free all confirmed. (Reviewer surfaced a PRE-EXISTING latent bug — duplicate `_polyBBox` defs; the array-form
+shadows the object-form so region anchors fall back to host bbox. Out of scope for C5 → queued as the next focused fix.)
+Tests `pxc_cmtreview` 13; promoteall/hubbadge regress green. **Next: fix the `_polyBBox` collision (region-anchor precision).**
+
 ## ✅ v1.140.0 — P3.10: "Make all inferred links real" (batch promote) (2026-06-26)
 The batch completion of P3.4 (promote one ghost→real connector): after you surface inferred reference links and arrange
 pages, one command promotes EVERY currently-shown ghost edge (type-filtered) to a real curved "relates to" connector at

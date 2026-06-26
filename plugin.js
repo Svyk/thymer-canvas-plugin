@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.140.0';
+const PLEXUS_VERSION = '1.141.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4442,6 +4442,23 @@ class CanvasView {
     if (!anchor) { const r = this._commentAnchorRect(c); if (r) anchor = { region: { x: r.x - 24, y: r.y - 24, w: (r.w || 0) + 48, h: (r.h || 0) + 48 } }; }
     if (anchor) { try { this._flashAnchor(anchor); } catch (_e) {} }
   }
+  // C5 review mode: step through the board's comments one at a time (reading order: top→bottom, left→right by anchor),
+  // flying + flashing + opening each thread — the @round "review the comments on a doc" gesture. dir ±1, wraps; optionally
+  // unresolved-only. Read-only (jump + open thread; no writes). Tracks _cmtReviewId so repeated steps advance from the last.
+  _commentReviewStep(dir, unresolvedOnly) {
+    let list = this._comments().filter((c) => this._commentAnchorRect(c)); // only anchored comments are fly-able (a detached one has no on-canvas target)
+    if (unresolvedOnly) list = list.filter((c) => !c.resolved);
+    if (!list.length) { this._cmtReviewId = null; try { this.plugin.ui.addToaster({ title: unresolvedOnly ? 'Plexus: no unresolved comments to review.' : 'Plexus: no comments to review yet.', dismissible: true }); } catch (_e) {} return; }
+    const rectOf = new Map(); for (const c of list) rectOf.set(c.id, this._commentAnchorRect(c)); // resolve each anchor ONCE for the sort
+    list.sort((a, b) => { const ra = rectOf.get(a.id), rb = rectOf.get(b.id); return (ra.y - rb.y) || (ra.x - rb.x); });
+    let idx = list.findIndex((c) => c.id === this._cmtReviewId);
+    if (idx < 0) idx = (dir > 0 ? 0 : list.length - 1); // first step (or the tracked one was filtered/deleted) → start at the first (next) / last (prev)
+    else idx = (idx + dir + list.length) % list.length; // wrap around the ends
+    const c = list[idx]; this._cmtReviewId = c.id;
+    this._jumpToComment(c); this._openCommentThread(c.id, false);
+    const root = c.thread && c.thread[0];
+    try { this.plugin.ui.addToaster({ title: 'Comment ' + (idx + 1) + '/' + list.length + (root && root.author ? ' · ' + root.author : '') + (c.resolved ? ' · resolved' : ''), dismissible: true }); } catch (_e) {}
+  }
   // C3: a compact hover preview on a comment pin (author · first line · reply count) — pointer-events:none, never blocks.
   _showCommentPreview(c, cx, cy) {
     this._hideCommentPreview(); if (!c) return;
@@ -8139,6 +8156,9 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Cite selection (copy reference)', icon: 'ti-link', onSelected: () => { const v = this._activeView(); if (v) v._copyImageRefToClip(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Comment (anchor a note)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) { v.tool = 'comment'; v._syncToolbar(); try { this.ui.addToaster({ title: 'Click a card / body line / empty space, or drag a box on an image or PDF page to comment on that region.', dismissible: true }); } catch (_e) {} } } }); // C0
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle comments panel', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._toggleCommentRail(); } }); // C0
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Next comment (review)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, false); } }); // C5: step through comments (reading order, fly+flash+open)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Previous comment (review)', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(-1, false); } }); // C5
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Next unresolved comment', icon: 'ti-message', onSelected: () => { const v = this._activeView(); if (v) v._commentReviewStep(1, true); } }); // C5: review only the open comments
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Paste image reference', icon: 'ti-link', onSelected: () => this._pasteImageRef() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connect from a region', icon: 'ti-arrow-up-right', onSelected: () => { const v = this._activeView(); if (v) v._showSourceRegionChoice(); } }); // round-5 F: draw a SOURCE region, then drag a connection FROM it
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Jump to citing note', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._jumpFromSelection(); } });
