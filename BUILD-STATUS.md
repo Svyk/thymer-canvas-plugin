@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.168.0 — C25: @mention CROSS-SURFACE (the comment surfaces on the mentioned person's record) — PLATFORM-VERIFIED (2026-06-26)
+The previously-"platform-blocked" half of @mention (C8), now unblocked + live-verified via the Thymer MCP. **Platform
+resolution:** the data-model mismatch (getActiveUsers gives USER guids, not People-record guids) is solved by a `user`-type
+relation — created a **"Mentions"** property (type `user`, `many:true`, `fR8MJHDG9F2PEVD`) on the Canvas Comments collection
+via MCP, and **verified end-to-end**: an MCP write of `Mentions: ["P000000000"]` read back as
+`{type:"user", many:true, value:["user","P000000000"]}` (persists). **Plugin:** `_mirrorComment` now writes `c.mentions`
+(user guids) to the Mentions relation using the EXACT proven Author user-object idiom (`getActiveUsers()` → guid→user map →
+`addValue(u)` for users not already on the prop — append-only/idempotent via `values()` dedup); `mentPick` now enqueues the
+mirror (`_scheduleCommentMirror`) so a mention reaches the durable relation even without sending a reply. So a mentioned
+person's record now surfaces the comment via the Mentions backreference. (Single-user workspace today — only "Svy" — so it's
+mechanically demonstrable; the relation + write are proven.) Tests `pxc_mention` 14 (pure helpers unchanged). **Verified
+with the Thymer MCP, not deferred.** Next: PDF outline (verifying pdf.js getOutline via chrome).
+
 ## ✅ v1.167.0 — C24: copy connection graph as markdown (traceability digest) + shared clipboard helper (2026-06-26)
 A QA-traceability feature: a command exports the board's reference graph (which notes reference which) as a markdown
 digest — `# … N notes, M links`, then per note `## title` · `→ references: …` · `← referenced by: …`. Pure

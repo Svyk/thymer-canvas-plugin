@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.167.0';
+const PLEXUS_VERSION = '1.168.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4663,7 +4663,7 @@ class CanvasView {
     const mst = { open: false, items: [], idx: 0, at: -1, tokenLen: 0 };
     const mentHide = () => { mst.open = false; ment.style.display = 'none'; ment.innerHTML = ''; };
     const mentRender = () => { ment.innerHTML = ''; mst.items.forEach((it, i) => { const r = document.createElement('div'); r.className = 'pxc-cmt-mention' + (i === mst.idx ? ' pxc-on' : ''); r.textContent = it.name; r.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); mentPick(it); }); ment.appendChild(r); }); };
-    const mentPick = (it) => { if (!it) return; const r = pxcInsertMention(ta.value, mst.at, mst.tokenLen, it.name); ta.value = r.text; try { ta.setSelectionRange(r.caret, r.caret); } catch (_e) {} if (it.guid) { c.mentions = c.mentions || []; if (!c.mentions.includes(it.guid)) { c.mentions.push(it.guid); this.dirty = true; this.scheduleSave(); } } mentHide(); ta.focus(); }; // dirty+scheduleSave (NOT _commentChanged — no mirror surface for mentions yet) so the push persists even if the user picks then closes without sending. (Append-only: a mention whose @text is later deleted lingers in c.mentions — harmless until cross-surface wires it; revisit then.)
+    const mentPick = (it) => { if (!it) return; const r = pxcInsertMention(ta.value, mst.at, mst.tokenLen, it.name); ta.value = r.text; try { ta.setSelectionRange(r.caret, r.caret); } catch (_e) {} if (it.guid) { c.mentions = c.mentions || []; if (!c.mentions.includes(it.guid)) { c.mentions.push(it.guid); this.dirty = true; this.scheduleSave(); try { this._scheduleCommentMirror(c.id); } catch (_e) {} } } mentHide(); ta.focus(); }; // C25: enqueue the mirror so the mention reaches the durable "Mentions" relation (cross-surface) even if the user picks then closes without sending a reply. (Append-only: a mention whose @text is later deleted lingers in c.mentions — harmless.)
     const mentRefresh = () => { const tok = pxcMentionToken(ta.value, ta.selectionStart); if (!tok) return mentHide(); const items = pxcFilterMentions(this._mentionCandidates(), tok.token, 8); if (!items.length) return mentHide(); mst.open = true; mst.items = items; mst.idx = 0; mst.at = tok.at; mst.tokenLen = tok.token.length; ment.style.display = 'block'; mentRender(); };
     const mentNav = (d) => { if (!mst.items.length) return; mst.idx = (mst.idx + d + mst.items.length) % mst.items.length; mentRender(); };
     ta.addEventListener('input', mentRefresh);
@@ -4875,6 +4875,9 @@ class CanvasView {
       try { rec.prop('Status').setChoice(c.resolved ? 'resolved' : 'open'); } catch (_e) {}
       try { rec.prop('Anchor Kind').setChoice(this._commentAnchorKind(c)); } catch (_e) {}
       try { rec.prop('Anchor Data').set(JSON.stringify({ anchor: c.anchor || null, pinDx: c.pinDx || 0, pinDy: c.pinDy || 0 })); } catch (_e) {}
+      // C25 cross-surface @mentions → the "Mentions" (user, many) relation, so a mentioned person's record surfaces the comment.
+      // Append-only / idempotent: addValue only users not already on the prop. c.mentions holds user GUIDs; the prop takes user OBJECTS (the Author idiom).
+      if (c.mentions && c.mentions.length) { try { const us = (this.plugin.data.getActiveUsers && this.plugin.data.getActiveUsers()) || []; const byGuid = new Map(); for (const u of us) { let g = null; try { g = (u.getGuid && u.getGuid()) || u.guid || u.id; } catch (_e2) {} if (g) byGuid.set(String(g), u); } const mp = rec.prop('Mentions'); if (mp && mp.addValue) { const cur = new Set(); try { for (const v of (mp.values ? (mp.values() || []) : [])) { const g = (v && v.getGuid && v.getGuid()) || (typeof v === 'string' ? v : (v && (v.guid || v.id))); if (g != null) cur.add(String(g)); } } catch (_e2) {} for (const g of c.mentions) { if (cur.has(String(g))) continue; const u = byGuid.get(String(g)); if (u) { try { mp.addValue(u); } catch (_e2) {} } } } } catch (_e) {} }
       const noteGuid = this._commentedRecordGuid(c); if (noteGuid) await this._setRel(rec, 'Commented Record', noteGuid);
       // thread replies → body lines, APPEND-ONLY (dedup against the record's CURRENT body-line count → idempotent + kill-safe)
       let items = []; try { items = await rec.getLineItems() || []; } catch (_e) {}
