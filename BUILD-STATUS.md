@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅ PHASE 1 COMPLETE — anchored comments (C0–C3) (2026-06-25)
+The round/azlen "anchored threaded comments" pillar is shipped end-to-end: **C0** (v1.119) scene `type:'comment'` element
+anchored via `_bindingFor` + speech-bubble pins + thread popover + right rail; **C1** (v1.120) durable Thymer mirror to the
+`Canvas Comments` collection (scene = source of truth); **C2** (v1.121) cross-surface — comments surface on the commented
+note's Backreferences with fly-to-pin; **C3** (v1.122) polish. Next pillar: **Phase 2 — PDF documents** (D-A first).
+
+## ✅ v1.122.0 — Phase 1.C3: anchored-comment polish (2026-06-25)
+Pin DRAG-to-nudge (click-vs-drag at a 4px threshold; nudge persists scene-only + refreshes the mirror's Anchor Data,
+debounced); hover PREVIEW (author·first line·reply count, reusing `.pxc-refpreview`); soft hover RING also driven by
+rail-row hover; entrance POP (0.55→1 ease-out-cubic 160ms, `_cmtBorn` view Map, never serialized). Adversarial review:
+**HIGH** (the GUARDRAILS crop-in-place leak class — `_cmtPinDown` not cleared in `onPtrCancel` → a
+lostpointercapture/pointercancel mid-pin-press WEDGED `onMove`) + **2 MED** preview-leaks (mode-drag and @ref→pin
+hand-off) — all fixed (`onPtrCancel` + onDown-top clear `_cmtPinDown`; drag/hover paths tear down the previews). Tests
+`pxc_cmtpolish` 18. Commit `832f535`, pushed.
+
 ## ✅ v1.121.0 — Phase 1.C2: comments surface on the commented note's Backreferences (2026-06-25)
 An anchored comment on a record/line now appears in that note's native Backreferences as a "Canvas Comments (N)" group
 (💬 amber) → click flips to the drawing, flies to the anchor, and opens the thread. `_reindexBackrefs` comment pass keys
