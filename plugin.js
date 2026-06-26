@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.144.0';
+const PLEXUS_VERSION = '1.145.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -152,6 +152,18 @@ function pxcBfsPath(edges, src, dst) {
   for (let h = 0; h < q.length; h++) { const u = q[h]; if (u === dst) break; for (const v of adj.get(u)) if (!prev.has(v)) { prev.set(v, u); q.push(v); } }
   if (!prev.has(dst)) return null;
   const path = []; for (let c = dst; c != null; c = prev.get(c)) path.push(c); return path.reverse();
+}
+// Connected components of an UNDIRECTED edge list (union-find). Returns an array of components, each an array of node ids.
+// Only nodes that appear in at least one edge are included (isolated nodes are not edges → not returned). Pure → testable.
+function pxcConnectedComponents(edges) {
+  const parent = new Map();
+  const add = (x) => { if (!parent.has(x)) parent.set(x, x); };
+  const find = (x) => { let r = x; while (parent.get(r) !== r) r = parent.get(r); while (parent.get(x) !== r) { const nx = parent.get(x); parent.set(x, r); x = nx; } return r; }; // path-compression
+  const union = (x, y) => { add(x); add(y); const rx = find(x), ry = find(y); if (rx !== ry) parent.set(rx, ry); };
+  for (const e of (edges || [])) { if (!e || e.a == null || e.b == null || e.a === e.b) continue; union(e.a, e.b); }
+  const groups = new Map();
+  for (const x of parent.keys()) { const r = find(x); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(x); }
+  return [...groups.values()];
 }
 function pxcGraphLayout(nodes, edges, opts) {
   const N = nodes.length; if (N < 2) return nodes;
@@ -6651,6 +6663,38 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Auto-clustered ' + els.length + ' element(s) into ' + clusters.length + ' named group(s).', dismissible: true }); } catch (_e) {}
   }
+  // P3.11 "group linked pages into frames": cluster cards by REFERENCE relatedness (connected components of the ghost graph,
+  // not embeddings → synchronous, no AI), then move each multi-card component into a tidy labelled frame — the organize-by-
+  // relatedness capstone to the parallel-pages story. Append-only frames; cards MOVED (confirm-gated past 6). Reuses the
+  // _aiAutoCluster layout math; basis = the reference graph honoring the active edge-type filter.
+  async _frameClusters() {
+    if (!this._ghostEdges || !this._ghostEdges.length) { try { await this._buildRelationalGhosts(true); } catch (_e) {} } // need the reference graph
+    const edges = (this._ghostEdges || []).filter((ge) => this._ghostTypeOk(ge));
+    if (!edges.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no inferred links to cluster. Arrange related pages (or toggle ghost-edges) first.', dismissible: true }); } catch (_e) {} return; }
+    const comps = pxcConnectedComponents(edges)
+      .map((ids) => ids.map((id) => this._byId(id)).filter((el) => el && !el.isDeleted && el.type === 'record')) // resolve to live record cards
+      .filter((cl) => cl.length >= 2); // only multi-card clusters earn a frame
+    if (!comps.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no linked clusters of 2+ pages found.', dismissible: true }); } catch (_e) {} return; }
+    const moves = comps.reduce((n, cl) => n + cl.length, 0);
+    const run = () => {
+      const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+      const CW = 200, CH = 110, GAP = 16, PAD = 18, HEAD = 26, RIGHT = c.x + 700;
+      let fx = this._snap(c.x - 460), fy = this._snap(c.y - 240), rowH = 0;
+      comps.forEach((cl, ci) => {
+        const cols = Math.max(1, Math.ceil(Math.sqrt(cl.length))), rows = Math.ceil(cl.length / cols);
+        const fw = cols * (CW + GAP) + PAD * 2 - GAP, fh = rows * (CH + GAP) + PAD * 2 + HEAD - GAP;
+        if (fx + fw > RIGHT) { fx = this._snap(c.x - 460); fy = this._snap(fy + rowH + 40); rowH = 0; }
+        const frame = makeFrame(fx, fy, fw, fh); frame.name = 'Linked ' + (ci + 1); this.scene.elements.unshift(frame);
+        cl.forEach((el, k) => { const col = k % cols, row = Math.floor(k / cols); el.x = this._snap(fx + PAD + col * (CW + GAP)); el.y = this._snap(fy + PAD + HEAD + row * (CH + GAP)); el.width = CW; el.height = CH; });
+        fx = this._snap(fx + fw + 40); rowH = Math.max(rowH, fh);
+      });
+      this.selected.clear(); this._updateBindings(); try { this._buildRelationalGhosts(true); } catch (_e) {} // re-derive ghosts at the new positions (line-anchored edges re-resolve)
+      this._gridDirty = true; this._cacheValid = false; this.dirty = true; this.scheduleSave();
+      try { this.plugin.ui.addToaster({ title: 'Grouped ' + moves + ' linked pages into ' + comps.length + ' frame' + (comps.length === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+    };
+    if (moves > 6) { this._showNestingChoice('Group ' + moves + ' linked pages into ' + comps.length + ' frame' + (comps.length === 1 ? '' : 's') + ' (moves cards)?', [{ txt: 'Group', fn: () => { this._closeRegionChoice(); run(); } }, { txt: 'Cancel', fn: () => this._closeRegionChoice() }], this.cssW / 2, 100); }
+    else run();
+  }
   // P3.5: the connection-density filter — should this ghost edge be drawn at all? Honors the relation-type filter (all/rel/
   // semantic). A `null` ge passes (defensive). Used by _drawGhosts, _drawGhostFocus, and _ghostEdgeAt so they stay consistent.
   _ghostTypeOk(ge) { const t = (this.plugin._settings && this.plugin._settings.edgeTypes) || 'all'; if (t === 'rel') return !!(ge && ge.rel); if (t === 'semantic') return !(ge && ge.rel); return true; }
@@ -8253,6 +8297,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Semantic ghost-edges (local embeddings)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._toggleGhosts(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Relational ghost-edges (inferred ref/backref links)', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._buildRelationalGhosts(); } }); // Obsidian/ExcaliBrain "show inferred links" — blue dashes between related-but-unconnected cards
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Make all inferred links real', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._promoteAllGhosts(); } }); // P3.10: batch-promote every shown ghost edge → real "relates to" connectors (append-only, confirm-gated past 6)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Group linked pages into frames', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._frameClusters(); } }); // P3.11: cluster cards by reference relatedness (connected components) → a labelled frame per cluster (moves cards, confirm-gated past 6)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connection density (all ↔ hovered-only)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings; s.edgeDensity = (s.edgeDensity === 'focus') ? 'all' : 'focus'; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeDensity === 'focus' ? 'hovered-only (declutter)' : 'all shown') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Filter connections (all / references / semantic)', icon: 'ti-affiliate', onSelected: () => { const s = this._settings, order = ['all', 'rel', 'semantic']; s.edgeTypes = order[(order.indexOf(s.edgeTypes || 'all') + 1) % 3]; savePlexusSettings(s); for (const v of this._views) { v._cacheValid = false; v.dirty = true; } const v = this._activeView(); let none = false; try { if (v && v._ghostEdges && v._ghostEdges.length && s.edgeTypes !== 'all') none = !v._ghostEdges.some((ge) => v._ghostTypeOk(ge)); } catch (_e) {} try { this.ui.addToaster({ title: 'Connections: ' + (s.edgeTypes === 'rel' ? 'references only' : s.edgeTypes === 'semantic' ? 'semantic only' : 'all types') + (none ? ' (none in the current set — the ghost layer is the other kind)' : '') + '.', dismissible: true }); } catch (_e) {} } }); // P3.5: honest when the active ghost set has no edges of the chosen kind (the rel/semantic builders replace each other)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI diagram from prompt', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._aiDiagram(); } });

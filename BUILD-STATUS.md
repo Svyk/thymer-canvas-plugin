@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.145.0 — P3.11: group linked pages into frames (organize by relatedness) (2026-06-26)
+The capstone to the parallel-pages story: cluster cards by REFERENCE relatedness (connected components of the ghost
+graph, synchronous — no AI/embeddings) and move each multi-card cluster into a labelled "Linked N" frame. Pure
+`pxcConnectedComponents` (union-find, path-compressed); `_frameClusters()` filters edges by the active edge-type filter,
+resolves to live record cards, keeps components ≥2, confirm-gated past 6 moves, re-derives the ghost graph after (so the
+line-anchored edges re-resolve at the new positions). Reuses the shipped `_aiAutoCluster` layout math (basis = references,
+not embeddings). Review: **SHIP, CLEAN** — no HIGH/MED; data-safe (moves cards + appends frames, zero deletes/record
+writes), confirm-before-mutation, union-find termination/completeness, resolve/filter, no idle-CPU all confirmed. The only
+LOW (a new frame can geometrically "own" a pre-existing off-cluster card it lands on) is inherited verbatim from the
+already-shipped `_aiAutoCluster` and is non-destructive/reversible. Tests `pxc_clusters` 11; lineanchor/trace regress green. **Next: more on-theme features.**
+
 ## ✅ v1.144.0 — AZLEN SIGNATURE: line-anchored ghost endpoints (2026-06-26)
 The core azlen "parallel pages, visibly connected" visual: a reference edge now emerges from the EXACT body line that
 holds the ref, not the card center — so you see the connection thread out of the line of text. Build-side `srcLine` map
