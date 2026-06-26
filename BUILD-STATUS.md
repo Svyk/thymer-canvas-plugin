@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅✅ PHASE 2 COMPLETE — PDF documents (D-A…D-D) (2026-06-25)
+The round/PDF pillar is shipped: **D-A** (v1.123) document model + cross-runtime blob-worker; **D-B** (v1.124) lazy
+placeholder + bounded background fill; **D-C** (v1.125) page-nav chrome + explode/stack; **D-D** (v1.126) one-click region
+comment tying PDF back to the C0–C3 comment system. Next pillar: **Phase 3 — parallel-pages-visibly-connected** (P3.0 first).
+
+## ✅ v1.126.0 — Phase 2.D-D: one-click region comment (2026-06-25)
+The Comment tool: CLICK = point/element comment (C0); DRAG a box over an image/PDF page = REGION comment anchored to
+`{elementId, frac}` (sits on the region, tracks the page). New `_createCommentAnchored` (shared click+region); onDown starts
+`mode='cmtregion'` + the crop marquee; onUp decides drag-vs-click; onPtrCancel clears `_cmtRegionDown` (no wedge). A PDF-page
+region comment is canvas-only on the note side (`_commentedRecordGuid` null for an image) but still mirrors with Anchor
+Kind='region' + Drawing relation. Review: **SHIP** (no wedge, frac clamped, C0–C3 unaffected, pin-click-to-open still wins);
+1 LOW fixed (command toaster). Tests `pxc_cmtregion` 9. Commit `74e7868`, pushed.
+
 ## ✅ v1.125.0 — Phase 2.D-C: PDF page-nav chrome + explode/stack (2026-06-25)
 Select a PDF page → a world-anchored chrome (`‹ p N/M ›` prev/next via `_focusMatch` to the sibling page in the same
 `el.pdf.docId`, + Grid/Stack). Commands "Explode PDF to grid" / "Stack PDF pages" (selected doc, else first PDF doc).
