@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.131.0 — Phase 3.P3.4: promote ghost→real connector (2026-06-25)
+Click an inferred ghost edge (empty space) → a persistent "relates to" connector. `_ghostEdgeAt` (samples the ghost's
+quad curve, same control point as the renderer, distToSeg ≤ 8/zoom); `_promoteGhost` (curved 3-point arrow bound to both
+cards + relates-to preset + real label; removes the pair from the ghost set). APPEND-only, undoable; onDown-gated to
+select+empty-space+no-shift (never hijacks a card/pin click); excludes the pair from future ghost rebuilds. Review:
+**SHIP** (append-only/undo/gating/re-exclusion sound); 1 MED fixed (2-point curved:true renders straight → added the
+perpendicular waypoint so it curves to match the ghost). Tests `pxc_promote` 14. Commit `2f29fb6`, pushed. **Final ship:
+P3.5 — connection-density control (only-hovered mode / by-relation-type filter / threshold).**
+
 ## ✅ v1.130.0 — Phase 3.P3.3: "Arrange related pages (parallel, connected)" (2026-06-25)
 The azlen centerpiece, as a command: select a record card → forward-ref pages stack RIGHT (reading order), referencing
 pages stack LEFT, focus centered; existing cards MOVED+sized into columns, missing ones pulled in; relational ghosts
