@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.166.0 — C23: semantic edge hover shows the similarity % (2026-06-26)
+Small enhancement to the NotebookLM-style semantic view: hovering a semantic ghost edge now shows "N% similar" instead of
+a generic "related". One-line change to the `_drawGhostFocus` label derivation — the existing fallback `'related'` becomes
+`ge.sim != null ? Math.round(ge.sim*100)+'% similar' : 'related'`. Confirmed `_computeSemantic` edges carry `sim` (cosine,
+0.45–1.0); reference edges (no `sim`) still label by direction (references / referenced by / linked), unaffected. The
+`sim != null` check (not truthiness) correctly shows "0% similar" vs "related" for the rare no-sim case. Proportionate
+small ship — field confirmed, logic well-tested (no heavy review for a one-line tested label change). Tests `pxc_edgelabel`
+17 (incl. 4 new semantic-% cases); edgeweight regress green. **Next: more on-theme features.**
+
 ## ✅ v1.165.0 — C22: edge weight by reference strength (strongest relationships pop) (2026-06-26)
 A visual upgrade to the connection graph ("more visually appealing"): a ghost edge gets THICKER the more times the two
 notes reference each other, so the strongest relationships read at a glance. `_buildRelationalGhosts`' `directed` Set→Map

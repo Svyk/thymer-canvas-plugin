@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.165.0';
+const PLEXUS_VERSION = '1.166.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6944,7 +6944,7 @@ class CanvasView {
       const u = 1 - flowT, px = u * u * sx + 2 * u * flowT * cxp + flowT * flowT * ex, py = u * u * sy + 2 * u * flowT * cyp + flowT * flowT * ey;
       ctx.beginPath(); ctx.arc(px, py, 4 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.95; if (!heavyHub) { ctx.shadowColor = pxcMixHex(ca, cb, 0.5); ctx.shadowBlur = 8; } ctx.fill(); ctx.shadowBlur = 0;
       // EDGE LABELS (the azlen "what connects them"): the relationship from the HOVERED card's perspective, at the curve midpoint.
-      if (!heavyHub && d) { const isA = (ge.a === hoverId), out = isA ? ge.aRefsB : ge.bRefsA, inn = isA ? ge.bRefsA : ge.aRefsB; const text = (out && inn) ? 'linked' : out ? 'references' : inn ? 'referenced by' : 'related'; const lx = 0.25 * ax + 0.5 * cxp + 0.25 * bx, ly = 0.25 * ay + 0.5 * cyp + 0.25 * by; labels.push({ wx: lx, wy: ly, text }); }
+      if (!heavyHub && d) { const isA = (ge.a === hoverId), out = isA ? ge.aRefsB : ge.bRefsA, inn = isA ? ge.bRefsA : ge.aRefsB; const text = (out && inn) ? 'linked' : out ? 'references' : inn ? 'referenced by' : (ge.sim != null ? Math.round(ge.sim * 100) + '% similar' : 'related'); const lx = 0.25 * ax + 0.5 * cxp + 0.25 * bx, ly = 0.25 * ay + 0.5 * cyp + 0.25 * by; labels.push({ wx: lx, wy: ly, text }); } // C23: a semantic edge shows its similarity %
     }
     ctx.shadowBlur = 0; ctx.lineWidth = 2.5 / z; ctx.strokeStyle = '#7c5cff'; ctx.globalAlpha = 0.9; // shadow off for the ring pass (belt-and-suspenders)
     const ring = (el) => { if (!el) return; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 4 / z, y - 4 / z, Math.abs(el.width) + 8 / z, Math.abs(el.height) + 8 / z, 9 / z); ctx.stroke(); };
