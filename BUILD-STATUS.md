@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.127.0 — Phase 3.P3.0: gradient/glow ghost edges (2026-06-25)
+The auto ghost edges (related on-canvas cards) went from flat dashed lines to GRADIENT-along-the-chord (endpoint accent
+hue A→B — the azlen "visibly connected" look) + soft GLOW (shadowBlur, A↔B midpoint hue via new `pxcMixHex`) + a gentle
+perpendicular CURVE. `edgeGlow` setting (default on); 60fps protected by gating glow OFF during any per-frame gesture via a
+new `_drawGesture` flag (onDown shared-bottom set; onUp+onPtrCancel clear) + `_panMode`. Review: caught a **MED** (the
+first `_elDrag` gate missed resize/rotate → per-frame glow regression) — fixed with `_drawGesture`; render-state balance,
+device-px shadowBlur, zero-length edge all clean; 2 LOW addressed. Tests `pxc_edgeglow` 22. Commit `32f5ea3`, pushed.
+**Next: P3.1 — hover-focus mode (hover a card → its connected pages/edges highlight, rest dims; edge label fades in).**
+
 ## ✅✅ PHASE 2 COMPLETE — PDF documents (D-A…D-D) (2026-06-25)
 The round/PDF pillar is shipped: **D-A** (v1.123) document model + cross-runtime blob-worker; **D-B** (v1.124) lazy
 placeholder + bounded background fill; **D-C** (v1.125) page-nav chrome + explode/stack; **D-D** (v1.126) one-click region
