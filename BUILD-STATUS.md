@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.147.0 — P3.12: connection legend (read the visual language) (2026-06-26)
+A small theme-aware key (bottom-left, shown only while the connection layer is on) for the edge/badge visual language, so
+the rich connection encodings are readable. Pure `_connLegendRows()` reflects the active edge-type filter + badge state;
+`_drawConnLegend()` is screen-space, no animation (no dirty re-arm), read-only. New `connLegend` setting (default on) +
+Connections toggle. Review caught **1 HIGH + 1 MED + 1 LOW** — all fixed: (HIGH) the first draft claimed a SOLID
+"reference" + a phantom "inferred" category, but `_drawGhosts` renders EVERY ghost dashed and the model has only `ge.rel`
+(blue=ref/backref, amber=semantic) → collapsed to two truthful dashed rows + fixed the doc/hint; (MED) `py` could go
+negative on a short canvas → clamped with `Math.max(8*d, …)` like the minimap so the title never clips; (LOW) the badge
+swatch was pure red but the live badge is a slate→red gradient → painted at mid-heat `pxcMixHex(...,0.55)`. Reviewer
+confirmed save/restore+lineDash balance, device-px, no idle-CPU, settings persistence/backfill/live-toggle, no writes.
+Tests `pxc_legend` 10; hubbadge/connsettings regress green. **Next: more on-theme features.**
+
 ## ✅ v1.146.0 — promote ghosts with the ACCURATE relationship (directional connectors) (2026-06-26)
 Quality completion of the promote feature (v1.131/v1.140): a promoted ghost→real connector now reflects the edge's
 reference DIRECTION instead of a generic "relates to". `_ghostToConnector` reads `aRefsB`/`bRefsA`: a→b → single head at

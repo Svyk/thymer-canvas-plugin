@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.146.0';
+const PLEXUS_VERSION = '1.147.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -35,6 +35,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   edgeGlow: true, edgeDensity: 'all', edgeTypes: 'all',
   // P3.9 hub badges: a degree-count pill on each connected card (heats slate→red with degree) when the connection layer is shown
   connBadges: true,
+  // P3.12 connection legend: a small bottom-left key for the edge/badge visual language while the connection layer is shown
+  connLegend: true,
   // S2 Canvas behavior
   dblClickText: true,
   // S4 Pen / stylus
@@ -8083,6 +8085,42 @@ class CanvasView {
       }
     }
     this._renderMinimap(ictx, d); // MINIMAP: radar overlay (auto-hidden when everything fits the viewport)
+    try { this._drawConnLegend(ictx, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); // CONN: legend key for the connection visual language (bottom-left; self-gates on settings/ghosts)
+  }
+  // The rows a connection legend should show for the current edge-type filter + badge setting. Pure → testable. Returns
+  // [{kind:'line'|'badge', col?, dash?, txt}]. The ghost/inferred edges are ALWAYS DASHED (matching _drawGhosts) — `rel`
+  // (ref/backref) is blue, semantic is amber; there's no separate solid "reference" style in the ghost layer.
+  _connLegendRows() {
+    const S = this.plugin._settings || {}; const et = S.edgeTypes || 'all'; const rows = [];
+    if (et === 'all' || et === 'rel') rows.push({ kind: 'line', col: '#0ea5e9', dash: true, txt: 'reference / backref' });
+    if (et === 'all' || et === 'semantic') rows.push({ kind: 'line', col: '#f59e0b', dash: true, txt: 'semantic' });
+    if (S.connBadges) rows.push({ kind: 'badge', txt: 'hub degree' });
+    return rows;
+  }
+  // A small theme-aware key (bottom-left) for the connection visual language — shown only while the connection layer is on,
+  // so the gradient/dashed/coloured edges + hub pills are readable. Screen-space, no animation (no dirty re-arm). Read-only.
+  _drawConnLegend(ctx, d) {
+    const S = this.plugin._settings;
+    if (!S || !S.connLegend || !this._showGhosts || !this._ghostEdges || !this._ghostEdges.length || this._drawGesture) return;
+    const rows = this._connLegendRows(); if (!rows.length) return;
+    const dark = PXC_DARK, padX = 10 * d, padY = 8 * d, rowH = 17 * d, sw = 22 * d, gap = 8 * d, titleH = 14 * d;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.save();
+    ctx.font = (11 * d) + 'px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    let maxTextW = 0; for (const r of rows) maxTextW = Math.max(maxTextW, ctx.measureText(r.txt).width);
+    const pw = padX * 2 + sw + gap + maxTextW, ph = padY * 2 + titleH + rows.length * rowH;
+    const px = 12 * d, py = Math.max(8 * d, this.iCv.height - ph - 12 * d); // clamp like the minimap → title never clips off the top on a short canvas
+    ctx.globalAlpha = 0.94; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 8 * d); else ctx.rect(px, py, pw, ph); ctx.fillStyle = dark ? 'rgba(20,24,33,1)' : 'rgba(255,255,255,1)'; ctx.fill(); ctx.lineWidth = 1 * d; ctx.strokeStyle = dark ? '#333a4a' : '#d0d4dc'; ctx.stroke();
+    ctx.globalAlpha = 1; ctx.fillStyle = dark ? '#9aa0a6' : '#6b7280'; ctx.font = '600 ' + (10 * d) + 'px system-ui, sans-serif'; ctx.fillText('Connections', px + padX, py + padY + 5 * d);
+    ctx.font = (11 * d) + 'px system-ui, sans-serif';
+    let ry = py + padY + titleH + rowH / 2;
+    for (const r of rows) {
+      const sx = px + padX, sy = ry;
+      if (r.kind === 'line') { ctx.strokeStyle = r.col; ctx.lineWidth = 2 * d; ctx.lineCap = 'round'; if (r.dash) ctx.setLineDash([4 * d, 3 * d]); ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + sw, sy); ctx.stroke(); ctx.setLineDash([]); }
+      else { const bw = 15 * d, bh = 13 * d; ctx.fillStyle = pxcMixHex('#94a3b8', '#ef4444', 0.55); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(sx + sw / 2 - bw / 2, sy - bh / 2, bw, bh, 5 * d); else ctx.rect(sx + sw / 2 - bw / 2, sy - bh / 2, bw, bh); ctx.fill(); ctx.fillStyle = '#fff'; ctx.font = '700 ' + (9 * d) + 'px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('N', sx + sw / 2, sy + 0.5 * d); ctx.textAlign = 'left'; ctx.font = (11 * d) + 'px system-ui, sans-serif'; }
+      ctx.fillStyle = dark ? '#e6e8ee' : '#1b1f2a'; ctx.fillText(r.txt, sx + sw + gap, sy);
+      ry += rowH;
+    }
+    ctx.textBaseline = 'alphabetic'; ctx.restore();
   }
   // MINIMAP — a corner radar of the whole scene + a draggable viewport rect; click/drag teleports the camera. Scene
   // DOTS are cached offscreen and rebuilt only on commit (_miniDirty); per-frame cost = blit + one viewport rect.
@@ -9073,6 +9111,7 @@ class Plugin extends AppPlugin {
       { v: 'all', l: 'All' }, { v: 'rel', l: 'References / backrefs' }, { v: 'semantic', l: 'Semantic similarity' },
     ]);
     toggle(conn, 'Hub badges', 'connBadges', 'A small degree-count pill on each connected card (heats slate→red with how many pages it links) — see your hubs at a glance.');
+    toggle(conn, 'Legend', 'connLegend', 'A small key (bottom-left) for the connection visual language — reference/backref (blue) & semantic (amber) inferred edges + hub badge — while the connection layer is on.');
 
     const fonts = section('Fonts');
     select(fonts, 'Default text font', 'defaultFont', 'Applies to new text (and existing text on the system default).', [
