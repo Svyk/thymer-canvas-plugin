@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.124.0';
+const PLEXUS_VERSION = '1.125.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4638,6 +4638,58 @@ class CanvasView {
     if (changed) { this.dirty = true; this.scheduleSave(); }
   }
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
+  // ── D-C: PDF document chrome — page-nav + explode/stack (operates on el.pdf.docId; pages are plain images) ──
+  _pdfPagesOf(docId) { return ((this.scene && this.scene.elements) || []).filter((e) => e && e.type === 'image' && e.pdf && e.pdf.docId === docId && !e.isDeleted).sort((a, b) => (a.pdf.page || 0) - (b.pdf.page || 0)); }
+  _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
+    if (this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && a.type === 'image' && a.pdf) return a.pdf.docId; }
+    const any = ((this.scene && this.scene.elements) || []).find((e) => e && e.type === 'image' && e.pdf && !e.isDeleted); return any ? any.pdf.docId : null;
+  }
+  _syncPdfNav() {
+    let page = null;
+    if (this.tool === 'select' && !this.editingId && !this._camAnim && !this._present && this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && !a.isDeleted && a.type === 'image' && a.pdf) page = a; }
+    if (!page) { this._closePdfNav(); return; }
+    if (this._pdfNavId !== page.id) { this._closePdfNav(); this._pdfNavId = page.id; this._buildPdfNav(page); }
+    if (!this._pdfNavEl) return;
+    const tl = this.camera.worldToScreen(Math.min(page.x, page.x + page.width) + Math.abs(page.width) / 2, Math.min(page.y, page.y + page.height));
+    const ww = this.wrap.clientWidth || 800, bw = this._pdfNavEl.offsetWidth || 180;
+    let left = tl.x - bw / 2; left = Math.max(6, Math.min(left, ww - bw - 6));
+    this._pdfNavEl.style.left = left + 'px'; this._pdfNavEl.style.top = Math.max(6, tl.y - 42) + 'px';
+  }
+  _buildPdfNav(page) {
+    this._closePdfNav(); this._pdfNavId = page.id;
+    const box = document.createElement('div'); box.className = 'pxc-pdfnav'; this._pdfNavEl = box; this._themePanel(box);
+    box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
+    const mk = (txt, title, fn, cls) => { const b = document.createElement('button'); b.className = 'pxc-pdfnav-btn' + (cls ? ' ' + cls : ''); b.textContent = txt; b.title = title; b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn(); }); box.appendChild(b); return b; };
+    mk('‹', 'Previous page', () => this._pdfGoPage(this._byId(this._pdfNavId), -1));
+    const lab = document.createElement('span'); lab.className = 'pxc-pdfnav-lab'; lab.textContent = 'p ' + (page.pdf.page || '?') + ' / ' + (page.pdf.pageCount || '?'); box.appendChild(lab);
+    mk('›', 'Next page', () => this._pdfGoPage(this._byId(this._pdfNavId), 1));
+    const sep = document.createElement('span'); sep.className = 'pxc-pdfnav-sep'; box.appendChild(sep);
+    mk('⤢ Grid', 'Explode the document into a grid', () => this._pdfExplode(page.pdf.docId));
+    mk('▤ Stack', 'Re-stack the pages into a column', () => this._pdfStack(page.pdf.docId));
+    this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
+  }
+  _closePdfNav() { if (this._pdfNavEl) { try { this._pdfNavEl.remove(); } catch (_e) {} this._pdfNavEl = null; } this._pdfNavId = null; }
+  _pdfGoPage(page, dir) {
+    if (!page || !page.pdf) return; const pages = this._pdfPagesOf(page.pdf.docId); const idx = pages.findIndex((p) => p.id === page.id);
+    const target = pages[idx + dir]; if (!target) { try { this.plugin.ui.addToaster({ title: dir < 0 ? 'First page.' : 'Last page.', dismissible: true }); } catch (_e) {} return; }
+    this._focusMatch(target.id); // select + center the sibling page
+  }
+  _pdfStack(docId) {
+    const pages = this._pdfPagesOf(docId); if (!pages.length) return;
+    const wx = Math.min(pages[0].x, pages[0].x + pages[0].width) + Math.abs(pages[0].width) / 2; let top = Math.min(pages[0].y, pages[0].y + pages[0].height); const GAP = 16;
+    for (const p of pages) { const w = Math.abs(p.width), h = Math.abs(p.height); p.x = wx - w / 2; p.y = top; top += h + GAP; }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Stacked ' + pages.length + ' pages.', dismissible: true }); } catch (_e) {}
+  }
+  _pdfExplode(docId) {
+    const pages = this._pdfPagesOf(docId); if (!pages.length) return;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(pages.length))), GAP = 28;
+    const colW = Math.max.apply(null, pages.map((p) => Math.abs(p.width))) + GAP, rowH = Math.max.apply(null, pages.map((p) => Math.abs(p.height))) + GAP;
+    const x0 = Math.min(pages[0].x, pages[0].x + pages[0].width), y0 = Math.min(pages[0].y, pages[0].y + pages[0].height);
+    pages.forEach((p, i) => { const c = i % cols, r = Math.floor(i / cols); p.x = x0 + c * colW; p.y = y0 + r * rowH; });
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Exploded ' + pages.length + ' pages into a ' + cols + '-column grid.', dismissible: true }); } catch (_e) {}
+  }
   // ── EDIT-4c: a LIVE interactive Datacore view mounted over a selected dc: query node (via window.__plexusDatacore.mountView) ──
   _closeDcOverlay() { if (this._dcMounted) { try { this._dcMounted.destroy && this._dcMounted.destroy(); } catch (_e) {} this._dcMounted = null; } if (this._dcOverlayEl) { try { this._dcOverlayEl.remove(); } catch (_e) {} this._dcOverlayEl = null; } this._dcOverlayId = null; }
   _syncDcOverlay() {
@@ -6231,9 +6283,6 @@ class CanvasView {
     if (!blob) blob = await new Promise((res) => { try { cv.toBlob(res, 'image/png'); } catch (_e) { res(null); } });
     return blob;
   }
-  // D-A: a PDF drop → a DOCUMENT — pages laid out in a clean vertical column (real page heights, not a magic gap), each a
-  // normal `type:'image'` element grouped under one `pdfgrp_<docId>` + tagged `el.pdf` so region/comment anchoring works for
-  // free and a later page-nav (D-C) can walk the doc. Reuses _addImageFromFile (webp asset + safe inline fallback + cache).
   // D-B: attach a rendered blob to an EXISTING (placeholder) image element's fileId — the asset/cache back-half of
   // _addImageFromFile, but targeting a pre-placed element instead of creating one. Same confirm-then-anchor + inline
   // fallback + decode-cache seed, so a page is never lost and appears the moment its raster lands.
@@ -7444,6 +7493,7 @@ class CanvasView {
     try { this._syncDcOverlay(); } catch (_e) {} // EDIT-4: the live interactive Datacore view over a selected dc: query node
     try { this._syncCommentRail(); } catch (_e) {} // C0: the right-side comments rail (when toggled open)
     try { this._syncCommentPopover(); } catch (_e) {} // C0: keep an open comment thread popover anchored to its pin during pan/zoom
+    try { this._syncPdfNav(); } catch (_e) {} // D-C: the PDF page-nav chrome (page N/M + explode/stack) on single-select of a PDF page
     if (this._bindHover && !this._bindHover.isDeleted) { // CP-5: dashed focus indicator on the shape an arrow will bind to
       const s = this._bindHover, sub = this._bindHoverSub;
       ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d);
@@ -7749,7 +7799,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -7862,6 +7912,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Insert LaTeX equation', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._insertLatex(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF (pages → images)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPicker(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Import PDF page (choose one)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._importPdfPagePicker(); } }); // CP-PDF model-B-lite
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF to grid', icon: 'ti-layout-grid', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfExplode(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Stack PDF pages (column)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfStack(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });
@@ -9678,6 +9730,12 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-cmt-rmid { min-width: 0; }
 .pxc-host .pxc-root .pxc-cmt-rtext { color: var(--color-text-400, #e6e8ee); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pxc-host .pxc-root .pxc-cmt-rmeta { font-size: 10px; color: var(--color-text-600, #9aa3b2); margin-top: 1px; }
+/* ── D-C: PDF page-nav chrome ── */
+.pxc-host .pxc-root .pxc-pdfnav { position: absolute; z-index: 8; display: flex; align-items: center; gap: 4px; padding: 4px 6px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 9px; box-shadow: 0 6px 20px rgba(0,0,0,.4); font: 12px/1.2 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); }
+.pxc-host .pxc-root .pxc-pdfnav-btn { min-width: 22px; height: 22px; padding: 0 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-pdfnav-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
+.pxc-host .pxc-root .pxc-pdfnav-lab { padding: 0 4px; color: var(--color-text-50, #fff); font-weight: 600; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-pdfnav-sep { width: 1px; height: 16px; background: var(--cards-border-color, #333a4a); margin: 0 2px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
