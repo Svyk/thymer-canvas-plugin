@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.161.0';
+const PLEXUS_VERSION = '1.162.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2189,6 +2189,15 @@ class CanvasView {
     this.dirty = true;
   }
   _fitToScene() { const b = this._sceneBounds(); if (!b) return; this._fitToBounds(b, 60); }
+  // C19: frame the camera to the current selection's union bbox (any element kinds). Read-only. Pairs with "Select whole PDF".
+  _fitToSelection() {
+    const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && !e.isDeleted);
+    if (!els.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: select something first (then fit to it).', dismissible: true }); } catch (_e) {} return; }
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const e of els) { const b = this._elBBox(e); if (!b || !isFinite(b.x)) continue; x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); }
+    if (!isFinite(x0)) return; // selection had no finite-bbox elements
+    this._fitToBounds({ x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) }, 80);
+  }
   /* ── Cross-reference navigate-and-flash (note ⇄ canvas) ──────────────────────────────────
    * A note line that cites a region/element flashes that exact spot here; a cited element
    * double-clicks back to the citing note. Index lives in localStorage (plexus_xref). */
@@ -8634,6 +8643,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Stack PDF pages (column)', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._pdfStack(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // D-C
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Select whole PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._selectPdfDocument(); } }); // C15: select all pages of the PDF as a unit (move/delete/align together)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle text wrap', icon: 'ti-cursor-text', onSelected: () => { const v = this._activeView(); if (v) v._toggleTextWrap(); } });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle image dark-invert (selected)', icon: 'ti-moon', onSelected: () => { const v = this._activeView(); if (v) v._toggleImageInvert(); } });

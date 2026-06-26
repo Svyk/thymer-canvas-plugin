@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.162.0 — C19: "Fit to selection" (frame whatever's selected) (2026-06-26)
+A general camera convenience (pairs with C15 "Select whole PDF document"): frame the camera to the union bbox of the
+currently-selected elements — any kinds. `_fitToSelection` resolves selection ids → live elements, unions their
+`_elBBox` (normalized: handles cards, points-form lines/arrows, negative-size, zero-size comment pins), degenerate-clamps
+(≥1), and `_fitToBounds(…, 80)`. Empty-selection + all-non-finite guards both return BEFORE any camera move. Review:
+**SHIP, CLEAN, no issues** — read-only (camera only, no scene write/scheduleSave), guard ordering, union math over all
+element kinds, finite inputs, leak-free all confirmed. Tests `pxc_fitsel` 8; fitpdf regress green. **Next: more on-theme features.**
+
 ## ✅ v1.161.0 — C18: make the panel connection count actionable (click → bring connections onto canvas) (2026-06-26)
 Turns C17's info into action: when the inspected card HAS connections, the "↗ N references · ↙ M backreferences" row
 becomes clickable (a "→" cue + hover affordance) → `_pullInNeighbours()` brings those connected pages onto the canvas.
