@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.136.0';
+const PLEXUS_VERSION = '1.137.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -138,6 +138,18 @@ function pxcColumnarLayout(focus, leftN, rightN, opts) {
   const stack = (n, x) => { const totalH = n > 0 ? (n * CH + (n - 1) * GAP) : 0; let y = fcy - totalH / 2; const out = []; for (let i = 0; i < n; i++) { out.push({ x, y }); y += CH + GAP; } return out; };
   // left | focus | right | right2 (2nd-degree: pages the RIGHT column references) — each column centered on the focus
   return { focus: { x: fx, y: fy }, left: stack(leftN, fx - (CW + COLGAP)), right: stack(rightN, fx + CW + COLGAP), right2: stack(right2N, fx + 2 * (CW + COLGAP)) };
+}
+// Shortest path between two node ids through an UNDIRECTED edge list (the ghost graph). `edges` = [{a,b}…] (a/b are node
+// ids). Returns the id chain [src,…,dst] (inclusive) or null if unreachable. BFS = fewest hops. Pure → testable in node.
+function pxcBfsPath(edges, src, dst) {
+  if (src === dst) return [src];
+  const adj = new Map(); const link = (u, v) => { if (!adj.has(u)) adj.set(u, []); adj.get(u).push(v); };
+  for (const e of (edges || [])) { if (!e || e.a == null || e.b == null || e.a === e.b) continue; link(e.a, e.b); link(e.b, e.a); }
+  if (!adj.has(src) || !adj.has(dst)) return null;
+  const prev = new Map([[src, null]]); const q = [src];
+  for (let h = 0; h < q.length; h++) { const u = q[h]; if (u === dst) break; for (const v of adj.get(u)) if (!prev.has(v)) { prev.set(v, u); q.push(v); } }
+  if (!prev.has(dst)) return null;
+  const path = []; for (let c = dst; c != null; c = prev.get(c)) path.push(c); return path.reverse();
 }
 function pxcGraphLayout(nodes, edges, opts) {
   const N = nodes.length; if (N < 2) return nodes;
@@ -3667,7 +3679,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -6583,7 +6595,7 @@ class CanvasView {
     const cos = (a, b) => { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }; // vectors are normalised -> dot = cosine
     const edges = [];
     for (let i = 0; i < els.length; i++) for (let j = i + 1; j < els.length; j++) { const s = cos(vecs[i], vecs[j]); if (s > 0.45) edges.push({ a: els[i].id, b: els[j].id, sim: s }); }
-    this._ghostEdges = edges; this._showGhosts = true; this.dirty = true;
+    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace (its chain assumed the old graph)
     try { this.plugin.ui.addToaster({ title: edges.length + ' semantic ghost-edge(s) drawn.', dismissible: true }); } catch (_e) {}
     return edges.length;
   }
@@ -6683,6 +6695,37 @@ class CanvasView {
     ctx.globalAlpha = 1; ctx.restore();
     this.dirty = true; // P3.2: re-arm the loop so the particle keeps animating WHILE hovering; when hover clears, this isn't called → loop idles at 0% CPU
   }
+  // P3.7 "how are these two ideas connected?": select two record cards → BFS the ghost graph for the shortest reference
+  // chain between them, then light it up (animated bead + rings) on the overlay. Reads only; never writes a record.
+  async _traceConnection() {
+    const sel = [...this.selected].map((id) => this._byId(id)).filter((e) => e && !e.isDeleted && e.type === 'record' && e.recordGuid);
+    if (this.selected.size !== 2 || sel.length !== 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: select exactly two record cards to trace the connection between.', dismissible: true }); } catch (_e) {} return; }
+    if (sel[0].recordGuid === sel[1].recordGuid) { try { this.plugin.ui.addToaster({ title: 'Plexus: those are two cards of the same page — pick two different records.', dismissible: true }); } catch (_e) {} return; } // same page → no connection to trace
+    if (!this._ghostEdges || !this._ghostEdges.length) { try { await this._buildRelationalGhosts(true); } catch (_e) {} } // ensure the relational graph exists (quiet build)
+    const path = pxcBfsPath(this._ghostEdges || [], sel[0].id, sel[1].id);
+    if (!path) { this._tracedPath = null; this.dirty = true; try { this.plugin.ui.addToaster({ title: 'Plexus: no reference path links these two cards on this board. Arrange related pages or add refs to connect them.', dismissible: true }); } catch (_e) {} return; }
+    this._tracedPath = { ids: path, t0: this._now() }; this.dirty = true; // overlay renders it; persists until Escape / re-trace / a traced card is deleted
+    const hops = path.length - 1, mid = path.length - 2;
+    try { this.plugin.ui.addToaster({ title: hops === 1 ? 'Directly connected.' : 'Traced a ' + hops + '-hop connection through ' + mid + ' card' + (mid === 1 ? '' : 's') + '. (Esc to clear.)', dismissible: true }); } catch (_e) {}
+  }
+  // Draw the traced path on the OVERLAY: glow underlay + bright core through each card center (same bend as the ghosts),
+  // a bead marching the whole chain for ~5s then settling (idle→0 CPU), endpoint+intermediate rings. Self-clears if a card died.
+  _drawTracePath(ctx, z, d) {
+    const tp = this._tracedPath; if (!tp || !tp.ids || tp.ids.length < 2) return;
+    const els = tp.ids.map((id) => this._byId(id));
+    if (els.some((e) => !e || e.isDeleted)) { this._tracedPath = null; return; } // a traced card was deleted → drop the trace (never point at a ghost)
+    const P = els.map((e) => ({ x: e.x + Math.abs(e.width) / 2, y: e.y + Math.abs(e.height) / 2 })), segs = [];
+    for (let i = 0; i + 1 < P.length; i++) { const ax = P[i].x, ay = P[i].y, bx = P[i + 1].x, by = P[i + 1].y, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08); segs.push({ ax, ay, bx, by, cxp: (ax + bx) / 2 + (-dy / len) * bend, cyp: (ay + by) / 2 + (dx / len) * bend }); }
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const trace = () => { ctx.beginPath(); for (const s of segs) { ctx.moveTo(s.ax, s.ay); ctx.quadraticCurveTo(s.cxp, s.cyp, s.bx, s.by); } };
+    trace(); ctx.globalAlpha = 0.20; ctx.strokeStyle = '#7c5cff'; ctx.lineWidth = 10 / z; ctx.shadowColor = '#7c5cff'; ctx.shadowBlur = 16; ctx.stroke(); ctx.shadowBlur = 0; // glow underlay
+    trace(); ctx.globalAlpha = 0.98; ctx.strokeStyle = '#b9a6ff'; ctx.lineWidth = 2.8 / z; ctx.setLineDash([]); ctx.stroke(); // bright core
+    const animating = (this._now() - tp.t0) < 5200; // march the bead ~5s, then settle static
+    if (animating && segs.length) { const flow = ((this._now() % 1600) / 1600) * segs.length, si = Math.min(segs.length - 1, Math.floor(flow)), t = flow - si, s = segs[si], u = 1 - t, px = u * u * s.ax + 2 * u * t * s.cxp + t * t * s.bx, py = u * u * s.ay + 2 * u * t * s.cyp + t * t * s.by; ctx.beginPath(); ctx.arc(px, py, 4.5 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.96; ctx.shadowColor = '#b9a6ff'; ctx.shadowBlur = 10; ctx.fill(); ctx.shadowBlur = 0; }
+    ctx.lineWidth = 2.6 / z; for (let i = 0; i < els.length; i++) { const el = els[i], endpoint = (i === 0 || i === els.length - 1); ctx.globalAlpha = endpoint ? 0.95 : 0.6; ctx.strokeStyle = endpoint ? '#7c5cff' : '#b9a6ff'; const x = Math.min(el.x, el.x + el.width), y = Math.min(el.y, el.y + el.height); this._rrect(ctx, x - 5 / z, y - 5 / z, Math.abs(el.width) + 10 / z, Math.abs(el.height) + 10 / z, 10 / z); ctx.stroke(); }
+    ctx.globalAlpha = 1; ctx.restore();
+    if (animating) this.dirty = true; // animate ~5s then settle → idle returns to 0 CPU (Esc clears; the trace persists statically until then)
+  }
   // P3.4: the ghost edge near a world point (sampling its quadratic curve — same control point as the renderer), or null.
   _ghostEdgeAt(wx, wy) {
     if (!this._showGhosts || !this._ghostEdges || !this._ghostEdges.length) return null;
@@ -6738,7 +6781,7 @@ class CanvasView {
     }
     const edges = [];
     for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]) }); } // aRefsB/bRefsA → the hover label ("references" / "referenced by" / "linked")
-    this._ghostEdges = edges; this._showGhosts = true; this.dirty = true;
+    this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace (its chain assumed the old graph)
     if (!quiet) try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {} // P3.3: callers that already toast (Arrange parallel) pass quiet=true to avoid a double toaster
   }
   // P0.0: fetch the OpenAI key from the ENCRYPTED store (unlock once per session; migrate + delete any legacy
@@ -7650,6 +7693,8 @@ class CanvasView {
     }
     // P3.1: ghost-edge hover focus — bright/solid focused edges + rings, on the OVERLAY (live on hover; static bulk stays cached).
     if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    // P3.7: traced connection path between two cards — bright animated chain on the overlay (independent of ghost hover).
+    if (this._tracedPath && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawTracePath(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // CONNECTIONS Phase 5: select ONE element → softly glow every connection attached to it + a count chip, so you can SEE
     // what a card connects to at a glance (canvas-side; the note side has the ↗). O(1) lookup via the prebuilt _connByEl index.
     if (this.tool === 'select' && !this.editingId && !this._camAnim && this.selected.size === 1 && this._connByEl && this._connByEl.size) {
@@ -7975,7 +8020,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -8049,6 +8094,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange graph (force-directed layout)', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._layoutGraph(); } }); // graph auto-layout (Fruchterman-Reingold) — untangle the mind-map (Obsidian/NotebookLM graph-view)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages (parallel, connected)', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(); } }); // P3.3: the azlen "parallel pages, visibly connected" gesture (refs right / backrefs left, ghosts connect them). ti-layout-board = confirmed-bundled (frame tool)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Arrange related pages — 2 levels deep', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._arrangeParallel(2); } }); // P3.3b: pull a further-right column of the referenced pages' own references (the deeper "many parallel pages" azlen shows)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Trace connection between 2 cards', icon: 'ti-affiliate', onSelected: () => { const v = this._activeView(); if (v) v._traceConnection(); } }); // P3.7: "how are these two ideas connected?" — BFS the ghost graph, light up the shortest reference chain. ti-affiliate = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Frames → Slide records', icon: 'ti-presentation', onSelected: () => { const v = this._activeView(); if (v) v._framesToSlides(); } }); // CS-7
     // CP-4: align / distribute / stats / eyedropper (precision tools).
     for (const a of [['Align left', 'left'], ['Align centre (H)', 'hcenter'], ['Align right', 'right'], ['Align top', 'top'], ['Align middle (V)', 'vmiddle'], ['Align bottom', 'bottom'], ['Distribute horizontally', 'disth'], ['Distribute vertically', 'distv']]) { this.ui.addCommandPaletteCommand({ label: 'Plexus: ' + a[0], icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) v._align(a[1]); } }); }

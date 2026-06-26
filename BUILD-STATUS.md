@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.137.0 — P3.7: trace the connection between two cards ("how are these ideas connected?") (2026-06-26)
+The other half of "visibly connected": select two record cards → **"Trace connection between 2 cards"** BFS-walks the
+relational ghost graph for the **shortest reference chain** between them and lights it up on the overlay — a glowing
+quadratic-bezier path through each intermediate card's center, a bead marching the whole chain for ~5s (then settles →
+idle 0 CPU), endpoint rings strong / intermediate rings lighter. Pure `pxcBfsPath(edges,src,dst)` (undirected, fewest
+hops, self-loop/malformed-safe, unreachable→null). Esc clears; a ghost rebuild or a deleted traced card self-clears.
+Read-only (no record writes). Review: **SHIP** — no HIGH/MED; idle-CPU contract, read-only, BFS correctness, self-heal,
+render-state balance all confirmed. Folded all 3 LOW notes: `_tracedPath` nulled in `destroy()` + on every ghost
+rebuild (stale-topology guard), and a same-page (`recordGuid===`) guard with a clear toast. Tests `pxc_trace` 19;
+arrange2/promote/density regress green. **Next: more on-theme visual-thinking features.**
+
 ## ✅ v1.136.0 — 2nd-degree parallel arrange (azlen "many parallel pages, deeper") (2026-06-26)
 Extends P3.3: a new command **"Arrange related pages — 2 levels deep"** (`_arrangeParallel(2)`) adds a 4th column —
 the pages that the RIGHT (referenced) column itself references — so the canvas fans out two hops of the reference
