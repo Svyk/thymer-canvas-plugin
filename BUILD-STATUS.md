@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.143.0 — minimap connections (the graph shape at a glance) (2026-06-26)
+The minimap now draws connection LINES, not just card dots: real bound connectors (solid) always, plus inferred ghost
+edges (dashed, honoring the P3.5 edge-type filter) when the connection layer is shown — so the whole parallel-page
+graph's shape reads in the corner at a glance. `_drawMiniConnections` projects card centers through the SAME `mapp` the
+dots/viewport-rect use (verified byte-identical), drawn live in the clipped panel under the viewport rect, O(N+E) via a
+one-shot id→el index, capped 600 per kind. Read-only; rides the minimap's existing dirty cadence (no animation, no
+`_miniDirty` coupling). Review: **SHIP, CLEAN** — projection exact, transform(identity)/clip/lineDash/save-restore all
+balanced, dangling-endpoint + edge-filter cases handled, z-order (dots→lines→rect) correct, no writes. Tests
+`pxc_miniconn` 15; polybbox/hubbadge/cmtreview regress green. **Next: more on-theme features.**
+
 ## ✅ v1.142.0 — bugfix: unify the duplicate `_polyBBox` (region-anchor precision) (2026-06-26)
 A latent bug the C5 review surfaced: there were TWO `_polyBBox` defs on `CanvasView` — an object-form (`p.x/p.y`) and an
 array-form (`p[0]/p[1]`). JS keeps the last, so the array-form won and the object-form was dead → every OBJECT-point

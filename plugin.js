@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.142.0';
+const PLEXUS_VERSION = '1.143.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -8037,6 +8037,7 @@ class CanvasView {
     if (this._miniDirty || !this._miniDots || this._miniKey !== key) { this._rebuildMiniDots(r, mapp, d); this._miniDirty = false; this._miniKey = key; }
     ictx.save(); ictx.beginPath(); if (ictx.roundRect) ictx.roundRect(r.x * d, r.y * d, r.w * d, r.h * d, 8 * d); else ictx.rect(r.x * d, r.y * d, r.w * d, r.h * d); ictx.clip(); // clip dots AND viewport rect to the panel (the rect can fall outside when panned away)
     if (this._miniDots) ictx.drawImage(this._miniDots, r.x * d, r.y * d);
+    this._drawMiniConnections(ictx, r, mapp, d); // CONN: connection LINES (real connectors + inferred ghosts) on the minimap → the graph's shape at a glance
     const vx = r.x + mapp.ox + camX * mapp.scale, vy = r.y + mapp.oy + camY * mapp.scale;
     ictx.lineWidth = 1.5 * d; ictx.strokeStyle = '#7c5cff'; ictx.fillStyle = 'rgba(124,92,255,0.14)';
     ictx.fillRect(vx * d, vy * d, vw * mapp.scale * d, vh * mapp.scale * d); ictx.strokeRect(vx * d, vy * d, vw * mapp.scale * d, vh * mapp.scale * d);
@@ -8054,6 +8055,21 @@ class CanvasView {
       c.fillStyle = el.type === 'frame' ? 'rgba(154,160,166,0.7)' : (el.strokeColor || '#7c5cff');
       c.fillRect(x, y, w, h);
     }
+  }
+  // CONN: draw connection LINES on the minimap (live, in the clipped panel) — real bound connectors always, inferred ghost
+  // edges when the connection layer is shown — so the whole graph's shape reads at a glance. Drawn between card centers,
+  // projected via the same `mapp`. Bounded + O(N+E) via a one-shot id→el index. No writes; rides the minimap's dirty cadence.
+  _drawMiniConnections(ictx, r, mapp, d) {
+    const reals = this.scene.elements.filter((e) => e && !e.isDeleted && (e.type === 'arrow' || e.type === 'line') && e.startBinding && e.startBinding.elementId && e.endBinding && e.endBinding.elementId);
+    const ghosts = (this._showGhosts && this._ghostEdges && this._ghostEdges.length) ? this._ghostEdges : null;
+    if (!reals.length && !ghosts) return;
+    const byId = new Map(); for (const e of this.scene.elements) if (e && !e.isDeleted) byId.set(e.id, e); // one index for both passes (endpoints can be any element kind)
+    const PX = (wx) => (r.x + mapp.ox + wx * mapp.scale) * d, PY = (wy) => (r.y + mapp.oy + wy * mapp.scale) * d;
+    const seg = (a, b) => { if (!a || !b) return; const ax = (a.x || 0) + Math.abs(a.width || 0) / 2, ay = (a.y || 0) + Math.abs(a.height || 0) / 2, bx = (b.x || 0) + Math.abs(b.width || 0) / 2, by = (b.y || 0) + Math.abs(b.height || 0) / 2; ictx.moveTo(PX(ax), PY(ay)); ictx.lineTo(PX(bx), PY(by)); };
+    ictx.save(); ictx.lineCap = 'round';
+    if (ghosts) { ictx.strokeStyle = 'rgba(124,92,255,0.30)'; ictx.lineWidth = Math.max(0.5, 0.7 * d); ictx.setLineDash([2 * d, 2 * d]); ictx.beginPath(); let gc = 0; for (const ge of ghosts) { if (!this._ghostTypeOk(ge)) continue; if (++gc > 600) break; seg(byId.get(ge.a), byId.get(ge.b)); } ictx.stroke(); ictx.setLineDash([]); } // inferred (dashed, faint) — under the reals
+    if (reals.length) { ictx.strokeStyle = 'rgba(124,92,255,0.55)'; ictx.lineWidth = Math.max(0.6, 0.9 * d); ictx.beginPath(); let rc = 0; for (const e of reals) { if (++rc > 600) break; seg(byId.get(e.startBinding.elementId), byId.get(e.endBinding.elementId)); } ictx.stroke(); } // real connectors (solid, stronger)
+    ictx.restore();
   }
   _miniTeleport(px, py) {
     const mm = this._miniMap; if (!mm) return; const r = mm.rect, mapp = mm.map;
