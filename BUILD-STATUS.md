@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.144.0 — AZLEN SIGNATURE: line-anchored ghost endpoints (2026-06-26)
+The core azlen "parallel pages, visibly connected" visual: a reference edge now emerges from the EXACT body line that
+holds the ref, not the card center — so you see the connection thread out of the line of text. Build-side `srcLine` map
+(additive) records "src>dst → the line guid on src that holds the ref"; edges carry `aLine`/`bLine`. New shared
+`_ghostEndpoints(ge,a,b)` originates each SOURCE end at its line's edge facing the target (center otherwise), and is
+used by ALL THREE consumers — static `_drawGhosts`, hover `_drawGhostFocus`, AND the `_ghostEdgeAt` click hit-test — so
+the drawn curve and the clickable curve always agree (the unify the v1.135 comment promised). `_lineRectWorld` is a cheap
+band-map lookup that null-degrades (rotated/below-fold/unmeasured → center). Verified `li.guid` == band `lineGuid` space.
+Review: **SHIP, CLEAN** — no HIGH/MED; draw↔hit-test consistency, exit-side math (faces target, normalizes neg-width),
+symmetric build, graceful degradation, backward-compat (old/semantic edges → center), data-safety, perf all confirmed.
+Tests `pxc_lineanchor` 9; edgelabel/promote/miniconn regress green. **Next: more on-theme features.**
+
 ## ✅ v1.143.0 — minimap connections (the graph shape at a glance) (2026-06-26)
 The minimap now draws connection LINES, not just card dots: real bound connectors (solid) always, plus inferred ghost
 edges (dashed, honoring the P3.5 edge-type filter) when the connection layer is shown — so the whole parallel-page

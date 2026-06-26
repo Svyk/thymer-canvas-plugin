@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.143.0';
+const PLEXUS_VERSION = '1.144.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -6654,6 +6654,18 @@ class CanvasView {
   // P3.5: the connection-density filter — should this ghost edge be drawn at all? Honors the relation-type filter (all/rel/
   // semantic). A `null` ge passes (defensive). Used by _drawGhosts, _drawGhostFocus, and _ghostEdgeAt so they stay consistent.
   _ghostTypeOk(ge) { const t = (this.plugin._settings && this.plugin._settings.edgeTypes) || 'all'; if (t === 'rel') return !!(ge && ge.rel); if (t === 'semantic') return !(ge && ge.rel); return true; }
+  // AZLEN line-anchoring: a ghost edge's endpoints. Default = card centers, BUT if an endpoint's card is the SOURCE of the
+  // reference (aRefsB/bRefsA) and we captured the exact body LINE it references from (aLine/bLine), originate that end at the
+  // line's edge facing the other card — so the connection visibly emerges from the line of text that holds the ref (azlen's
+  // signature). `_lineRectWorld` is a cheap precomputed-band lookup and null-degrades (rotated/unmeasured card) → center.
+  // Shared by _drawGhosts, _drawGhostFocus AND _ghostEdgeAt so the drawn curve and its hit-test always agree.
+  _ghostEndpoints(ge, a, b) {
+    let ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+    const acx = ax, bcx = bx; // remember the centers for the exit-side decision
+    if (ge && ge.aRefsB && ge.aLine) { const lr = this._lineRectWorld(a, ge.aLine); if (lr) { const lx = Math.min(lr.x, lr.x + lr.w), rx = Math.max(lr.x, lr.x + lr.w); ay = lr.y + lr.h / 2; ax = (bcx >= (lx + rx) / 2) ? rx : lx; } }
+    if (ge && ge.bRefsA && ge.bLine) { const lr = this._lineRectWorld(b, ge.bLine); if (lr) { const lx = Math.min(lr.x, lr.x + lr.w), rx = Math.max(lr.x, lr.x + lr.w); by = lr.y + lr.h / 2; bx = (acx >= (lx + rx) / 2) ? rx : lx; } }
+    return { ax, ay, bx, by };
+  }
   // P3.5: "hovered-only" density — hide the bulk static edges (only the hover overlay shows the hovered card's edges). Auto
   // when the graph is dense (>150 edges) to keep it legible + cheap, OR when the user sets edgeDensity:'focus'.
   _ghostFocusOnly() { return (this.plugin._settings && this.plugin._settings.edgeDensity === 'focus') || (this._ghostEdges && this._ghostEdges.length > 150); }
@@ -6665,7 +6677,7 @@ class CanvasView {
     for (const ge of this._ghostEdges) {
       if (!this._ghostTypeOk(ge)) continue; // P3.5: relation-type filter
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
-      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const { ax, ay, bx, by } = this._ghostEndpoints(ge, a, b); // AZLEN: line-anchored if the source line is known, else card centers (shared by draw + hit-test → they agree)
       const base = ge.rel ? '#0ea5e9' : '#f59e0b'; // rel (ref/backref) edges blue, semantic edges amber
       const ca = (a.strokeColor && /^#[0-9a-f]{3,6}$/i.test(a.strokeColor)) ? a.strokeColor : base, cb = (b.strokeColor && /^#[0-9a-f]{3,6}$/i.test(b.strokeColor)) ? b.strokeColor : base; // endpoint accent hues → a gradient ALONG the edge (source→target), the azlen "visibly connected" look
       let stroke = base; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, ca); g.addColorStop(1, cb); stroke = g; } catch (_e) {}
@@ -6689,7 +6701,7 @@ class CanvasView {
     for (const ge of inc) {
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
       farEnds.add(ge.a === hoverId ? ge.b : ge.a);
-      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const { ax, ay, bx, by } = this._ghostEndpoints(ge, a, b); // AZLEN: line-anchored if the source line is known, else card centers (shared by draw + hit-test → they agree)
       const base = ge.rel ? '#0ea5e9' : '#f59e0b';
       const ca = (a.strokeColor && /^#[0-9a-f]{3,6}$/i.test(a.strokeColor)) ? a.strokeColor : base, cb = (b.strokeColor && /^#[0-9a-f]{3,6}$/i.test(b.strokeColor)) ? b.strokeColor : base;
       let stroke = base; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, ca); g.addColorStop(1, cb); stroke = g; } catch (_e) {}
@@ -6815,7 +6827,7 @@ class CanvasView {
       // (on the curve), so _connHover is null — gating on it would make promote DEAD in hovered-only mode. The edge was
       // visible on hover; a click that lands within tol of its path promotes the right edge regardless of the density mode.
       const a = this._byId(ge.a), b = this._byId(ge.b); if (!a || !b) continue;
-      const ax = a.x + Math.abs(a.width) / 2, ay = a.y + Math.abs(a.height) / 2, bx = b.x + Math.abs(b.width) / 2, by = b.y + Math.abs(b.height) / 2;
+      const { ax, ay, bx, by } = this._ghostEndpoints(ge, a, b); // AZLEN: line-anchored if the source line is known, else card centers (shared by draw + hit-test → they agree)
       const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08), cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
       let px = ax, py = ay;
       for (let i = 1; i <= 12; i++) { const t = i / 12, u = 1 - t, qx = u * u * ax + 2 * u * t * cxp + t * t * bx, qy = u * u * ay + 2 * u * t * cyp + t * t * by; if (distToSeg(wx, wy, px, py, qx, qy) <= tol) return ge; px = qx; py = qy; }
@@ -6872,16 +6884,16 @@ class CanvasView {
     const onCanvas = new Set(guid2el.keys());
     const explicit = new Set(); // pairs already joined by a bound connector ("elA|elB" sorted)
     for (const e of this.scene.elements) { if (e.isDeleted || (e.type !== 'arrow' && e.type !== 'line')) continue; const a = e.startBinding && e.startBinding.elementId, b = e.endBinding && e.endBinding.elementId; if (a && b) explicit.add(a < b ? a + '|' + b : b + '|' + a); }
-    const pairs = new Set(), directed = new Set(); // pairs: related record-guid pairs ("gA|gB" sorted); directed: "src>dst" (src references dst) → the EDGE LABEL direction
+    const pairs = new Set(), directed = new Set(), srcLine = new Map(); // pairs: related record-guid pairs ("gA|gB" sorted); directed: "src>dst" (src references dst); srcLine: "src>dst" → the LINE GUID on src that holds the ref (AZLEN line-anchoring)
     for (const c of cards) {
       let rec = null; try { rec = await this.plugin.data.getRecord(c.recordGuid); } catch (_e) {}
       if (!rec) continue; const rel = new Set();
-      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) { rel.add(s.text.guid); directed.add(c.recordGuid + '>' + s.text.guid); } } catch (_e) {} // forward refs (C references the target)
-      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) { rel.add(r.guid); directed.add(r.guid + '>' + c.recordGuid); } } } catch (_e) {} // backrefs (the other record references C)
+      try { const items = await rec.getLineItems(); for (const li of (items || [])) for (const s of (li.segments || [])) if (s && s.type === 'ref' && s.text && s.text.guid && onCanvas.has(s.text.guid)) { rel.add(s.text.guid); directed.add(c.recordGuid + '>' + s.text.guid); const dk = c.recordGuid + '>' + s.text.guid; if (li.guid && !srcLine.has(dk)) srcLine.set(dk, li.guid); } } catch (_e) {} // forward refs (C references the target) + the FIRST line on C that holds each ref
+      try { const back = await rec.getBackReferences(); for (const br of (back || [])) { const r = br && br.record; if (r && r.guid && onCanvas.has(r.guid)) { rel.add(r.guid); directed.add(r.guid + '>' + c.recordGuid); } } } catch (_e) {} // backrefs (the other record references C) — that record's source line is captured when IT is iterated as a forward ref
       for (const g of rel) { if (g === c.recordGuid) continue; pairs.add(c.recordGuid < g ? c.recordGuid + '|' + g : g + '|' + c.recordGuid); }
     }
     const edges = [];
-    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]) }); } // aRefsB/bRefsA → the hover label ("references" / "referenced by" / "linked")
+    for (const key of pairs) { const gs = key.split('|'), ea = guid2el.get(gs[0]), eb = guid2el.get(gs[1]); if (!ea || !eb) continue; const ek = ea < eb ? ea + '|' + eb : eb + '|' + ea; if (explicit.has(ek)) continue; edges.push({ a: ea, b: eb, rel: true, aRefsB: directed.has(gs[0] + '>' + gs[1]), bRefsA: directed.has(gs[1] + '>' + gs[0]), aLine: srcLine.get(gs[0] + '>' + gs[1]) || null, bLine: srcLine.get(gs[1] + '>' + gs[0]) || null }); } // aRefsB/bRefsA → hover label; aLine/bLine → the source line each end references the other FROM (azlen line-anchoring)
     this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this._spotlightId = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace / spotlight (their geometry assumed the old graph)
     if (!quiet) try { this.plugin.ui.addToaster({ title: edges.length ? edges.length + ' inferred link(s) — related cards not yet connected (blue dashes).' : 'No inferred links — every related pair on the canvas is already connected.', dismissible: true }); } catch (_e) {} // P3.3: callers that already toast (Arrange parallel) pass quiet=true to avoid a double toaster
   }
