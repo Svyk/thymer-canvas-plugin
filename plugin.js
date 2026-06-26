@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.116.0';
+const PLEXUS_VERSION = '1.117.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -340,10 +340,10 @@ const ICON_CATALOG = [
 ];
 // ── Toolbar customization — a per-user config (order/visibility/palette/density/size/position) persisted in
 // localStorage['plexus_toolbar']. _buildToolbar renders from it; the settings page edits it + live-rebuilds. ──
-const DEFAULT_TOOLBAR_ORDER = TOOLS.map((t) => t.id).concat(['_shapes', '_icons', '_color', '_note', '_cite', '_settings']);
-const TOOLBAR_SPECIAL_LABEL = { _shapes: 'Shapes picker', _icons: 'Icons library', _color: 'Colours', _note: 'Note button', _cite: 'Cite button', _settings: 'Toolbar settings' };
+const DEFAULT_TOOLBAR_ORDER = TOOLS.map((t) => t.id).concat(['_shapes', '_icons', '_color', '_mindmap', '_note', '_cite', '_settings']);
+const TOOLBAR_SPECIAL_LABEL = { _shapes: 'Shapes picker', _icons: 'Icons library', _color: 'Colours', _mindmap: 'New mind map', _note: 'Note button', _cite: 'Cite button', _settings: 'Toolbar settings' };
 function toolbarItemLabel(id) { const t = TOOLS.find((x) => x.id === id); if (t) return t.title.replace(/\s*\(.*$/, '').trim(); return TOOLBAR_SPECIAL_LABEL[id] || id; }
-function toolbarItemIcon(id) { const t = TOOLS.find((x) => x.id === id); if (t) return t.icon; return { _shapes: 'ti-box', _icons: 'ti-mood-happy', _color: 'ti-palette', _note: 'ti-arrow-back-up', _cite: 'ti-link', _settings: 'ti-settings' }[id] || 'ti-square'; }
+function toolbarItemIcon(id) { const t = TOOLS.find((x) => x.id === id); if (t) return t.icon; return { _shapes: 'ti-box', _icons: 'ti-mood-happy', _color: 'ti-palette', _mindmap: 'ti-graph', _note: 'ti-arrow-back-up', _cite: 'ti-link', _settings: 'ti-settings' }[id] || 'ti-square'; }
 function loadToolbarConfig() {
   let c = null; try { c = JSON.parse(localStorage.getItem('plexus_toolbar') || 'null'); } catch (_e) {}
   if (!c || typeof c !== 'object') c = {};
@@ -1898,6 +1898,7 @@ class CanvasView {
       _note: () => { const b = document.createElement('button'); b.className = 'pxc-tool pxc-flipnote'; b.title = 'Flip to the note (open this record’s text)'; b.innerHTML = '<span class="ti ti-arrow-back-up"></span><span class="pxc-flip-lab">Note</span>'; b.addEventListener('click', () => this._flipToNote()); return b; },
       _cite: () => { const b = document.createElement('button'); b.className = 'pxc-tool pxc-flipnote'; b.title = 'Copy the selected image as a block reference, to paste into a note'; b.innerHTML = '<span class="ti ti-link"></span><span class="pxc-flip-lab">Cite</span>'; b.addEventListener('click', () => this._copyImageRefToClip()); return b; },
       _settings: () => { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = 'Customize toolbar (tools, colours, layout)'; b.innerHTML = '<span class="ti ti-settings"></span>'; b.addEventListener('click', () => this.plugin._openToolbarSettings()); return b; },
+      _mindmap: () => { const b = document.createElement('button'); b.className = 'pxc-tool'; b.title = 'New mind map — drops a central node. Then Tab = child · Enter = sibling · double-click to rename. (Palette also has “AI mind map from prompt” + “Mind map from note”.)'; b.innerHTML = '<span class="ti ti-graph"></span>'; b.addEventListener('click', () => this._newMindMap()); return b; }, // mind-map button (discoverability — was command-palette only)
     };
     for (const id of cfg.order) {
       if (cfg.hidden[id]) continue;
@@ -1909,7 +1910,31 @@ class CanvasView {
     }
     if (!bar.children.length) bar.style.display = 'none'; // everything hidden → no empty pill (gear stays in the command palette)
     this._toolbarEl = bar;
+    this._wireToolbarTips(bar); // hover tooltips for every button
     setTimeout(() => this._syncToolbar(), 0); return bar;
+  }
+  // Hover tooltips on the toolbar — a styled, INSTANT tip (the native `title` delay is long and is unreliable in the
+  // Thymer/Electron host). Delegated on the bar; reads each `.pxc-tool`'s existing `title`, and temporarily removes that
+  // `title` while the custom tip is shown so there's no double-tooltip. Positioned above the button (or below if it'd clip).
+  _wireToolbarTips(bar) {
+    let tip = this._tipEl;
+    if (!tip || !tip.isConnected) { tip = document.createElement('div'); tip.className = 'pxc-tip'; this.wrap.appendChild(tip); this._tipEl = tip; }
+    let cur = null, t = null;
+    const restore = () => { if (cur && cur.dataset && cur.dataset.tip != null) { cur.setAttribute('title', cur.dataset.tip); delete cur.dataset.tip; } };
+    const hide = () => { if (t) { clearTimeout(t); t = null; } restore(); cur = null; tip.classList.remove('pxc-tip-on'); };
+    const show = (btn) => {
+      const txt = btn.getAttribute('title') || (btn.dataset && btn.dataset.tip); if (!txt) return;
+      cur = btn; btn.dataset.tip = txt; btn.removeAttribute('title'); // suppress the native tooltip while ours shows
+      tip.textContent = txt; tip.classList.add('pxc-tip-on');
+      const r = btn.getBoundingClientRect(), wr = this.wrap.getBoundingClientRect(), tw = tip.offsetWidth || 120, th = tip.offsetHeight || 24;
+      let left = (r.left - wr.left) + r.width / 2 - tw / 2; left = Math.max(4, Math.min(left, wr.width - tw - 4));
+      let top = (r.top - wr.top) - th - 8; if (top < 4) top = (r.bottom - wr.top) + 8; // flip below if it would clip the top
+      tip.style.left = left + 'px'; tip.style.top = top + 'px';
+    };
+    const onOver = (e) => { const btn = e.target.closest && e.target.closest('.pxc-tool'); if (!btn || btn === cur) return; if (t) clearTimeout(t); restore(); cur = null; tip.classList.remove('pxc-tip-on'); t = setTimeout(() => { t = null; show(btn); }, 280); };
+    const onOut = (e) => { const btn = e.target.closest && e.target.closest('.pxc-tool'); if (btn && (!e.relatedTarget || !btn.contains(e.relatedTarget))) hide(); };
+    bar.addEventListener('mouseover', onOver); bar.addEventListener('mouseout', onOut);
+    this._toolbarDisposers.push(() => { bar.removeEventListener('mouseover', onOver); bar.removeEventListener('mouseout', onOut); hide(); });
   }
   // Rebuild the toolbar in place from the (possibly just-edited) config — used by the customization page for live preview.
   _rebuildToolbar() {
@@ -3525,10 +3550,11 @@ class CanvasView {
         if (k === 'f') { e.preventDefault(); e.stopPropagation(); this._openSearch(); return; }
       }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
-      if (this.selected.size && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
-      const mmSel = this._singleSel(); // P0.2: Tab/Enter grow the mind map when a node is selected
-      if (mmSel && mmSel.mmRoot && mmSel.type === 'text') {
-        if (e.key === 'Tab') { e.preventDefault(); const c = this._mmAddChild(mmSel); if (c) this._editText(c); return; } // MM-polish: child + IMMEDIATELY open inline edit (type right away — the video's core flow; _editText select-alls so the first keystroke replaces "New idea")
+      const mmSel = this._singleSel(); const _mmArrow = (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight'); const _isMM = !!(mmSel && mmSel.mmRoot && mmSel.type === 'text'); // P0.2/nav: a mind-map node gets Tab/Enter grow + ARROWS jump between nodes
+      if (_isMM && _mmArrow) { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase(), e.ctrlKey || e.metaKey); return; } // arrows JUMP between mind-map nodes (Ctrl/Cmd also auto-centers); the nudge below stays for non-mind-map selections
+      if (this.selected.size && _mmArrow) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
+      if (_isMM) {
+        if (e.key === 'Tab') { e.preventDefault(); if (e.shiftKey) { const p = mmSel.mmParent && this._byId(mmSel.mmParent); if (p && !p.isDeleted) { this.selected.clear(); this.selected.add(p.id); this.dirty = true; } } else { const c = this._mmAddChild(mmSel); if (c) this._editText(c); } return; } // Tab = child + open edit · SHIFT+TAB = go BACK to the parent node
         if (e.key === 'Enter') { e.preventDefault(); const s = this._mmAddSibling(mmSel); if (s) this._editText(s); return; } // MM-polish: sibling + immediately edit
         if (e.altKey) { // CP-3 v3c: Alt-key branch ops + spatial nav
           const k = e.key.toLowerCase();
@@ -7269,7 +7295,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -9019,6 +9045,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root.pxc-pencursor .pxc-interactive { cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><line x1="12" y1="2" x2="12" y2="22" stroke="%237c5cff" stroke-width="1"/><line x1="2" y1="12" x2="22" y2="12" stroke="%237c5cff" stroke-width="1"/></svg>') 12 12, crosshair; }
 .pxc-host .pxc-root.pxc-panning .pxc-interactive { cursor: grabbing; }
 .pxc-host .pxc-root .pxc-toolbar { position: absolute; left: 8px; right: 8px; top: 10px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; padding: 5px 7px; width: auto; max-width: calc(100% - 16px); margin: 0 auto; box-sizing: border-box; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.pxc-host .pxc-root .pxc-tip { position: absolute; z-index: 60; pointer-events: none; opacity: 0; transition: opacity .1s; padding: 5px 9px; border-radius: 7px; background: #1b1f2a; color: #e6e8ee; border: 1px solid #333a4a; box-shadow: 0 6px 20px rgba(0,0,0,.45); font: 11px/1.35 system-ui, sans-serif; max-width: 240px; white-space: normal; } /* toolbar hover tooltip — dark on any theme, conventional */
+.pxc-host .pxc-root .pxc-tip.pxc-tip-on { opacity: 1; }
 .pxc-host .pxc-root .pxc-tool { width: var(--pxc-tool-size, 30px); height: var(--pxc-tool-size, 30px); display: flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: calc(var(--pxc-tool-size, 30px) * 0.53); padding: 0; }
 .pxc-host .pxc-root .pxc-tool:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-tool.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; }
