@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.180.0';
+const PLEXUS_VERSION = '1.181.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -4011,7 +4011,7 @@ class CanvasView {
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else this._editCardBody(hit); } // dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline
+      else if (hit && hit.type === 'record') { const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else { const rb = this._margins && this._margins.ribbons.find((x) => x.cardId === hit.id); if (rb) { const ar = this._marginAnchorRect(rb.anchor); if (ar) { try { this._flashAnchor({ region: { x: ar.x, y: ar.y, w: ar.w, h: ar.h } }); } catch (_e) {} return; } } this._editCardBody(hit); } } // dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline; #26 V3: a margin card's body → fly to its on-page anchor
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -5555,6 +5555,30 @@ class CanvasView {
     const msg = across ? ('Connected Margins · across graph: ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + (nDocs ? ' + ' + nDocs + ' connected doc' + (nDocs === 1 ? '' : 's') + ' (' + nRel + ' cross-doc link' + (nRel === 1 ? '' : 's') + ')' : ' — no connected docs found (shared Source Note / Reply To / Section)') + '.') : ('Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.');
     try { this.plugin.ui.addToaster({ title: msg, dismissible: true }); } catch (_e) {}
   }
+  // CONNECTED MARGINS geometry (shared by the static layer + the hover overlay): resolve a ribbon's LIVE endpoints. Anchor
+  // ribbon = card left edge → its on-page anchor (with the anchor's rotation-aware outline quad); cross-doc ribbon = active
+  // card right edge → connected card left edge. Returns null when an endpoint element is gone (orphan/deleted → no ribbon).
+  _ribbonGeom(rb) {
+    if (rb.anchor) {
+      const card = this._byId(rb.cardId); if (!card || card.isDeleted) return null;
+      const anchor = this._marginAnchorRect(rb.anchor); if (!anchor) return null;
+      const ax = Math.min(card.x, card.x + card.width), ay = card.y + Math.abs(card.height) / 2;
+      const bx = anchor.x + anchor.w, by = anchor.y + anchor.h / 2;
+      const wA = Math.min(Math.abs(card.height) || 70, 46), wB = Math.max(7, Math.min(anchor.h, 40));
+      let anchorQuad = null; try { anchorQuad = this._imgRegionQuad(this._byId(rb.anchor.elId), rb.anchor.frac); } catch (_e) {}
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+      return { ax, ay, bx, by, wA, wB, bend: Math.min(70, len * 0.08), anchorQuad, cross: false };
+    }
+    if (rb.fromCardId) {
+      const a = this._byId(rb.fromCardId), b = this._byId(rb.toCardId); if (!a || a.isDeleted || !b || b.isDeleted) return null;
+      const ax = Math.max(a.x, a.x + a.width), ay = a.y + Math.abs(a.height) / 2;
+      const bx = Math.min(b.x, b.x + b.width), by = b.y + Math.abs(b.height) / 2;
+      const wA = Math.min(Math.abs(a.height) || 64, 34), wB = Math.min(Math.abs(b.height) || 64, 34);
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+      return { ax, ay, bx, by, wA, wB, bend: Math.min(70, len * 0.08), anchorQuad: null, cross: true };
+    }
+    return null;
+  }
   // CONNECTED MARGINS render layer (static, rides the cached raster like the ghost edges; re-routes when a card moves). Each
   // ribbon = a TRUE TAPERED FILLED QUAD (pxcRibbonQuads) from the card's left edge to its anchor's right edge, hue-gradient +
   // paid-once glow + a thin bright outline of the anchor box. Gated by this._margins → zero cost when no margins view is active.
@@ -5564,30 +5588,43 @@ class CanvasView {
     const glow = !(this.plugin._settings && this.plugin._settings.edgeGlow === false) && !this._drawGesture && !this._panMode;
     ctx.save();
     for (const rb of M.ribbons) {
-      let ax, ay, bx, by, wA, wB, anchorQuad = null;
+      const g = this._ribbonGeom(rb); if (!g) continue;
       const hue = rb.hue || '#7c5cff';
-      if (rb.anchor) { // ANCHOR ribbon: card left edge (A) → its true on-page anchor (B)
-        const card = this._byId(rb.cardId); if (!card || card.isDeleted) continue;
-        const anchor = this._marginAnchorRect(rb.anchor); if (!anchor) continue;
-        ax = Math.min(card.x, card.x + card.width); ay = card.y + Math.abs(card.height) / 2;
-        bx = anchor.x + anchor.w; by = anchor.y + anchor.h / 2;
-        wA = Math.min(Math.abs(card.height) || 70, 46); wB = Math.max(7, Math.min(anchor.h, 40));
-        anchorQuad = (() => { try { return this._imgRegionQuad(this._byId(rb.anchor.elId), rb.anchor.frac); } catch (_e) { return null; } })();
-      } else if (rb.fromCardId) { // CROSS-DOC relation ribbon: active card right edge (A) → connected-doc card left edge (B)
-        const a = this._byId(rb.fromCardId), b = this._byId(rb.toCardId); if (!a || a.isDeleted || !b || b.isDeleted) continue;
-        ax = Math.max(a.x, a.x + a.width); ay = a.y + Math.abs(a.height) / 2;
-        bx = Math.min(b.x, b.x + b.width); by = b.y + Math.abs(b.height) / 2;
-        wA = Math.min(Math.abs(a.height) || 64, 34); wB = Math.min(Math.abs(b.height) || 64, 34);
-      } else continue;
-      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08);
-      const q = pxcRibbonQuads(ax, ay, bx, by, wA, wB, bend, 14);
-      let fill = hue; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, hue); g.addColorStop(1, adaptInk(hue, dark)); fill = g; } catch (_e) {}
+      const q = pxcRibbonQuads(g.ax, g.ay, g.bx, g.by, g.wA, g.wB, g.bend, 14);
+      let fill = hue; try { const gr = ctx.createLinearGradient(g.ax, g.ay, g.bx, g.by); gr.addColorStop(0, hue); gr.addColorStop(1, adaptInk(hue, dark)); fill = gr; } catch (_e) {}
       const path = () => { ctx.beginPath(); ctx.moveTo(q.top[0][0], q.top[0][1]); for (let i = 1; i < q.top.length; i++) ctx.lineTo(q.top[i][0], q.top[i][1]); for (let i = q.bot.length - 1; i >= 0; i--) ctx.lineTo(q.bot[i][0], q.bot[i][1]); ctx.closePath(); };
       if (glow) { ctx.globalAlpha = 0.10; ctx.fillStyle = fill; ctx.shadowColor = hue; ctx.shadowBlur = 8; path(); ctx.fill(); ctx.shadowBlur = 0; }
-      ctx.globalAlpha = rb.fromCardId ? 0.22 : 0.17; ctx.fillStyle = fill; path(); ctx.fill();
-      if (anchorQuad) { try { ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hue; ctx.beginPath(); ctx.moveTo(anchorQuad[0].x, anchorQuad[0].y); for (let i = 1; i < anchorQuad.length; i++) ctx.lineTo(anchorQuad[i].x, anchorQuad[i].y); ctx.closePath(); ctx.stroke(); } catch (_e) {} }
+      ctx.globalAlpha = g.cross ? 0.22 : 0.17; ctx.fillStyle = fill; path(); ctx.fill();
+      if (g.anchorQuad) { try { ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hue; ctx.beginPath(); ctx.moveTo(g.anchorQuad[0].x, g.anchorQuad[0].y); for (let i = 1; i < g.anchorQuad.length; i++) ctx.lineTo(g.anchorQuad[i].x, g.anchorQuad[i].y); ctx.closePath(); ctx.stroke(); } catch (_e) {} }
     }
     ctx.globalAlpha = 1; ctx.restore();
+  }
+  // CONNECTED MARGINS hover overlay (V3 — OVERLAY pass, redraws each frame like _drawGhostFocus). Hovering a margin card LIGHTS
+  // its ribbon(s): a bright re-fill + glow + a bead travelling card→anchor + a pulsed anchor outline — so "which highlight is
+  // this card?" lights up live. Reuses the already-tracked _connHover. Re-arms this.dirty WHILE hovering, idles at 0 otherwise.
+  _drawMarginFocus(ctx, z, d) {
+    const M = this._margins; if (!M || !M.ribbons || !M.ribbons.length || this._drawGesture) return;
+    const hoverId = (this.tool === 'select' && !this.editingId && this._connHover && !this._connHover.isDeleted) ? this._connHover.id : null;
+    if (!hoverId) return;
+    const lit = M.ribbons.filter((rb) => rb.cardId === hoverId || rb.fromCardId === hoverId || rb.toCardId === hoverId);
+    if (!lit.length) return;
+    const flowT = ((this._now() % 1400) / 1400);
+    ctx.save();
+    for (const rb of lit) {
+      const g = this._ribbonGeom(rb); if (!g) continue;
+      const hue = rb.hue || '#7c5cff';
+      const q = pxcRibbonQuads(g.ax, g.ay, g.bx, g.by, g.wA, g.wB, g.bend, 16);
+      const path = () => { ctx.beginPath(); ctx.moveTo(q.top[0][0], q.top[0][1]); for (let i = 1; i < q.top.length; i++) ctx.lineTo(q.top[i][0], q.top[i][1]); for (let i = q.bot.length - 1; i >= 0; i--) ctx.lineTo(q.bot[i][0], q.bot[i][1]); ctx.closePath(); };
+      ctx.globalAlpha = 0.5; ctx.fillStyle = hue; ctx.shadowColor = hue; ctx.shadowBlur = 12; path(); ctx.fill(); ctx.shadowBlur = 0;
+      // a bead travelling along the centerline from the card (A) toward the anchor (B)
+      const mx = (g.ax + g.bx) / 2, my = (g.ay + g.by) / 2, dxx = g.bx - g.ax, dyy = g.by - g.ay, len = Math.hypot(dxx, dyy) || 1;
+      const cxp = mx + (-dyy / len) * g.bend, cyp = my + (dxx / len) * g.bend, u = 1 - flowT;
+      const px = u * u * g.ax + 2 * u * flowT * cxp + flowT * flowT * g.bx, py = u * u * g.ay + 2 * u * flowT * cyp + flowT * flowT * g.by;
+      ctx.beginPath(); ctx.arc(px, py, 4 / z, 0, 7); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.95; ctx.shadowColor = hue; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0;
+      if (g.anchorQuad) { ctx.globalAlpha = 0.95; ctx.lineWidth = 2.2 / z; ctx.strokeStyle = hue; ctx.beginPath(); ctx.moveTo(g.anchorQuad[0].x, g.anchorQuad[0].y); for (let i = 1; i < g.anchorQuad.length; i++) ctx.lineTo(g.anchorQuad[i].x, g.anchorQuad[i].y); ctx.closePath(); ctx.stroke(); }
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+    this.dirty = true; // re-arm while hovering; idles when _connHover clears
   }
   // SPACED REPETITION (#25): review highlights on an SM-2 schedule. A highlight is DUE when its SR Due day-number is null
   // (never reviewed) or ≤ today. Grading (Again/Hard/Good/Easy) reschedules it via pxcSm2, written back as plain NUMBER props
@@ -8908,6 +8945,7 @@ class CanvasView {
     if (this._showGhosts && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawGhostFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     // P3.7: traced connection path between two cards — bright animated chain on the overlay (independent of ghost hover).
     if (this._tracedPath && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawTracePath(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
+    if (this._margins && this._connHover && !this._drawGesture) { ictx.setTransform(z * d, 0, 0, z * d, -this.camera.x * z * d, -this.camera.y * z * d); try { this._drawMarginFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // #26 V3: hover a margin card → light its ribbon
     // P3.8: spotlight — dim the board except one card + its 1-hop neighbors. Self-manages transforms (screen scrim → world edges).
     if (this._spotlightId && !this._drawGesture) { try { this._drawSpotlight(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); }
     if (this._cmtFocus && !this._drawGesture) { try { this._drawCommentFocus(ictx, z, d); } catch (_e) {} ictx.setTransform(1, 0, 0, 1, 0, 0); } // C9: dim all but commented cards (pins draw later → stay lit)

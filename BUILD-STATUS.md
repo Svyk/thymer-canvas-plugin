@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.181.0 — #26 V3: Connected Margins hover-lit ribbon + click-jump (2026-06-26)
+**SHIPPED:** hovering a margin card now LIGHTS its ribbon(s) — a bright re-fill + glow + a bead travelling card→anchor +
+a pulsed anchor-box outline (`_drawMarginFocus`, an OVERLAY pass mirroring `_drawGhostFocus`, reusing the already-tracked
+`_connHover`; re-arms `dirty` only while hovering, idles to 0 CPU). Hovering a cross-doc card lights the relation ribbon
+to its connected doc. **Double-clicking a margin card's body** flies to its true on-page anchor (`_flashAnchor`); the title
+band still opens the record. Refactored the ribbon endpoint math into a shared `_ribbonGeom(rb)` used by both the static
+layer and the hover overlay. **Adversarial review: verdict SHIP, zero findings** — refactor confirmed byte-equivalent to
+the reviewed V1/V2/V5 static layer, overlay idles correctly, click-jump falls through safely for cross-doc cards, no NaN
+in the bead math. (Connected Margins now: V1+V2 single-doc, V5 across-graph, V3 hover/jump. V4 comment/org-remark Source-Line
+anchor tier next.) Full suite 90 files green.
+
 ## ✅ v1.180.0 — #25 spaced-repetition review over highlights (2026-06-26)
 The last feasible "build these next" item — turns the highlight library into a review deck.
 
