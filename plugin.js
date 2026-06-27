@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.179.0';
+const PLEXUS_VERSION = '1.180.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1196,6 +1196,25 @@ function pxcPointInRibbon(quad, px, py) {
     if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / ((yj - yi) || 1e-9) + xi)) inside = !inside;
   }
   return inside;
+}
+// SPACED REPETITION (#25): SM-2-lite scheduler over highlights. grade 0=Again 1=Hard 2=Good 3=Easy. Tolerates null/garbage
+// prior state (a never-reviewed highlight → ease 2.5, reps 0, interval 0). Returns the next {ease, reps, interval, dueInDays}
+// (interval/dueInDays in whole days; due 0 = re-review same day). Intervals capped at 365d. Pure → node-tested.
+function pxcSm2(grade, ease, reps, interval) {
+  ease = (typeof ease === 'number' && ease >= 1.3) ? ease : 2.5;
+  reps = (typeof reps === 'number' && reps >= 0) ? Math.floor(reps) : 0;
+  interval = (typeof interval === 'number' && interval > 0) ? interval : 0;
+  let nextEase = ease, nextReps, nextInterval;
+  if (grade <= 0) { nextReps = 0; nextInterval = 0; nextEase = Math.max(1.3, ease - 0.20); } // Again: lapse → relearn today
+  else {
+    nextEase = Math.max(1.3, ease + (grade === 1 ? -0.15 : grade >= 3 ? 0.15 : 0));
+    nextReps = reps + 1;
+    if (nextReps === 1) nextInterval = (grade === 1 ? 1 : grade >= 3 ? 3 : 1);
+    else if (nextReps === 2) nextInterval = (grade === 1 ? 3 : 6);
+    else nextInterval = Math.round(Math.max(1, interval) * nextEase * (grade === 1 ? 0.8 : grade >= 3 ? 1.3 : 1));
+  }
+  nextInterval = Math.max(0, Math.min(nextInterval, 365));
+  return { ease: Math.round(nextEase * 100) / 100, reps: nextReps, interval: nextInterval, dueInDays: nextInterval };
 }
 // AI AUTO-CLUSTER: connected-components clustering — elements with cosine similarity > threshold join the same group
 // (single-linkage via union-find). Pure + node-tested; the on-device embedding lives in _aiAutoCluster.
@@ -5570,6 +5589,74 @@ class CanvasView {
     }
     ctx.globalAlpha = 1; ctx.restore();
   }
+  // SPACED REPETITION (#25): review highlights on an SM-2 schedule. A highlight is DUE when its SR Due day-number is null
+  // (never reviewed) or ≤ today. Grading (Again/Hard/Good/Easy) reschedules it via pxcSm2, written back as plain NUMBER props
+  // (SR Due/Ease/Reps/Interval — day-integers, so no datetime-`formatted` gotcha). Turns the highlight library into a deck.
+  async _reviewHighlights() {
+    const col = await this.plugin._pdfHlCollection(); if (this.destroyed) return;
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF Highlights collection.', dismissible: true }); } catch (_e) {} return; }
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) {}
+    if (this.destroyed) return;
+    const today = Math.floor(Date.now() / 86400000);
+    const due = [];
+    for (const r of recs) {
+      if (!r || !r.guid) continue;
+      let status = ''; try { const sp = r.prop('Status'); status = (sp && sp.choiceLabel && sp.choiceLabel()) || ''; } catch (_e) {}
+      if (status === 'archived') continue;
+      let srDue = null; try { const p = r.prop('SR Due'); srDue = (p && p.number) ? p.number() : null; } catch (_e) {}
+      if (srDue == null || srDue <= today) due.push(r);
+    }
+    if (!due.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no highlights due for review — all caught up. 🎉', dismissible: true }); } catch (_e) {} return; }
+    this._openReviewOverlay(due.slice(0, 30), today);
+  }
+  async _gradeHighlight(r, grade, today) {
+    let ease = null, reps = null, interval = null;
+    try { const p = r.prop('SR Ease'); ease = (p && p.number) ? p.number() : null; } catch (_e) {}
+    try { const p = r.prop('SR Reps'); reps = (p && p.number) ? p.number() : null; } catch (_e) {}
+    try { const p = r.prop('SR Interval'); interval = (p && p.number) ? p.number() : null; } catch (_e) {}
+    const s = pxcSm2(grade, ease, reps, interval);
+    try { r.prop('SR Ease').set(s.ease); } catch (_e) {}
+    try { r.prop('SR Reps').set(s.reps); } catch (_e) {}
+    try { r.prop('SR Interval').set(s.interval); } catch (_e) {}
+    try { r.prop('SR Due').set(today + s.dueInDays); } catch (_e) {}
+  }
+  _openReviewOverlay(records, today) {
+    try { this._injectRefPickerCss(); } catch (_e) {}
+    let i = 0, revealed = false, busy = false;
+    const ov = document.createElement('div'); ov.className = 'pxc-modal';
+    const box = document.createElement('div'); box.className = 'pxc-modal-box'; box.style.minWidth = '480px'; box.style.maxWidth = '560px';
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); close(); }
+      else if (!revealed && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); e.stopPropagation(); revealed = true; render(); }
+      else if (revealed && ['1', '2', '3', '4'].includes(e.key)) { e.preventDefault(); e.stopPropagation(); grade(Number(e.key) - 1); }
+    };
+    const close = () => { try { ov.remove(); } catch (_e) {} document.removeEventListener('keydown', onKey, true); this._closeReview = null; };
+    this._closeReview = close; // review LOW: expose the closer so destroy() can tear down the overlay + its capture listener if the view dies mid-session (hot-reload-leak guard)
+    const grade = (g) => { if (busy || i >= records.length) return; busy = true; this._gradeHighlight(records[i], g, today).then(() => { busy = false; i++; revealed = false; render(); }).catch(() => { busy = false; i++; revealed = false; render(); }); };
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) { e.stopPropagation(); close(); } });
+    box.addEventListener('pointerdown', (e) => e.stopPropagation());
+    const render = () => {
+      box.innerHTML = '';
+      if (i >= records.length) {
+        const done = document.createElement('div'); done.className = 'pxc-modal-label'; done.textContent = 'Review complete — ' + records.length + ' highlight' + (records.length === 1 ? '' : 's') + ' reviewed. 🎉'; box.appendChild(done);
+        const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = 'Done'; b.addEventListener('click', close); box.appendChild(b); return;
+      }
+      const h = this._readHlRecord(records[i]);
+      const head = document.createElement('div'); head.className = 'pxc-modal-label'; head.textContent = 'Review ' + (i + 1) + ' / ' + records.length + '  ·  ' + (h.pdfName || 'PDF') + (h.section ? '  ·  ' + h.section : ''); box.appendChild(head);
+      const text = document.createElement('div'); text.style.cssText = 'font-size:15px;line-height:1.5;margin:10px 0;padding:12px;border-radius:8px;background:var(--sidebar-bg-hover,rgba(124,92,255,.10));color:var(--color-text-400,#e6e8ee)'; text.textContent = h.title || '(highlight)'; box.appendChild(text);
+      if (!revealed) {
+        const hint = document.createElement('div'); hint.style.cssText = 'font-size:12px;opacity:.6;margin-bottom:8px'; hint.textContent = 'Recall the note/context, then reveal (Space).'; box.appendChild(hint);
+        const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = 'Reveal'; b.addEventListener('click', () => { revealed = true; render(); }); box.appendChild(b);
+      } else {
+        const note = document.createElement('div'); note.style.cssText = 'font-size:13px;opacity:.9;margin:4px 0 12px;color:var(--color-text-400,#e6e8ee)'; note.textContent = h.note ? ('📝 ' + h.note) : (h.code ? ('· coded: ' + h.code) : '(no note)'); box.appendChild(note);
+        const row = document.createElement('div'); row.className = 'pxc-modal-row';
+        [['Again', 0], ['Hard', 1], ['Good', 2], ['Easy', 3]].forEach(([lbl, g]) => { const gb = document.createElement('button'); gb.className = 'pxc-prop-btn'; gb.textContent = lbl; gb.addEventListener('click', () => grade(g)); row.appendChild(gb); });
+        box.appendChild(row);
+        const k = document.createElement('div'); k.style.cssText = 'font-size:11px;opacity:.5;margin-top:6px'; k.textContent = 'Keys: 1 Again · 2 Hard · 3 Good · 4 Easy'; box.appendChild(k);
+      }
+    };
+    ov.appendChild(box); this.wrap.appendChild(ov); document.addEventListener('keydown', onKey, true); render();
+  }
   _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
   _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
   _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
@@ -9222,7 +9309,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -9362,6 +9449,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open citation graph in Plexus Brain', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._openInBrain(); } }); // #24: focus the selected highlight / this PDF's source note in the Brain graph. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connected Margins (parallel pages, visibly connected)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._connectedMargins(false); } }); // #26: every highlight as an anchor-aligned margin card + a tapered ribbon to its true on-page position (Azlen). ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connected Margins — across the graph (connected docs)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._connectedMargins(true); } }); // #26 V5: + a parallel column per CONNECTED document (shared Source Note / Reply To thread / Section) with relation-hued cross-doc ribbons
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Review due highlights (spaced repetition)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._reviewHighlights(); } }); // #25: SM-2-lite review deck over the highlight library (SR Due/Ease/Reps/Interval number props). ti-clock = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });

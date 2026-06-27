@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.180.0 — #25 spaced-repetition review over highlights (2026-06-26)
+The last feasible "build these next" item — turns the highlight library into a review deck.
+
+**SHIPPED — spaced-rep:** new command **"Plexus: Review due highlights (spaced repetition)"** (`ti-clock`) —
+`_reviewHighlights()` loads the PDF Highlights collection, filters to **DUE** (a `SR Due` day-integer prop that is null /
+never-reviewed OR ≤ today; skips archived), caps the session at 30, and opens a keyboard-driven review overlay: each
+highlight shows its text → **Reveal** (Space) → its note + grade buttons **Again / Hard / Good / Easy** (keys 1–4).
+Grading runs `pxcSm2` (pure SM-2-lite) and writes the next schedule back as plain **NUMBER** props — `SR Due / SR Ease /
+SR Reps / SR Interval` (day-integers, so **no datetime-`formatted` gotcha**), via `r.prop('X').set(n)` (the established
+`prop('Page').set(...)` convention). 4 props added to the collection via MCP. Overlay modeled on `_showLightbox`
+(`pxc-modal` styling, capture-phase keydown, `busy` guard against double-grade). **Adversarial review: verdict SHIP** —
+listener-flag symmetry, busy-guard, number writes, due logic, never-reviewed=due, no-within-session-loop on Again, XSS
+(textContent only) all verified; folded the one LOW (store `this._closeReview` + tear it down in `destroy()` so a
+view-destroy mid-session can't leak the overlay + its capture listener — the hot-reload-leak guard). New pure `pxcSm2`.
+Tests: new `pxc_sm2` **14 assertions**; full suite **90 files green**.
+
+**The "build these next" list is now closed:** #23 AI synthesis ✓, #24 Brain citation graph ✓, #25 spaced-rep ✓, plus
+the Azlen headline #26 (V1+V2 single-doc + V5 across-graph) ✓. Genuinely fleet-BLOCKED (no local plugin API to hook):
+**Smart Connections semantic clustering** (`153SXYV3N7P5E4ETW2SD7JY51C` — no local dir/window seam), **LLM-Wiki
+auto-enrich** (wiki-maintain pipeline). **QA provenance** is already delivered: AI synthesis grounds every claim in its
+source highlight cards + each highlight carries a durable backlink URL to its exact PDF location.
+
 ## ✅ v1.179.0 — #26 V5: Connected Margins ACROSS THE GRAPH (cross-doc columns) (2026-06-26)
 The relational soul of the Azlen feature — "open a PDF and see every comment across the graph, visibly connected."
 
