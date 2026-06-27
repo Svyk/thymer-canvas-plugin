@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.183.0 — #30 Reader view (one page + highlights sidebar, alongside Grid/Stack) (2026-06-26)
+A Heptabase-style single-page reader, the user's chosen "normal view." New **"📖 Reader"** button in the PDF nav toolbar
+(beside ⤢ Grid / ▤ Stack) runs Connected Margins **scoped to the focused page**: `_connectedMargins(across, readerPage)`
+gained a `readerPage` param → `pool = active.filter(h => h.page === readerPage)` (only that page's highlights), forces
+`across=false`, skips note remarks, and frames the camera to **just that page + its highlights sidebar** (extent computed
+from `extentPages = pages.filter(page === readerPage)`; `pageByNum` still spans all pages so anchor resolution is intact).
+So you read one page large with its highlights laid out beside it, each joined by a ribbon — page-nav (‹ ›) then re-Reader
+walks the document. Reuses the entire Connected Margins machinery (descriptors/layout/ribbons/hover/refresh-in-place cmrg
+group); the only new surface is the param + the toolbar button. **Adversarial review: verdict SHIP** — scoping, extent/camera,
+anchor resolution, capped/frame/toaster consistency, across-skip (no undefined vars), and the shared-cmrg refresh-in-place all
+verified clean; no fixes. Full suite 90 green.
+
+**Connected Margins is COMPLETE: V1+V2 (single-doc parallel pages) · V5 (across-graph cross-doc) · V3 (hover-lit + jump) ·
+V4 (record-comment/org-remark line anchors) · #30 Reader (single page + sidebar).**
+
 ## ✅ v1.182.0 — #26 V4: Connected Margins record-comment / org-remark anchor tier (2026-06-26)
 **SHIPPED:** Connected Margins now also surfaces **org-remark Remarks** anchored to the exact body **line** they comment on.
 `_marginAnchorRect` gained a `kind:'line'` tier → `_lineRectWorld(card, lineGuid)` (the rotation-aware body-line rect, null

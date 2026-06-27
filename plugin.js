@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.182.0';
+const PLEXUS_VERSION = '1.183.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5498,10 +5498,11 @@ class CanvasView {
     }
     return out;
   }
-  async _connectedMargins(across) {
+  async _connectedMargins(across, readerPage) {
     const docId = this._activePdfDocId();
     const pages = docId ? this._pdfPagesOf(docId) : [];
     if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas.', dismissible: true }); } catch (_e) {} return; }
+    if (readerPage) across = false; // #30 Reader: single-page focus, no cross-doc columns
     const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
     const srcName = ((pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0]).pdf || {}).srcName || 'PDF';
     const col = await this.plugin._pdfHlCollection();
@@ -5523,10 +5524,13 @@ class CanvasView {
     }
     const active = all.filter((h) => h.isActive);
     if (!active.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no highlights for this PDF yet — highlight or extract a figure first.', dismissible: true }); } catch (_e) {} return; }
-    const CAP = 150, capped = active.length > CAP, use = capped ? active.slice(0, CAP) : active;
-    const pageByNum = new Map(); for (const p of pages) if (p.pdf) pageByNum.set(p.pdf.page, p);
+    const pool = readerPage ? active.filter((h) => (h.page || 0) === readerPage) : active; // #30 Reader: only the focused page's highlights
+    if (readerPage && !pool.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no highlights on page ' + readerPage + ' yet.', dismissible: true }); } catch (_e) {} return; }
+    const CAP = 150, capped = pool.length > CAP, use = capped ? pool.slice(0, CAP) : pool;
+    const pageByNum = new Map(); for (const p of pages) if (p.pdf) pageByNum.set(p.pdf.page, p); // ALL pages (anchor resolution needs every page)
+    const extentPages = readerPage ? pages.filter((p) => p.pdf && p.pdf.page === readerPage) : pages; // #30 Reader: extent + camera = just the focused page
     let pageLeft = Infinity, pageRight = -Infinity, pageTop = Infinity, pageBottom = -Infinity;
-    for (const p of pages) { pageLeft = Math.min(pageLeft, p.x, p.x + p.width); pageRight = Math.max(pageRight, p.x, p.x + p.width); pageTop = Math.min(pageTop, p.y, p.y + p.height); pageBottom = Math.max(pageBottom, p.y, p.y + p.height); }
+    for (const p of (extentPages.length ? extentPages : pages)) { pageLeft = Math.min(pageLeft, p.x, p.x + p.width); pageRight = Math.max(pageRight, p.x, p.x + p.width); pageTop = Math.min(pageTop, p.y, p.y + p.height); pageBottom = Math.max(pageBottom, p.y, p.y + p.height); }
     const CH = 70;
     const textCount = new Map(); for (const h of use) { const isArea = h.type === 'area' && h.anchor && h.anchor.frac; if (!isArea && h.page && pageByNum.has(h.page)) textCount.set(h.page, (textCount.get(h.page) || 0) + 1); } // review LOW: count ONLY on-canvas pages so the band denominator matches textIdx (off-canvas highlights mustn't compress the bands)
     const textIdx = new Map(), descriptors = [];
@@ -5539,7 +5543,7 @@ class CanvasView {
       descriptors.push({ guid: h.guid, anchor: desc, hue, rect, page: h.page || 0, ay: rect ? rect.y + rect.h / 2 : pageBottom + 1 });
     }
     // #26 V4: also pull org-remark Remarks anchored to body lines of record cards ON this canvas → line-anchored margin cards.
-    const remarkDescs = await this._collectRemarkDescriptors();
+    const remarkDescs = readerPage ? [] : await this._collectRemarkDescriptors(); // #30 Reader: page-scoped, skip note remarks
     if (this.destroyed) return;
     for (const rd of remarkDescs) { descriptors.push(rd); const host = this._byId(rd.anchor.elId); if (host) { pageLeft = Math.min(pageLeft, host.x, host.x + host.width); pageRight = Math.max(pageRight, host.x, host.x + host.width); pageTop = Math.min(pageTop, host.y, host.y + host.height); pageBottom = Math.max(pageBottom, host.y, host.y + host.height); } } // expand the source extent so the column sits right of the note too + the camera fit includes it
     const nRemarks = remarkDescs.length;
@@ -5549,7 +5553,7 @@ class CanvasView {
     for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length && String(el.groupIds[0]).indexOf('cmrg') === 0) el.isDeleted = true; } // refresh-in-place: retire the prior margin layout (one undo step)
     const gid = 'cmrg' + Math.floor(this._now()).toString(36);
     const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); return el; };
-    const fr = makeFrame(lay.frame.x, lay.frame.y, lay.frame.w, lay.frame.h); fr.name = '📄 ' + srcName + ' — margins' + (capped ? ' (first ' + CAP + ' of ' + active.length + ')' : ''); add(fr);
+    const fr = makeFrame(lay.frame.x, lay.frame.y, lay.frame.w, lay.frame.h); fr.name = (readerPage ? '📖 ' + srcName + ' · p.' + readerPage : '📄 ' + srcName + ' — margins') + (capped ? ' (first ' + CAP + ' of ' + pool.length + ')' : ''); add(fr);
     const ribbons = [], activeCardByGuid = new Map();
     descriptors.forEach((d, i) => { const cd = lay.cards[i]; const rc = makeRecordCard(cd.x, cd.y, cd.w, cd.h, d.guid); if (d.hue) rc.strokeColor = d.hue; add(rc); activeCardByGuid.set(d.guid, rc.id); if (d.anchor && d.anchor.kind !== 'none') ribbons.push({ cardId: rc.id, anchor: d.anchor, hue: d.hue }); });
     // ── ACROSS GRAPH: cross-document columns + relation ribbons ─────────────────────────────────────────────────────
@@ -5588,7 +5592,7 @@ class CanvasView {
     const ux = Math.min(pageLeft, lay.frame.x), uy = Math.min(pageTop, lay.frame.y), uby = Math.max(pageBottom, lay.frame.y + lay.frame.h);
     try { this._fitToBounds({ x: ux - 20, y: uy - 20, w: (unionRight - ux) + 40, h: (uby - uy) + 40 }, 40); } catch (_e) {}
     const rem = nRemarks ? ' + ' + nRemarks + ' note remark' + (nRemarks === 1 ? '' : 's') : '';
-    const msg = across ? ('Connected Margins · across graph: ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + (nDocs ? ' + ' + nDocs + ' connected doc' + (nDocs === 1 ? '' : 's') + ' (' + nRel + ' cross-doc link' + (nRel === 1 ? '' : 's') + ')' : ' — no connected docs found (shared Source Note / Reply To / Section)') + '.') : ('Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.');
+    const msg = readerPage ? ('Reader · page ' + readerPage + ': ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' beside the page.') : across ? ('Connected Margins · across graph: ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + (nDocs ? ' + ' + nDocs + ' connected doc' + (nDocs === 1 ? '' : 's') + ' (' + nRel + ' cross-doc link' + (nRel === 1 ? '' : 's') + ')' : ' — no connected docs found (shared Source Note / Reply To / Section)') + '.') : ('Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.');
     try { this.plugin.ui.addToaster({ title: msg, dismissible: true }); } catch (_e) {}
   }
   // CONNECTED MARGINS geometry (shared by the static layer + the hover overlay): resolve a ribbon's LIVE endpoints. Anchor
@@ -5758,6 +5762,7 @@ class CanvasView {
     const sep = document.createElement('span'); sep.className = 'pxc-pdfnav-sep'; box.appendChild(sep);
     mk('⤢ Grid', 'Explode the document into a grid', () => this._pdfExplode(page.pdf.docId));
     mk('▤ Stack', 'Re-stack the pages into a column', () => this._pdfStack(page.pdf.docId));
+    mk('📖 Reader', 'Read this page with its highlights beside it', () => { const p = this._byId(this._pdfNavId) || page; this._connectedMargins(false, (p.pdf && p.pdf.page) || 1); }); // #30: single-page reader + highlights sidebar (scoped Connected Margins)
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
   _closePdfNav() { if (this._pdfNavEl) { try { this._pdfNavEl.remove(); } catch (_e) {} this._pdfNavEl = null; } this._pdfNavId = null; }
