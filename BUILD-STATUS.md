@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.182.0 — #26 V4: Connected Margins record-comment / org-remark anchor tier (2026-06-26)
+**SHIPPED:** Connected Margins now also surfaces **org-remark Remarks** anchored to the exact body **line** they comment on.
+`_marginAnchorRect` gained a `kind:'line'` tier → `_lineRectWorld(card, lineGuid)` (the rotation-aware body-line rect, null
+if the card hasn't rastered). New `_collectRemarkDescriptors()` reads the **Remarks** collection (by name), and for each
+Remark finds which on-canvas record card owns its `Source Line` (unique line GUID → first card whose raster contains it),
+emitting line-anchored margin cards. So a PDF + the note you're annotating, side by side, show BOTH the PDF's highlights
+(anchored to pages) AND the note's remarks (anchored to lines) in one margin, each ribbon landing on its exact target. The
+source extent expands to include the note so the column sits right of everything + the camera fit includes it. Cheap: a
+no-op early-return when no record cards are on the canvas. Read-only, additive, same `cmrg` undo group, capped at 80.
+**Adversarial review: verdict SHIP** — `_lineRectWorld` null-contract, destroyed-guards on both awaits, extent/clamp,
+data-safety (read-only), page-0 sort, no-throw-escape all verified; folded the LOW (break at cap). Full suite 90 green.
+(Connected Margins is now complete: V1+V2 single-doc · V5 across-graph · V3 hover/jump · V4 record-comments.)
+
 ## ✅ v1.181.0 — #26 V3: Connected Margins hover-lit ribbon + click-jump (2026-06-26)
 **SHIPPED:** hovering a margin card now LIGHTS its ribbon(s) — a bright re-fill + glow + a bead travelling card→anchor +
 a pulsed anchor-box outline (`_drawMarginFocus`, an OVERLAY pass mirroring `_drawGhostFocus`, reusing the already-tracked

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.181.0';
+const PLEXUS_VERSION = '1.182.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5467,7 +5467,37 @@ class CanvasView {
   _readHlAnchor(r) { const raw = this._propText(r, 'Anchor Data'); if (!raw) return null; let o = null; try { o = JSON.parse(raw); } catch (_e) { return null; } return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null; }
   // Resolve a ribbon's anchor descriptor to a LIVE world rect each draw (area/band → _imgRegionWorld on the page image). null
   // when the page element is gone (orphan) → the ribbon is skipped, the card stays. Recomputed per frame so it tracks pan/zoom.
-  _marginAnchorRect(anchor) { if (!anchor || anchor.kind === 'none') return null; if (anchor.kind === 'area' || anchor.kind === 'band') { const el = this._byId(anchor.elId); if (!el || el.isDeleted) return null; return this._imgRegionWorld(el, anchor.frac); } return null; }
+  _marginAnchorRect(anchor) {
+    if (!anchor || anchor.kind === 'none') return null;
+    if (anchor.kind === 'area' || anchor.kind === 'band') { const el = this._byId(anchor.elId); if (!el || el.isDeleted) return null; return this._imgRegionWorld(el, anchor.frac); }
+    if (anchor.kind === 'line') { const el = this._byId(anchor.elId); if (!el || el.isDeleted) return null; return this._lineRectWorld(el, anchor.lineGuid); } // #26 V4: record-comment / org-remark anchored to a body LINE (null if the card hasn't rastered or scrolled the line out)
+    return null;
+  }
+  // #26 V4: pull org-remark Remarks whose Source Line resolves to a body line of a record card ON THIS canvas → line-anchored
+  // margin descriptors. So a PDF + the note you're commenting on, side by side, show BOTH the PDF highlights AND the note's
+  // remarks in one margin, each ribbon landing on its exact line. Best-effort: a Remark whose host card isn't on the canvas
+  // (or hasn't rastered) is skipped. Bounded (cap 80). Reads the Remarks collection by name; no-op when it/record-cards absent.
+  async _collectRemarkDescriptors() {
+    const cards = ((this.scene && this.scene.elements) || []).filter((e) => e && e.type === 'record' && e.recordGuid && !e.isDeleted);
+    if (!cards.length) return [];
+    let cols = null; try { cols = await this.plugin.data.getAllCollections(); } catch (_e) { return []; }
+    if (this.destroyed || !cols) return [];
+    const rcol = cols.find((c) => { try { return (c.getName && c.getName()) === 'Remarks'; } catch (_e) { return false; } });
+    if (!rcol) return [];
+    let recs = []; try { recs = await rcol.getAllRecords() || []; } catch (_e) { return []; }
+    if (this.destroyed) return [];
+    const out = [];
+    for (const r of recs) {
+      if (out.length >= 80) break; // cap reached → stop scanning (review LOW)
+      if (!r || !r.guid) continue;
+      const lineGuid = this._propText(r, 'Source Line'); if (!lineGuid) continue;
+      let host = null, rect = null;
+      for (const card of cards) { const lr = this._lineRectWorld(card, lineGuid); if (lr) { host = card; rect = lr; break; } } // which on-canvas card owns this line?
+      if (!host || !rect) continue;
+      out.push({ guid: r.guid, anchor: { kind: 'line', elId: host.id, lineGuid }, hue: '#f59e0b', rect, page: 0, ay: rect.y + rect.h / 2, isRemark: true });
+    }
+    return out;
+  }
   async _connectedMargins(across) {
     const docId = this._activePdfDocId();
     const pages = docId ? this._pdfPagesOf(docId) : [];
@@ -5508,7 +5538,12 @@ class CanvasView {
       const hue = PXC_CODE_COLOR[h.code] || PXC_HLCOLOR_HEX[h.color] || '#7c5cff';
       descriptors.push({ guid: h.guid, anchor: desc, hue, rect, page: h.page || 0, ay: rect ? rect.y + rect.h / 2 : pageBottom + 1 });
     }
-    descriptors.sort((a, b) => (a.page - b.page) || (a.ay - b.ay)); // anchor order (page, vertical) so the fan rarely crosses
+    // #26 V4: also pull org-remark Remarks anchored to body lines of record cards ON this canvas → line-anchored margin cards.
+    const remarkDescs = await this._collectRemarkDescriptors();
+    if (this.destroyed) return;
+    for (const rd of remarkDescs) { descriptors.push(rd); const host = this._byId(rd.anchor.elId); if (host) { pageLeft = Math.min(pageLeft, host.x, host.x + host.width); pageRight = Math.max(pageRight, host.x, host.x + host.width); pageTop = Math.min(pageTop, host.y, host.y + host.height); pageBottom = Math.max(pageBottom, host.y, host.y + host.height); } } // expand the source extent so the column sits right of the note too + the camera fit includes it
+    const nRemarks = remarkDescs.length;
+    descriptors.sort((a, b) => (a.page - b.page) || (a.ay - b.ay)); // anchor order (page, vertical) so the fan rarely crosses (remarks page 0 → grouped above PDF highlights)
     const idealYs = descriptors.map((d) => d.ay - CH / 2);
     const lay = pxcMarginLayout(idealYs, { CH, pageRight: isFinite(pageRight) ? pageRight : 0, pageTop: isFinite(pageTop) ? pageTop : 0 });
     for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length && String(el.groupIds[0]).indexOf('cmrg') === 0) el.isDeleted = true; } // refresh-in-place: retire the prior margin layout (one undo step)
@@ -5552,7 +5587,8 @@ class CanvasView {
     this.dirty = true; this._cacheValid = false; this.scheduleSave();
     const ux = Math.min(pageLeft, lay.frame.x), uy = Math.min(pageTop, lay.frame.y), uby = Math.max(pageBottom, lay.frame.y + lay.frame.h);
     try { this._fitToBounds({ x: ux - 20, y: uy - 20, w: (unionRight - ux) + 40, h: (uby - uy) + 40 }, 40); } catch (_e) {}
-    const msg = across ? ('Connected Margins · across graph: ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + (nDocs ? ' + ' + nDocs + ' connected doc' + (nDocs === 1 ? '' : 's') + ' (' + nRel + ' cross-doc link' + (nRel === 1 ? '' : 's') + ')' : ' — no connected docs found (shared Source Note / Reply To / Section)') + '.') : ('Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.');
+    const rem = nRemarks ? ' + ' + nRemarks + ' note remark' + (nRemarks === 1 ? '' : 's') : '';
+    const msg = across ? ('Connected Margins · across graph: ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + (nDocs ? ' + ' + nDocs + ' connected doc' + (nDocs === 1 ? '' : 's') + ' (' + nRel + ' cross-doc link' + (nRel === 1 ? '' : 's') + ')' : ' — no connected docs found (shared Source Note / Reply To / Section)') + '.') : ('Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + rem + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.');
     try { this.plugin.ui.addToaster({ title: msg, dismissible: true }); } catch (_e) {}
   }
   // CONNECTED MARGINS geometry (shared by the static layer + the hover overlay): resolve a ribbon's LIVE endpoints. Anchor
