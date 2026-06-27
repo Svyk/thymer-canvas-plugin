@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.172.0 — C-1: PDF highlights surfaced in the C26 outline/TOC panel (2026-06-26)
+The PDF-outline panel (`_showPdfOutline`, now **async**) also surfaces the PDF's highlights from the **PDF Highlights**
+collection — **per-section `✦ N` count badges** on outline rows + a clickable **Highlights (N)** list. A click flies to
+the highlight's on-canvas figure (by Scene Element Id) or, failing that, to its page. Highlights are matched
+**cross-surface** by **PDF Fingerprint** (so a future native-panel text highlight surfaces here too), with the Drawing
+relation as a fallback only for null-fingerprint (pre-A0) pdfs. The panel now opens even when a PDF has no bookmarks (as
+long as it has highlights) — title reads "— highlights". New `_loadPdfHighlights` (read-only query; number=`prop.number()`,
+choice=`prop.choiceLabel()`, text=`_propText`) + `_jumpToPdfHighlight`. **Live-verified** via a browser harness (exact
+code + CSS): badges render (`✦ 1` on Methods), `Highlights (3)` list, area-figure click → `_fitToBounds` to the figure,
+text-highlight click → `_jumpToPdfPage`. **Adversarial review:** fixed MED (multi-PDF-per-canvas mis-scoping — the
+Drawing fallback was per-canvas → a 2nd PDF's figures leaked into the 1st's panel + wrong-doc jumps; now fingerprint
+scopes per-PDF, Drawing fallback only when fingerprint is null) + LOW (dedup highlights by Scene Element Id against a
+kill-mid-flush duplicate). LOW contract note: a native-panel text highlight (plugin B) must write `Section` = the exact
+outline `item.title` for its badge to count. Tests: new `pxc_pdftoc` 7 assertions (section counts + page sort); full
+suite **85/85**.
+
+
 ## ✅ v1.171.0 — A2: extracted PDF figures → durable, queryable "PDF Highlights" records (2026-06-26)
 The canvas figure-extraction (A1) now mirrors each `el.pdfFigure`-tagged element to a first-class **PDF Highlights**
 record — so an extracted chart/figure is queryable (Type=area, Page, **Section** from the C26 outline, PDF Fingerprint,

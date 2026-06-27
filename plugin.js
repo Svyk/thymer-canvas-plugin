@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.171.0';
+const PLEXUS_VERSION = '1.172.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5037,30 +5037,74 @@ class CanvasView {
     for (const p of pages) { x0 = Math.min(x0, p.x, p.x + p.width); y0 = Math.min(y0, p.y, p.y + p.height); x1 = Math.max(x1, p.x, p.x + p.width); y1 = Math.max(y1, p.y, p.y + p.height); } // union of page rects (negative-size safe)
     this._fitToBounds({ x: x0, y: y0, w: Math.max(x1 - x0, 1), h: Math.max(y1 - y0, 1) }, 60);
   }
-  // C26: the PDF's bookmark tree (table of contents) — a clickable panel; a click flies the camera to that page. The outline
-  // was extracted from pdf.js (verified getOutline → getPageIndex recipe) at import time and stored on the doc's page-1 element.
-  _showPdfOutline() {
+  // C26 + C-1: the PDF's bookmark tree (TOC) AND its highlights/figures, in one clickable panel. A click flies the camera to
+  // that page (outline) or to that figure/page (highlight). Outline came from pdf.js at import; highlights are queried from the
+  // PDF Highlights collection (cross-surface via PDF Fingerprint, so native-panel text highlights surface here too). Async.
+  async _showPdfOutline() {
     const docId = this._activePdfDocId();
     const pages = docId ? this._pdfPagesOf(docId) : [];
     if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas (drop one, or select a PDF page first).', dismissible: true }); } catch (_e) {} return; }
     const p1 = pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0]; // for the panel title (srcName) only
-    const outline = (this.scene.appState && this.scene.appState.pdfOutlines && this.scene.appState.pdfOutlines[docId]) || null; // MED-2: doc-level store, independent of which pages survive
-    if (!outline || !outline.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: this PDF has no bookmarks / outline to show.', dismissible: true }); } catch (_e) {} return; }
+    const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+    const outline = (this.scene.appState && this.scene.appState.pdfOutlines && this.scene.appState.pdfOutlines[docId]) || []; // MED-2: doc-level store, independent of which pages survive
+    const hls = await this._loadPdfHighlights(fp); // C-1: this PDF's highlights (canvas figures + native-panel text), unified by fingerprint/Drawing
+    if (this.destroyed) return;
+    if (!outline.length && !hls.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: this PDF has no bookmarks or highlights yet.', dismissible: true }); } catch (_e) {} return; }
     this._closePdfOutline();
     const box = document.createElement('div'); box.className = 'pxc-pdf-toc'; this._pdfOutlineEl = box; try { this._themePanel(box); } catch (_e) {}
     box.addEventListener('pointerdown', (e) => e.stopPropagation()); box.addEventListener('wheel', (e) => e.stopPropagation());
     const head = document.createElement('div'); head.className = 'pxc-pdf-toc-head';
-    const ti = document.createElement('div'); ti.className = 'pxc-pdf-toc-title'; ti.textContent = ((p1.pdf && p1.pdf.srcName) || 'PDF') + ' — outline'; head.appendChild(ti);
+    const ti = document.createElement('div'); ti.className = 'pxc-pdf-toc-title'; ti.textContent = ((p1.pdf && p1.pdf.srcName) || 'PDF') + (outline.length ? ' — outline' : ' — highlights'); head.appendChild(ti);
     const x = document.createElement('button'); x.className = 'pxc-pdf-toc-close'; x.textContent = '✕'; x.title = 'Close'; x.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closePdfOutline(); }); head.appendChild(x);
     box.appendChild(head);
     const ul = document.createElement('div'); ul.className = 'pxc-pdf-toc-list';
+    const cnt = new Map(); for (const h of hls) { const k = h.section || ''; cnt.set(k, (cnt.get(k) || 0) + 1); } // C-1: per-section highlight counts
     for (const item of outline) {
       const row = document.createElement('div'); row.className = 'pxc-pdf-toc-row' + (item.page != null ? ' pxc-pdf-toc-nav' : ''); row.style.paddingLeft = (9 + (item.depth || 0) * 14) + 'px';
       const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = item.title; row.appendChild(t);
+      const n = cnt.get(item.title) || 0; if (n) { const b = document.createElement('span'); b.className = 'pxc-pdf-toc-cnt'; b.textContent = '✦ ' + n; b.title = n + ' highlight' + (n === 1 ? '' : 's') + ' in this section'; row.appendChild(b); } // C-1: section highlight count
       if (item.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + item.page; row.appendChild(pg); row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfPage(docId, item.page); }); }
       ul.appendChild(row);
     }
+    if (hls.length) { // C-1: the highlights list — each clickable → jump to its figure (if on-canvas) or its page
+      const sec = document.createElement('div'); sec.className = 'pxc-pdf-toc-sec'; sec.textContent = 'Highlights (' + hls.length + ')'; ul.appendChild(sec);
+      for (const h of hls) {
+        const row = document.createElement('div'); row.className = 'pxc-pdf-toc-row pxc-pdf-toc-nav';
+        const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = (h.type === 'area' ? '▢ ' : '“ ') + (h.title || '(highlight)'); row.appendChild(t);
+        if (h.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + h.page; row.appendChild(pg); }
+        row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfHighlight(h); });
+        ul.appendChild(row);
+      }
+    }
     box.appendChild(ul); this.wrap.appendChild(box);
+  }
+  // C-1: query the PDF Highlights collection for THIS pdf's highlights — matched by PDF Fingerprint (cross-surface: catches
+  // native-panel text highlights too) OR the Drawing relation (canvas figures, incl. pre-A0 pdfs whose fingerprint is null).
+  async _loadPdfHighlights(fp) {
+    const col = await this.plugin._pdfHlCollection(); if (!col) return [];
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) { return []; }
+    const out = [], seen = new Set();
+    for (const r of recs) {
+      if (!r || !r.guid) continue;
+      let match = false;
+      if (fp) { const rf = this._propText(r, 'PDF Fingerprint'); if (rf && rf === fp) match = true; }
+      // Drawing fallback ONLY when this pdf has no fingerprint (pre-A0): otherwise fingerprint scopes per-PDF so a 2nd PDF on the
+      // same canvas (sharing this Drawing record) doesn't leak its highlights into this one's panel / cause a wrong-doc jump (review MED).
+      if (!match && !fp) { let dr = []; try { dr = pxcRelValues(r.prop('Drawing')); } catch (_e) {} if (dr.includes(this.recordGuid)) match = true; }
+      if (!match) continue;
+      const sid = this._propText(r, 'Scene Element Id');
+      if (sid && seen.has(sid)) continue; if (sid) seen.add(sid); // dedup a kill-mid-flush duplicate by Scene Element Id (review LOW)
+      let page = null; try { const np = r.prop('Page'); page = np && np.number ? np.number() : null; } catch (_e) {}
+      let type = ''; try { const tp = r.prop('Type'); type = (tp && tp.choiceLabel && tp.choiceLabel()) || ''; } catch (_e) {}
+      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type });
+    }
+    out.sort((a, b) => (a.page || 0) - (b.page || 0));
+    return out;
+  }
+  // C-1: jump to a highlight — to its on-canvas figure if it's still there (Scene Element Id), else fly to its page.
+  _jumpToPdfHighlight(h) {
+    if (h && h.sid) { const el = (this.scene.elements || []).find((e) => e && e.id === h.sid && !e.isDeleted); if (el) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return; } }
+    const docId = this._activePdfDocId(); if (docId && h && h.page) this._jumpToPdfPage(docId, h.page);
   }
   _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
   _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
@@ -10715,6 +10759,8 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-pdf-toc-row.pxc-pdf-toc-nav:hover { background: var(--sidebar-bg-hover, rgba(124,92,255,.16)); }
 .pxc-host .pxc-root .pxc-pdf-toc-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pxc-host .pxc-root .pxc-pdf-toc-pg { flex: none; color: var(--color-text-600, #9aa3b2); font-variant-numeric: tabular-nums; font-size: 11px; }
+.pxc-host .pxc-root .pxc-pdf-toc-cnt { flex: none; color: var(--button-primary-bg-color, #7c5cff); font-size: 10px; font-weight: 600; }
+.pxc-host .pxc-root .pxc-pdf-toc-sec { padding: 7px 9px 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--color-text-600, #9aa3b2); border-top: 1px solid var(--cards-border-color, #333a4a); margin-top: 4px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
