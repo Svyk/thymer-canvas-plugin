@@ -1,5 +1,19 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.192.0 — AI Extract: snip a PDF region → typed extraction (Heptabase-parser port) (2026-06-27)
+New **✨ Extract** toolbar button + command. Box a region of a PDF page → it's lifted as a figure (canvas image + clipboard +
+queryable mirror), re-rendered hi-DPI, and sent to the vision LLM (`_aiVision`, now with an optional `modelOverride`) with a
+typed-JSON prompt. The model **auto-classifies + extracts**: table→GFM Markdown **+ CSV** (CSV copied to clipboard), equation→
+LaTeX, figure/chart→caption + data series, text→Markdown. Result drops as a wrapped card beside the figure AND the SAME PDF
+Highlights record gets new props **`Extracted Kind`** (choice) + **`Extracted Text`** (added via MCP first — the plugin can't
+create props) — so the extraction is page-anchored, two-way, and queryable in Datacore. Mitigations baked in from the research
+(`~/research/2026-06-27-heptabase-pdf-ai-parser-and-better-port.html`): explicit-structure prompt + `_aiStrongVisionModel()`
+upgrades off the mini default (which collapses table structure 75%→13%) when the user hasn't pinned a model; the source snip
+stays attached for verification. Pure `pxcExtractSysPrompt`/`pxcParseExtractJSON` (fenced/bare/prose JSON → typed obj, plain-text
+fallback, never throws) + `tests/pxc_aiextract.test.js` (9 cases). **Adversarial review (code-reviewer): 2 HIGH (arm-leak across
+7 disarm/setter sites), 2 MED (card wrap via `wrapW`, hallucinated-kind clamp), 2 LOW (Array.isArray series, honest clipboard
+toast) — ALL FIXED → SHIP.** Ship #2 of 5 in the Heptabase-port plan; full suite 8/8 green.
+
 ## ✅ v1.191.0 — F2 Reader = editable transclusion (2026-06-27) · 5-FEATURE PLAN COMPLETE
 Reader-mode highlight cards now start tall (CH 150 vs 70) so each shows its **Highlight Text + first comments** as a live,
 editable **transclusion** the moment you open the Reader — not just the read-only property. (The rest is inherited from F1:

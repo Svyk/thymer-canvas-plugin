@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.191.0';
+const PLEXUS_VERSION = '1.192.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1184,6 +1184,27 @@ function pxcMarginExpand(edges, opts) {
   return { columns, edges: keptEdges };
 }
 // ACROSS GRAPH: ribbon hue by cross-doc relation type (matches the Brain's relation palette intent).
+// AI EXTRACT (Heptabase-parser port): the system prompt for vision extraction. 'region' = classify+extract one snip;
+// 'page' = segment a whole page into ordered blocks. Explicit-structure wording is the documented mitigation for the
+// mini-tier "75% text / 13% structure" table collapse. Pure (no `this`) → node-testable. Output is strict JSON, no fences.
+function pxcExtractSysPrompt(mode) {
+  if (mode === 'page') {
+    return 'You are a precise PDF-page parser. Segment the page image into ordered reading-order blocks. Return STRICT JSON only: {"blocks":[{"kind":"table|equation|figure|text","markdown":"...","latex":"...","caption":"..."}]}. Tables as GitHub-Flavored Markdown in "markdown"; equations as LaTeX (no $ delimiters) in "latex"; figures/charts as a short "caption". Preserve reading order and table structure EXACTLY. NEVER invent values or text. Omit empty fields. Output JSON only — no prose, no code fences.';
+  }
+  return 'You are a precise PDF-region extractor. Classify the image as EXACTLY one of: table, equation, figure, text. Return STRICT JSON only: {"kind":"table|equation|figure|text","markdown":"...","csv":"...","latex":"...","caption":"...","series":[{"label":"...","value":"..."}]}. If a table: fill BOTH "markdown" (GitHub-Flavored) AND "csv". If an equation: fill "latex" (no $ delimiters). If a figure/chart: fill "caption" and, when it is a chart with readable values, "series"; otherwise "series":[]. If plain text: fill "markdown" preserving headings/lists. Preserve structure EXACTLY, NEVER invent values, prefer "text" when unsure. Output JSON only — no prose, no code fences.';
+}
+// AI EXTRACT: robustly parse a vision model's reply into an object. Handles ```json fences, bare {...}, JSON wrapped in
+// prose, and falls back to {kind:'text', markdown:<raw>} on any failure. NEVER throws. Pure → node-testable (verbatim replica).
+function pxcParseExtractJSON(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return { kind: 'text', markdown: '' };
+  let body = s;
+  const fence = body.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fence) body = fence[1].trim();
+  if (body.charAt(0) !== '{') { const i = body.indexOf('{'), j = body.lastIndexOf('}'); if (i >= 0 && j > i) body = body.slice(i, j + 1); }
+  try { const o = JSON.parse(body); if (o && typeof o === 'object') return o; } catch (_e) {}
+  return { kind: 'text', markdown: s };
+}
 // F3 HEPTABASE SCROLL VIEW: gapless single-column page layout (pure). Optionally normalize each page to `uniformW` (keep
 // aspect) for a clean reading lane. Returns the new {x,y,w,h} per page (contiguous, centered on cx). Node-tested.
 function pxcScrollLayout(pages, opts) {
@@ -2380,7 +2401,7 @@ class CanvasView {
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
   // region-draw never self-cancels.
-  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -3937,12 +3958,14 @@ class CanvasView {
         const ipTarget = this._cropInPlaceTarget; this._cropInPlaceTarget = null; // B1: consume the one-shot in-place target — ALWAYS cleared so it can't leak into the next region-reference crop
         const figArm = this._pdfFigureArm; this._pdfFigureArm = false; // A1: consume the one-shot PDF-figure-extract arm
         const hlArm = this._pdfHlArm; this._pdfHlArm = null; // A3: consume the one-shot PDF-region-highlight arm
+        const aiArm = this._aiExtractArm; this._aiExtractArm = false; // AI EXTRACT: consume the one-shot AI-extract arm
         if (rect && rect.w > 3 && rect.h > 3) {
-          if (figArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._extractPdfFigure(pg, rect); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A1: lift the PDF region into a figure
+          if (aiArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._aiExtractRegion(pg, rect); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // AI EXTRACT: vision-LLM on the boxed region
+          else if (figArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._extractPdfFigure(pg, rect); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A1: lift the PDF region into a figure
           else if (hlArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._highlightPdfRegion(pg, rect, hlArm.color); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A3: highlight the PDF region
           else if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
           else { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
-        } else if (ipTarget || figArm || hlArm) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
+        } else if (ipTarget || figArm || hlArm || aiArm) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
       }
       else if (mode === 'cmtregion') { // D-D: finalize a comment gesture — a real drag over an image → a REGION comment; a click → a point/element comment
         const rect = this._cropRect; this._cropRect = null; const dn = this._cmtRegionDown; this._cmtRegionDown = null;
@@ -4067,8 +4090,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -4097,7 +4120,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._aiExtractArm) { this._aiExtractArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -5256,6 +5279,9 @@ class CanvasView {
       try { rec.prop('PDF Name').set(fig.srcName || ''); } catch (_e) {}
       try { rec.prop('Anchor Data').set(JSON.stringify({ frac: fig.frac || null, docId: fig.docId || null })); } catch (_e) {}
       try { rec.prop('Status').setChoice('open'); } catch (_e) {}
+      // AI EXTRACT: when this figure carries a vision-LLM extraction, write the typed result onto the SAME record (queryable in
+      // Datacore + page-anchored). Gated on fig.ai (set in _aiExtractRegion, persisted on pdfFigure) — plain figures skip this.
+      if (fig.ai && fig.ai.kind) { try { rec.prop('Extracted Kind').setChoice(fig.ai.kind); } catch (_e) {} try { rec.prop('Extracted Text').set(fig.ai.text || ''); } catch (_e) {} }
     })();
     this._pdfHlInflight.set(sid, run);
     try { await run; } finally { this._pdfHlInflight.delete(sid); }
@@ -5891,6 +5917,7 @@ class CanvasView {
     const sep2 = document.createElement('span'); sep2.className = 'pxc-pdfnav-sep'; box.appendChild(sep2);
     mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
     mk('✂ Figure', 'Extract a region (chart/figure) of this page as an image', () => this._startPdfFigureExtract()); // #32: surface the existing extract-region command on the page toolbar
+    mk('✨ Extract', 'AI-extract a snipped region → table (Markdown+CSV) / equation (LaTeX) / figure / text', () => this._startAiExtract()); // Heptabase-parser port: vision-LLM on the region → typed, page-anchored, queryable
     mk('🖼 Evidence', 'Gallery of every figure + highlight — click to cycle group by page → code → colour', () => { const order = ['page', 'code', 'color']; const cur = order[(order.indexOf(this._lightboxBy || '') + 1) % 3] || 'page'; this._lightboxBy = cur; this._pdfLightbox(page.pdf.docId, { by: cur }); }); // F4: evidence/figure lightbox; repeated clicks regroup in place
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
@@ -8271,10 +8298,10 @@ class CanvasView {
   }
   // Phase 6: vision — send the rendered scene to a multimodal model and return its text analysis. Per-provider
   // message shapes (OpenAI/xAI image_url, Anthropic image/base64, Gemini inlineData). dataUrl = a PNG data URL.
-  async _aiVision(system, user, dataUrl) {
+  async _aiVision(system, user, dataUrl, modelOverride) {
     const provider = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
     const key = await this._aiKey(provider); if (!key) return null;
-    const model = (this.plugin._settings && this.plugin._settings.aiModel) || '';
+    const model = modelOverride || (this.plugin._settings && this.plugin._settings.aiModel) || '';
     const b64 = String(dataUrl).replace(/^data:image\/\w+;base64,/, '');
     try {
       if (provider === 'openai' || provider === 'xai') {
@@ -8678,7 +8705,7 @@ class CanvasView {
     const img = this._singleSel();
     if (!img || img.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image to crop.', dismissible: true }); } catch (_e) {} return; }
     if (img.angle) { try { this.plugin.ui.addToaster({ title: 'Plexus: rotate the image back to 0° before cropping in place.', dismissible: true }); } catch (_e) {} return; } // B1: the crop math is axis-aligned (ignores el.angle) — block in-place crop on a rotated image rather than crop the wrong region
-    this._cropInPlaceTarget = img; this._pdfFigureArm = null; this.tool = 'crop'; this._syncToolbar(); // clear the sibling crop-arm so the two one-shot crop modes can't both be live (review MED-1)
+    this._cropInPlaceTarget = img; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; this.tool = 'crop'; this._syncToolbar(); // clear the sibling crop-arms so the one-shot crop modes can't both be live (review MED-1 + AI-extract arm)
     try { this.plugin.ui.addToaster({ title: 'Crop: drag a box over the image to crop it in place (Esc cancels).', dismissible: true }); } catch (_e) {}
   }
   // A1: extract a region of a PDF page as a standalone figure (the "grab this chart" gesture). Arms a one-shot crop-box;
@@ -8686,7 +8713,7 @@ class CanvasView {
   _startPdfFigureExtract() {
     const docId = this._activePdfDocId();
     if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then extract a region.', dismissible: true }); } catch (_e) {} return; }
-    this._pdfFigureArm = true; this._cropInPlaceTarget = null; this._pdfHlArm = null; this.tool = 'crop'; this._syncToolbar(); // clear BOTH sibling crop-arms so only one one-shot crop mode is ever live (review HIGH: figure must clear the highlight arm too)
+    this._pdfFigureArm = true; this._cropInPlaceTarget = null; this._pdfHlArm = null; this._aiExtractArm = false; this.tool = 'crop'; this._syncToolbar(); // clear ALL sibling crop-arms so only one one-shot crop mode is ever live (review HIGH: figure must clear the highlight + AI-extract arms too)
     try { this.plugin.ui.addToaster({ title: 'Extract: drag a box over the PDF region (chart/figure) to lift it out (Esc cancels).', dismissible: true }); } catch (_e) {}
   }
   // A1: lift the boxed region of a PDF page into a new cropped image element (live crop, shares the page's fileId), and tag it
@@ -8703,6 +8730,62 @@ class CanvasView {
     // region at high DPI (crisp at any zoom) and swap it in, THEN copy the (hi-res) figure to the system clipboard. Each is
     // best-effort — a pre-retain PDF keeps the low-res crop; a blocked clipboard just changes the toaster. Figure persists regardless.
     this._upgradeFigureHiDpi(el, pageEl, frac).then((hi) => { this._snipToClipboard(el).then((ok) => { try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + (hi ? ' (high-res)' : '') + ' as a figure' + (ok ? ' — copied to the clipboard.' : '.'), dismissible: true }); } catch (_e) {} }); });
+    return el;
+  }
+  // AI EXTRACT (Heptabase-parser port): recommend a STRONGER vision model than the mini default when the user hasn't pinned one
+  // — the benchmarks show mini tiers collapse table structure (75% text / 13% structure). Returns null when the user set an
+  // explicit aiModel (respect their choice → _aiVision uses it) or the provider is unknown.
+  _aiStrongVisionModel() {
+    const s = this.plugin._settings || {};
+    if (s.aiModel) return null; // user pinned a model → don't override
+    const provider = s.aiProvider || 'openai';
+    return provider === 'openai' ? 'gpt-4o' : provider === 'xai' ? 'grok-2-vision-latest' : provider === 'anthropic' ? 'claude-3-5-sonnet-latest' : provider === 'gemini' ? 'gemini-2.5-flash' : null;
+  }
+  // AI EXTRACT: arm a one-shot region snip whose result is run through a vision LLM (table→Markdown+CSV, equation→LaTeX,
+  // figure→caption+series, text→Markdown). Mirrors _startPdfFigureExtract — clears the sibling crop-arms so only one is live.
+  _startAiExtract() {
+    const docId = this._activePdfDocId();
+    if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then AI-extract a region.', dismissible: true }); } catch (_e) {} return; }
+    this._aiExtractArm = true; this._pdfFigureArm = false; this._pdfHlArm = null; this._cropInPlaceTarget = null; this.tool = 'crop'; this._syncToolbar();
+    try { this.plugin.ui.addToaster({ title: '✨ AI Extract: drag a box over a region (table / figure / equation / text) to extract it (Esc cancels).', dismissible: true }); } catch (_e) {}
+  }
+  // AI EXTRACT: snip the region as a figure (canvas image + clipboard + its own queryable mirror = the verification snip), render
+  // it hi-DPI, send to the vision LLM with a typed-JSON prompt, then (a) drop a result card beside the figure, (b) tag the figure
+  // so _mirrorPdfHl writes Extracted Kind / Extracted Text onto the SAME record (two-way, page-anchored), (c) copy table CSV.
+  async _aiExtractRegion(pageEl, rect) {
+    if (!pageEl || !pageEl.pdf) return;
+    const figEl = this._extractPdfFigure(pageEl, rect); // lift the region (also: hi-DPI upgrade + clipboard + figure record)
+    let frac = null; try { frac = this._imgRegionFrac(pageEl, rect); } catch (_e) {}
+    if (!frac) return;
+    try { this.plugin.ui.addToaster({ title: '✨ Extracting region with AI…', dismissible: true }); } catch (_e) {}
+    let blob = null; try { blob = await this._pdfRenderRegionHiDpi(pageEl.pdf.docId, pageEl.pdf.page, frac); } catch (_e) {}
+    if (!blob && figEl) { try { blob = await this._snapshotElement(figEl); } catch (_e) {} } // fallback: the figure's pixels (pre-retain PDFs)
+    if (!blob) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not render the region for AI extract.', dismissible: true }); } catch (_e) {} return; }
+    const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result || '')); fr.onerror = () => r(''); fr.readAsDataURL(blob); });
+    if (!dataUrl || this.destroyed) return;
+    let raw = null; try { raw = await this._aiVision(pxcExtractSysPrompt('region'), 'Extract this PDF region. Return only the JSON.', dataUrl, this._aiStrongVisionModel()); } catch (_e) {}
+    if (this.destroyed) return;
+    if (!raw) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI returned nothing (check the AI provider + key in Settings).', dismissible: true }); } catch (_e) {} return; }
+    const p = pxcParseExtractJSON(raw);
+    const kind = (p && ['table', 'equation', 'figure', 'text'].indexOf(p.kind) >= 0) ? p.kind : 'text'; // clamp: a hallucinated kind ("chart"/"diagram"/"page") would no-op setChoice → Extracted Kind left unset while Extracted Text written
+    const text = kind === 'table' ? (p.markdown || p.csv || '') : kind === 'equation' ? (p.latex || p.markdown || '') : kind === 'figure' ? ((p.caption || '') + (Array.isArray(p.series) && p.series.length ? '\n\n' + p.series.map((s) => '- ' + (s.label != null ? s.label : '') + ': ' + (s.value != null ? s.value : '')).join('\n') : '')) : (p.markdown || p.text || '');
+    if (figEl && figEl.pdfFigure) { figEl.pdfFigure.ai = { kind, text }; this.dirty = true; this.scheduleSave(); try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(figEl.id); } catch (_e) {} } // persist on pdfFigure (survives reload) → mirror writes Extracted Kind/Text
+    this._dropExtractCard(figEl, kind, text);
+    let copied = false;
+    if (kind === 'table' && (p.csv || p.markdown)) { try { await navigator.clipboard.writeText(p.csv || p.markdown); copied = true; } catch (_e) {} } // tables → CSV (fallback markdown) to the clipboard
+    const m = this._aiStrongVisionModel() || (this.plugin._settings && this.plugin._settings.aiModel) || 'default';
+    try { this.plugin.ui.addToaster({ title: '✨ Extracted ' + kind + (copied ? ' — copied to the clipboard' : '') + ' · ' + m, dismissible: true }); } catch (_e) {}
+  }
+  // AI EXTRACT: drop the extracted content as a text card beside the source figure (or canvas center if the figure is gone).
+  _dropExtractCard(anchorEl, kind, text) {
+    const icon = kind === 'table' ? '▦' : kind === 'equation' ? '∑' : kind === 'figure' ? '🖼' : '¶';
+    let x, y;
+    if (anchorEl && !anchorEl.isDeleted) { const b = this._elBBox(anchorEl); x = (b ? b.x + (b.w || 0) : anchorEl.x) + 24; y = b ? b.y : anchorEl.y; }
+    else { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); x = c.x; y = c.y; }
+    const el = makeText(this._snap(x), this._snap(y), { fontSize: 13, stroke: '#7c5cff' });
+    el.text = icon + ' ' + String(kind).toUpperCase() + '\n\n' + String(text || '').slice(0, 1400);
+    el.wrapW = 420; measureText(el); // wrapW (not width) is the wrap field — measureText overwrites width with the longest-line px otherwise
+    this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
     return el;
   }
   // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
@@ -8813,7 +8896,7 @@ class CanvasView {
   _startPdfRegionHighlight() {
     const docId = this._activePdfDocId();
     if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then highlight a region.', dismissible: true }); } catch (_e) {} return; }
-    const arm = (key) => { this._closeRegionChoice(); this._pdfHlColor = key; this._pdfHlArm = { color: key }; this._cropInPlaceTarget = null; this._pdfFigureArm = false; this.tool = 'crop'; this._syncToolbar(); try { this.plugin.ui.addToaster({ title: 'Highlight (' + key + '): drag a box over the region (Esc cancels).', dismissible: true }); } catch (_e) {} };
+    const arm = (key) => { this._closeRegionChoice(); this._pdfHlColor = key; this._pdfHlArm = { color: key }; this._cropInPlaceTarget = null; this._pdfFigureArm = false; this._aiExtractArm = false; this.tool = 'crop'; this._syncToolbar(); try { this.plugin.ui.addToaster({ title: 'Highlight (' + key + '): drag a box over the region (Esc cancels).', dismissible: true }); } catch (_e) {} };
     const rows = ['yellow', 'green', 'blue', 'pink', 'orange'].map((key) => ({ txt: '● ' + key, on: (this._pdfHlColor || 'yellow') === key, fn: () => arm(key) }));
     this._showNestingChoice('Highlight colour', rows, this.cssW / 2, 70);
   }
@@ -9894,6 +9977,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
     this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)
