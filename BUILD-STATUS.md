@@ -1,5 +1,16 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.191.0 — F2 Reader = editable transclusion (2026-06-27) · 5-FEATURE PLAN COMPLETE
+Reader-mode highlight cards now start tall (CH 150 vs 70) so each shows its **Highlight Text + first comments** as a live,
+editable **transclusion** the moment you open the Reader — not just the read-only property. (The rest is inherited from F1:
+Reader cards are highlight cards, so they auto-grow to fit, load 40 body lines, and **double-click the body adds a comment**;
+the page-anchor fly-to is on the left stripe / Alt-click.) One-line CH change on the reviewed F1 base; full suite green.
+
+**THE APPROVED 5-FEATURE PLAN IS COMPLETE** (`~/.claude/plans/staged-finding-ritchie.md`): F3 Scroll view (v1.187) · F5
+Flameshot pins (v1.188) · F4 Evidence lightbox (v1.189) · F1 body comments (v1.190) · F2 Reader transclusion (v1.191). Each
+shipped with a pure-logic test + an adversarial code-reviewer (all SHIP). Canvas now at **v1.191.0**.
+
+
 ## ✅ v1.190.0 — F1 body comments on highlight cards (2026-06-27)
 Comments you add to a PDF Highlights record's BODY now SHOW on its canvas/margin card, and you can add a comment from the canvas.
 A new `this._hlCardGuids` Set marks highlight cards (populated in explode/assemble, margins primary [only `!isRemark`], cross-doc,

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.190.0';
+const PLEXUS_VERSION = '1.191.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5655,7 +5655,7 @@ class CanvasView {
     const extentPages = readerPage ? pages.filter((p) => p.pdf && p.pdf.page === readerPage) : pages; // #30 Reader: extent + camera = just the focused page
     let pageLeft = Infinity, pageRight = -Infinity, pageTop = Infinity, pageBottom = -Infinity;
     for (const p of (extentPages.length ? extentPages : pages)) { pageLeft = Math.min(pageLeft, p.x, p.x + p.width); pageRight = Math.max(pageRight, p.x, p.x + p.width); pageTop = Math.min(pageTop, p.y, p.y + p.height); pageBottom = Math.max(pageBottom, p.y, p.y + p.height); }
-    const CH = 70;
+    const CH = readerPage ? 150 : 70; // F2: Reader cards start tall enough to show the Highlight Text + first comments as an editable transclusion (F1 auto-grow extends them; dbl-click the body to add a comment)
     const textCount = new Map(); for (const h of use) { const isArea = h.type === 'area' && h.anchor && h.anchor.frac; if (!isArea && h.page && pageByNum.has(h.page)) textCount.set(h.page, (textCount.get(h.page) || 0) + 1); } // review LOW: count ONLY on-canvas pages so the band denominator matches textIdx (off-canvas highlights mustn't compress the bands)
     const textIdx = new Map(), descriptors = [];
     for (const h of use) {
