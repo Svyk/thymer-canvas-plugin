@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.177.0';
+const PLEXUS_VERSION = '1.178.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1115,6 +1115,62 @@ function pxcSynthesisLayout(syn, opts) {
   const synthesis = { x: 0, y: Math.max(0, (totalH - synH) / 2), w: synW, h: synH };
   return { synthesis, themes, cards, width: x1 + cardW, height: totalH };
 }
+// CONNECTED MARGINS (Azlen "parallel pages, visibly connected") — PURE geometry. ─────────────────────────────────────
+// pxcMarginBandFrac: the vertical band for the k-th of n text highlights on a page (no per-glyph frac) — disjoint, ordered, in [0,1].
+function pxcMarginBandFrac(k, n) { const N = Math.max(1, n || 1); return (Math.min(k, N - 1) + 0.5) / N * 0.86 + 0.07; }
+// pxcMarginStack: anchor-aligned 1-D collision sweep. idealYs = desired card-top Y per card (index = anchor order). Returns a
+// resolved Y per card (same index order): sort by ideal, walk top→down, push any overlapping card to prevBottom+GAP, clamp >= minY.
+// Preserves anchor order, guarantees no [y,y+CH] overlap, minimizes downward displacement (greedy single pass).
+function pxcMarginStack(idealYs, CH, GAP, minY) {
+  const order = idealYs.map((y, i) => ({ i, y: Math.max(minY, y) })).sort((a, b) => (a.y - b.y) || (a.i - b.i));
+  let prevBottom = -Infinity;
+  for (const o of order) { if (o.y < prevBottom + GAP) o.y = prevBottom + GAP; prevBottom = o.y + CH; }
+  const out = new Array(idealYs.length);
+  for (const o of order) out[o.i] = o.y;
+  return out;
+}
+// pxcMarginLayout: the primary margin column. idealYs (anchor-order card-top Ys) → card rects at colX0=pageRight+GUTTER +
+// the column frame. opts: {CW,CH,GAP,GUTTER,PAD,pageRight,pageTop}. (Cross-doc columns are layered on in a later ship.)
+function pxcMarginLayout(idealYs, opts) {
+  const o = opts || {};
+  const CW = o.CW || 230, CH = o.CH || 70, GAP = o.GAP || 14, GUTTER = o.GUTTER || 90, PAD = o.PAD || 16, HEAD = 24;
+  const colX0 = (o.pageRight || 0) + GUTTER, minY = (o.pageTop != null ? o.pageTop : 0);
+  const ys = pxcMarginStack(idealYs, CH, GAP, minY);
+  const cards = ys.map((y) => ({ x: colX0, y, w: CW, h: CH }));
+  let top = Infinity, bot = -Infinity; for (const c of cards) { top = Math.min(top, c.y); bot = Math.max(bot, c.y + c.h); }
+  if (!cards.length) { top = minY; bot = minY + CH; }
+  const frame = { x: colX0 - PAD, y: top - PAD - HEAD, w: CW + PAD * 2, h: (bot - top) + PAD * 2 + HEAD };
+  return { colX0, CW, CH, cards, frame, top, bottom: bot };
+}
+// pxcRibbonQuads: the tapered translucent BAND — top+bottom edge sample arrays of the quadratic centerline from A (card edge,
+// width wCard) to B (anchor edge, width wAnchor). Control point = the SAME perpendicular formula the ghost edges use, so a
+// ribbon reads like a wide ghost. Drives the fill path, the hover hit-test, and the SVG export. PURE.
+function pxcRibbonQuads(ax, ay, bx, by, wCard, wAnchor, bend, K) {
+  K = K || 14;
+  const mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+  const cxp = mx + (-dy / len) * bend, cyp = my + (dx / len) * bend;
+  const top = [], bot = [];
+  for (let i = 0; i <= K; i++) {
+    const t = i / K, u = 1 - t;
+    const px = u * u * ax + 2 * u * t * cxp + t * t * bx, py = u * u * ay + 2 * u * t * cyp + t * t * by;
+    let tx = 2 * u * (cxp - ax) + 2 * t * (bx - cxp), ty = 2 * u * (cyp - ay) + 2 * t * (by - cyp);
+    const tl = Math.hypot(tx, ty) || 1, nx = -ty / tl, ny = tx / tl;
+    const w = (wCard + (wAnchor - wCard) * t) / 2;
+    top.push([px + nx * w, py + ny * w]); bot.push([px - nx * w, py - ny * w]);
+  }
+  return { top, bot, cxp, cyp };
+}
+// pxcPointInRibbon: even-odd point-in-polygon over the ribbon outline (top forward + bottom back). For hover hit-test. PURE.
+function pxcPointInRibbon(quad, px, py) {
+  if (!quad || !quad.top || !quad.bot) return false;
+  const poly = quad.top.concat(quad.bot.slice().reverse());
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / ((yj - yi) || 1e-9) + xi)) inside = !inside;
+  }
+  return inside;
+}
 // AI AUTO-CLUSTER: connected-components clustering — elements with cosine similarity > threshold join the same group
 // (single-linkage via union-find). Pure + node-tested; the on-device embedding lives in _aiAutoCluster.
 function pxcClusterByThreshold(vecs, threshold) {
@@ -1980,6 +2036,7 @@ class Canvas2DRenderer {
     else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
+  margins() { this.view._drawMargins(this.ctx); }
   end() {}
 }
 // #RRGGBB → [r,g,b] in 0..1 (for GL clear/uniform colours). Falls back to white on a bad value.
@@ -2040,6 +2097,7 @@ class WebGLRenderer {
     if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'table') v._drawTableNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
+  margins() { this.view._drawMargins(this.ctx); }
   end() {
     const gl = this.gl; if (!gl || !this._images.length) return;
     try {
@@ -5356,6 +5414,93 @@ class CanvasView {
     try { await B.focus(guid); } catch (_e) {}
     try { this.plugin.ui.addToaster({ title: 'Opened the citation graph for ' + label + ' in Plexus Brain.', dismissible: true }); } catch (_e) {}
   }
+  // CONNECTED MARGINS (#26 — Azlen "parallel pages, visibly connected"): the PDF stays in place on the left; every highlight
+  // becomes an ANCHOR-ALIGNED record-card in a parallel margin column on the right; a translucent TAPERED RIBBON connects each
+  // card to its TRUE on-page anchor (area → its frac box; text → a page band). The ribbons are a NON-ELEMENT render layer
+  // (mirrors the ghost-edge layer) so they NEVER touch the save schema/undo/hit-test and re-route LIVE when a card moves; the
+  // cards + frame ARE real undoable elements. Re-run refreshes in place (prior margin elements are marked deleted = one undo).
+  _readHlAnchor(r) { const raw = this._propText(r, 'Anchor Data'); if (!raw) return null; let o = null; try { o = JSON.parse(raw); } catch (_e) { return null; } return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null; }
+  // Resolve a ribbon's anchor descriptor to a LIVE world rect each draw (area/band → _imgRegionWorld on the page image). null
+  // when the page element is gone (orphan) → the ribbon is skipped, the card stays. Recomputed per frame so it tracks pan/zoom.
+  _marginAnchorRect(anchor) { if (!anchor || anchor.kind === 'none') return null; if (anchor.kind === 'area' || anchor.kind === 'band') { const el = this._byId(anchor.elId); if (!el || el.isDeleted) return null; return this._imgRegionWorld(el, anchor.frac); } return null; }
+  async _connectedMargins() {
+    const docId = this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas.', dismissible: true }); } catch (_e) {} return; }
+    const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+    const srcName = ((pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0]).pdf || {}).srcName || 'PDF';
+    const col = await this.plugin._pdfHlCollection();
+    if (this.destroyed) return;
+    let recs = []; if (col) { try { recs = await col.getAllRecords() || []; } catch (_e) {} }
+    if (this.destroyed) return;
+    const hls = [], seen = new Set();
+    for (const r of recs) {
+      if (!r || !r.guid) continue;
+      let match = false;
+      if (fp) { if (this._propText(r, 'PDF Fingerprint') === fp) match = true; }
+      if (!match && !fp) { let dr = []; try { dr = pxcRelValues(r.prop('Drawing')); } catch (_e) {} if (dr.includes(this.recordGuid)) match = true; }
+      if (!match) continue;
+      const h = this._readHlRecord(r); if (!h) continue;
+      if (h.sid && seen.has(h.sid)) continue; if (h.sid) seen.add(h.sid);
+      h.anchor = this._readHlAnchor(r);
+      hls.push(h);
+    }
+    if (!hls.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no highlights for this PDF yet — highlight or extract a figure first.', dismissible: true }); } catch (_e) {} return; }
+    const CAP = 150, capped = hls.length > CAP, use = capped ? hls.slice(0, CAP) : hls;
+    const pageByNum = new Map(); for (const p of pages) if (p.pdf) pageByNum.set(p.pdf.page, p);
+    let pageLeft = Infinity, pageRight = -Infinity, pageTop = Infinity, pageBottom = -Infinity;
+    for (const p of pages) { pageLeft = Math.min(pageLeft, p.x, p.x + p.width); pageRight = Math.max(pageRight, p.x, p.x + p.width); pageTop = Math.min(pageTop, p.y, p.y + p.height); pageBottom = Math.max(pageBottom, p.y, p.y + p.height); }
+    const CH = 70;
+    const textCount = new Map(); for (const h of use) { const isArea = h.type === 'area' && h.anchor && h.anchor.frac; if (!isArea && h.page && pageByNum.has(h.page)) textCount.set(h.page, (textCount.get(h.page) || 0) + 1); } // review LOW: count ONLY on-canvas pages so the band denominator matches textIdx (off-canvas highlights mustn't compress the bands)
+    const textIdx = new Map(), descriptors = [];
+    for (const h of use) {
+      let desc = null, rect = null; const pageEl = h.page ? pageByNum.get(h.page) : null;
+      if (h.type === 'area' && h.anchor && h.anchor.frac && pageEl) { desc = { kind: 'area', elId: pageEl.id, frac: h.anchor.frac }; rect = this._imgRegionWorld(pageEl, h.anchor.frac); }
+      else if (pageEl) { const k = (textIdx.get(h.page) || 0); textIdx.set(h.page, k + 1); const frac = { rx: 0.06, ry: pxcMarginBandFrac(k, textCount.get(h.page) || 1), rw: 0.88, rh: 0.05 }; desc = { kind: 'band', elId: pageEl.id, frac }; rect = this._imgRegionWorld(pageEl, frac); }
+      else desc = { kind: 'none' }; // page not on canvas → orphan (no ribbon)
+      const hue = PXC_CODE_COLOR[h.code] || PXC_HLCOLOR_HEX[h.color] || '#7c5cff';
+      descriptors.push({ guid: h.guid, anchor: desc, hue, rect, page: h.page || 0, ay: rect ? rect.y + rect.h / 2 : pageBottom + 1 });
+    }
+    descriptors.sort((a, b) => (a.page - b.page) || (a.ay - b.ay)); // anchor order (page, vertical) so the fan rarely crosses
+    const idealYs = descriptors.map((d) => d.ay - CH / 2);
+    const lay = pxcMarginLayout(idealYs, { CH, pageRight: isFinite(pageRight) ? pageRight : 0, pageTop: isFinite(pageTop) ? pageTop : 0 });
+    for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length && String(el.groupIds[0]).indexOf('cmrg') === 0) el.isDeleted = true; } // refresh-in-place: retire the prior margin layout (one undo step)
+    const gid = 'cmrg' + Math.floor(this._now()).toString(36);
+    const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); return el; };
+    const fr = makeFrame(lay.frame.x, lay.frame.y, lay.frame.w, lay.frame.h); fr.name = '📄 ' + srcName + ' — margins' + (capped ? ' (first ' + CAP + ' of ' + hls.length + ')' : ''); add(fr);
+    const ribbons = [];
+    descriptors.forEach((d, i) => { const cd = lay.cards[i]; const rc = makeRecordCard(cd.x, cd.y, cd.w, cd.h, d.guid); if (d.hue) rc.strokeColor = d.hue; add(rc); if (d.anchor && d.anchor.kind !== 'none') ribbons.push({ cardId: rc.id, anchor: d.anchor, hue: d.hue }); });
+    this._margins = { ribbons, srcName, gid }; this._marginSig = gid; // _marginSig: reserved gate for the V3 hover-overlay (_drawMarginFocus)
+    this.dirty = true; this._cacheValid = false; this.scheduleSave();
+    const ux = Math.min(pageLeft, lay.frame.x), uy = Math.min(pageTop, lay.frame.y), urx = lay.frame.x + lay.frame.w, uby = Math.max(pageBottom, lay.frame.y + lay.frame.h);
+    try { this._fitToBounds({ x: ux - 20, y: uy - 20, w: (urx - ux) + 40, h: (uby - uy) + 40 }, 40); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Connected ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' to the page — ' + ribbons.length + ' ribbon' + (ribbons.length === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+  }
+  // CONNECTED MARGINS render layer (static, rides the cached raster like the ghost edges; re-routes when a card moves). Each
+  // ribbon = a TRUE TAPERED FILLED QUAD (pxcRibbonQuads) from the card's left edge to its anchor's right edge, hue-gradient +
+  // paid-once glow + a thin bright outline of the anchor box. Gated by this._margins → zero cost when no margins view is active.
+  _drawMargins(ctx) {
+    const M = this._margins; if (!M || !M.ribbons || !M.ribbons.length) return;
+    const z = this.camera.zoom, dark = this._themeDark();
+    const glow = !(this.plugin._settings && this.plugin._settings.edgeGlow === false) && !this._drawGesture && !this._panMode;
+    ctx.save();
+    for (const rb of M.ribbons) {
+      const card = this._byId(rb.cardId); if (!card || card.isDeleted) continue;
+      const anchor = this._marginAnchorRect(rb.anchor); if (!anchor) continue;
+      const ax = Math.min(card.x, card.x + card.width), ay = card.y + Math.abs(card.height) / 2;
+      const bx = anchor.x + anchor.w, by = anchor.y + anchor.h / 2;
+      const wCard = Math.min(Math.abs(card.height) || 70, 46), wAnchor = Math.max(7, Math.min(anchor.h, 40));
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1, bend = Math.min(70, len * 0.08);
+      const q = pxcRibbonQuads(ax, ay, bx, by, wCard, wAnchor, bend, 14);
+      const hue = rb.hue || '#7c5cff';
+      let fill = hue; try { const g = ctx.createLinearGradient(ax, ay, bx, by); g.addColorStop(0, hue); g.addColorStop(1, adaptInk(hue, dark)); fill = g; } catch (_e) {}
+      const path = () => { ctx.beginPath(); ctx.moveTo(q.top[0][0], q.top[0][1]); for (let i = 1; i < q.top.length; i++) ctx.lineTo(q.top[i][0], q.top[i][1]); for (let i = q.bot.length - 1; i >= 0; i--) ctx.lineTo(q.bot[i][0], q.bot[i][1]); ctx.closePath(); };
+      if (glow) { ctx.globalAlpha = 0.10; ctx.fillStyle = fill; ctx.shadowColor = hue; ctx.shadowBlur = 8; path(); ctx.fill(); ctx.shadowBlur = 0; }
+      ctx.globalAlpha = 0.17; ctx.fillStyle = fill; path(); ctx.fill();
+      try { const quad = this._imgRegionQuad(this._byId(rb.anchor.elId), rb.anchor.frac); if (quad) { ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hue; ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y); ctx.closePath(); ctx.stroke(); } } catch (_e) {}
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+  }
   _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
   _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
   _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
@@ -8513,7 +8658,7 @@ class CanvasView {
       for (const el of cand) { if (el.isDeleted || el.type !== 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; this.renderer.frame(el); } // frames behind everything
       for (const el of cand) { if (el.isDeleted || el.mmHidden || el.id === this.editingId || el.type === 'frame') continue; if (ex && ex.has(el.id)) continue; if (!inView(el)) continue; drawn++; this.renderer.element(el); }
       this._drawnCount = drawn;
-      if (!dragMovers) this.renderer.ghosts(); // while dragging, ghosts draw on iCv so they track live
+      if (!dragMovers) { this.renderer.ghosts(); this.renderer.margins(); } // while dragging, ghosts + margin ribbons draw on iCv so they track live
       this.renderer.end();
       if (dragMovers) this._dragLayerValid = true;
     }
@@ -8524,7 +8669,7 @@ class CanvasView {
       this.renderer.begin(ictx, this.camera, d);
       for (const el of dragMovers) { if (!el.isDeleted && el.type === 'frame') this.renderer.frame(el); }
       for (const el of dragMovers) { if (!el.isDeleted && el.type !== 'frame' && el.id !== this.editingId && !el.mmHidden) this.renderer.element(el); }
-      this.renderer.ghosts(); this.renderer.end();
+      this.renderer.ghosts(); this.renderer.margins(); this.renderer.end();
       ictx.setTransform(1, 0, 0, 1, 0, 0); // reset for the handle/overlay blocks below
     }
     if (this._pendingRegionLink) { // F2: a connection was dropped on this image/shape → outline it cyan, "mark a region here"
@@ -9146,6 +9291,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Open citation graph in Plexus Brain', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._openInBrain(); } }); // #24: focus the selected highlight / this PDF's source note in the Brain graph. ti-graph = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Connected Margins (parallel pages, visibly connected)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._connectedMargins(); } }); // #26: every highlight as an anchor-aligned margin card + a tapered ribbon to its true on-page position (Azlen). ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });

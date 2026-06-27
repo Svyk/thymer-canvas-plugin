@@ -1,5 +1,33 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.178.0 — #26 Connected Margins V1+V2 (Azlen "parallel pages, visibly connected") (2026-06-26)
+The headline new feature, designed by a 4-agent judged Workflow (winner: a NON-element ghost-mirror ribbon layer + A's
+tapered-filled-quad geometry + single-doc-first ship order; saved `~/plexus/CONNECTED-MARGINS-DESIGN.json`).
+
+**SHIPPED — Connected Margins (single-doc):** new command **"Plexus: Connected Margins (parallel pages, visibly
+connected)"** (`ti-list-tree`) — `_connectedMargins()` keeps the PDF in place on the left and lays every highlight out as
+an **anchor-aligned record-card** in a parallel right margin column (`pxcMarginLayout` + `pxcMarginStack` — a 1-D collision
+sweep that aligns each card to its anchor's Y and pushes only on overlap). Each card is joined to its **TRUE on-page
+anchor** by a **translucent TAPERED RIBBON**: area highlights anchor to their exact `frac` box (`_imgRegionWorld`), text
+highlights to a deterministic page band (`pxcMarginBandFrac`). The ribbons are a **NON-ELEMENT render layer** (`_drawMargins`,
+mirroring the existing ghost-edge layer) — a `margins()` sibling on **BOTH** the Canvas2D and WebGL renderers, drawn after
+`ghosts()` in both the static-raster and dragging-iCv paths — so ribbons **re-route LIVE** when a card moves and never touch
+the save schema / undo / hit-test; the **cards + frame ARE** real undoable elements. Each ribbon is a true tapered filled
+quad (`pxcRibbonQuads`, same quadratic control point as the ghosts) with a hue-gradient (Code/Color), paid-once glow, and a
+bright outline of the anchor box. Re-run **refreshes in place** (prior `cmrg` elements → `isDeleted`, one undo). CAP 150.
+New pure fns: `pxcMarginBandFrac`, `pxcMarginStack`, `pxcMarginLayout`, `pxcRibbonQuads`, `pxcPointInRibbon` (the last for
+the V3 hover hit-test). **Adversarial review (code-reviewer): verdict SHIP** — dual-renderer hook verified on web+desktop
+(GL image behind the 2D staticCv → ribbons paint over the PDF), data-safe (only its own `cmrg` group retired, no record
+writes), `destroyed`-guards correct, zero-cost when inactive, `ti-list-tree` bundled, all geometry div-by-zero-guarded.
+Folded the two LOWs (count text-band denominator only over on-canvas pages; annotate the reserved `_marginSig`). Tests:
+new `pxc_margins` **18 assertions**; full suite green.
+
+**NEXT increments (documented):** V3 hover-lit ribbon + click-jump-to-anchor (`_drawMarginFocus` overlay, `_ribbonHoverId`,
+`pxcPointInRibbon` hit-test); V4 text/comment/org-remark/orphan anchor tiers (`_lineRectWorld` Source Line + dashed orphan
+stub); **V5 across-graph cross-doc columns** — `_buildRelationIndex` (Source Note / Reply To / Section + `getBackReferences`)
+→ `pxcMarginExpand` BFS (depth/CAP) + `pxcConnectedComponents` (drop islands) + `pxcColumnarLayout` → one relation-hued
+parallel column per connected document, adjacent-columns-only ribbons (the "across graph" view the user emphasized).
+
 ## ✅ v1.177.0 — #23 AI synthesis per-PDF + #24 Brain citation-graph seam (2026-06-26)
 Building the documented AI/graph differentiators for real.
 
