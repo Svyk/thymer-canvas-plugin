@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.174.0 — #16(canvas): orphaned-highlight badge in the C26 TOC (2026-06-26)
+Gap-analysis P1 #16 (re-anchor hardening + orphan handling), canvas half. `_loadPdfHighlights` now reads the record
+**Status**; the TOC Highlights list renders an amber **⚠** badge + dims the title when a highlight is `orphaned` (the
+native-panel re-anchor couldn't re-find its text in the PDF). The matcher hardening + orphan *detection* live in the
+Plexus PDF Highlighter plugin (tiered matcher exact→context→fuzzy, transition-gated Status writes). Read-only on the
+canvas side. Full suite **85/85**.
+
+
 ## ✅ v1.173.0 — P0(canvas): notes on highlights surface in the C26 TOC (2026-06-26)
 Gap-analysis P0 (notes ON a highlight), canvas half. `_loadPdfHighlights` now reads the new **Note** property (the
 user's thinking on a highlight — collection prop added via MCP alongside **Reply To** for threading); the TOC Highlights

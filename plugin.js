@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.173.0';
+const PLEXUS_VERSION = '1.174.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5070,7 +5070,8 @@ class CanvasView {
       const sec = document.createElement('div'); sec.className = 'pxc-pdf-toc-sec'; sec.textContent = 'Highlights (' + hls.length + ')'; ul.appendChild(sec);
       for (const h of hls) {
         const row = document.createElement('div'); row.className = 'pxc-pdf-toc-row pxc-pdf-toc-nav';
-        const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = (h.type === 'area' ? '▢ ' : '“ ') + (h.title || '(highlight)'); row.appendChild(t);
+        const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = (h.type === 'area' ? '▢ ' : '“ ') + (h.title || '(highlight)'); if (h.orphaned) t.style.opacity = '0.55'; row.appendChild(t);
+        if (h.orphaned) { const o = document.createElement('span'); o.className = 'pxc-pdf-toc-cnt'; o.textContent = '⚠'; o.title = 'detached — the text could not be re-found in the PDF (re-highlight to re-anchor)'; o.style.color = '#f59e0b'; row.appendChild(o); } // #16: orphan badge
         if (h.note) { const n = document.createElement('span'); n.className = 'pxc-pdf-toc-cnt'; n.textContent = '💬'; n.title = 'has a note'; row.appendChild(n); } // P0: note indicator
         if (h.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + h.page; row.appendChild(pg); }
         row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfHighlight(h); });
@@ -5098,7 +5099,8 @@ class CanvasView {
       if (sid && seen.has(sid)) continue; if (sid) seen.add(sid); // dedup a kill-mid-flush duplicate by Scene Element Id (review LOW)
       let page = null; try { const np = r.prop('Page'); page = np && np.number ? np.number() : null; } catch (_e) {}
       let type = ''; try { const tp = r.prop('Type'); type = (tp && tp.choiceLabel && tp.choiceLabel()) || ''; } catch (_e) {}
-      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type, note: this._propText(r, 'Note') }); // C-1+: Note = the user's thinking on this highlight
+      let status = ''; try { const sp = r.prop('Status'); status = (sp && sp.choiceLabel && sp.choiceLabel()) || ''; } catch (_e) {}
+      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type, note: this._propText(r, 'Note'), orphaned: (status === 'orphaned') }); // C-1+: Note (the user's thinking) + #16 orphaned (re-find failed in the reader)
     }
     out.sort((a, b) => (a.page || 0) - (b.page || 0));
     return out;
