@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.174.0';
+const PLEXUS_VERSION = '1.175.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -212,6 +212,31 @@ function pxcGraphLayout(nodes, edges, opts) {
   const [cx1, cy1] = cen(), ddx = cx0 - cx1, ddy = cy0 - cy1; for (const n of nodes) { n.x += ddx; n.y += ddy; } // recenter on the original centroid
   return nodes;
 }
+// PLEXUS #20: columnar mind-map layout for a PDF's highlights — a central PDF node on the left, one COLUMN per outline
+// Section (left→right in outline order), highlight cards stacked in each column, an edge PDF→section. Pure (positions only).
+function pxcHighlightLayout(groups, opts) {
+  const o = opts || {};
+  const cardW = o.cardW || 230, cardH = o.cardH || 70, gap = o.gap || 12, colGap = o.colGap || 44, pad = o.pad || 12;
+  const pdfW = o.pdfW || 200, pdfH = o.pdfH || 80;
+  const colH = (n) => Math.max(cardH, n * (cardH + gap) - gap) + pad * 2; // a column's frame height for n cards
+  let maxN = 1; for (const g of (groups || [])) maxN = Math.max(maxN, ((g && g.items) || []).length);
+  const tallest = colH(maxN);
+  const pdf = { x: 0, y: Math.max(0, (tallest - pdfH) / 2 - pad), w: pdfW, h: pdfH };
+  const pdfCenter = { x: pdf.x + pdfW, y: pdf.y + pdfH / 2 };
+  const sections = [], edges = [];
+  let colX = pdfW + colGap * 2;
+  for (const g of (groups || [])) {
+    const items = (g && g.items) || [];
+    const cards = items.map((h, j) => ({ guid: h.guid, code: h.code || '', color: h.color || '', type: h.type || '', title: h.title || '', x: colX, y: j * (cardH + gap), w: cardW, h: cardH }));
+    const frame = { x: colX - pad, y: -pad, w: cardW + pad * 2, h: colH(items.length) };
+    sections.push({ title: (g && g.section) || '(no section)', frame, cards });
+    edges.push({ from: { x: pdfCenter.x, y: pdfCenter.y }, to: { x: frame.x, y: frame.y + frame.h / 2 } });
+    colX += cardW + pad * 2 + colGap;
+  }
+  return { pdf, sections, edges, width: colX, height: tallest };
+}
+const PXC_CODE_COLOR = { claim: '#3b82f6', evidence: '#22c55e', objection: '#ef4444', method: '#f97316', question: '#a855f7', definition: '#eab308' };
+const PXC_HLCOLOR_HEX = { yellow: '#eab308', green: '#22c55e', blue: '#3b82f6', pink: '#ec4899', orange: '#f97316' };
 // UX-6 dark mode: when PXC_DARK, lighten an INK colour (stroke/text/icon) that's too dark to read on a dark canvas.
 // Only touches near-dark inks (L<0.4) — vivid colours and white pass through unchanged, so it adapts, not inverts.
 // (Excalidraw/zsviczian-style luminance-aware ink; refine the curve once the NotebookLM research lands.)
@@ -5100,7 +5125,8 @@ class CanvasView {
       let page = null; try { const np = r.prop('Page'); page = np && np.number ? np.number() : null; } catch (_e) {}
       let type = ''; try { const tp = r.prop('Type'); type = (tp && tp.choiceLabel && tp.choiceLabel()) || ''; } catch (_e) {}
       let status = ''; try { const sp = r.prop('Status'); status = (sp && sp.choiceLabel && sp.choiceLabel()) || ''; } catch (_e) {}
-      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type, note: this._propText(r, 'Note'), orphaned: (status === 'orphaned') }); // C-1+: Note (the user's thinking) + #16 orphaned (re-find failed in the reader)
+      let code = '', color = ''; try { const cp = r.prop('Code'); code = (cp && cp.choiceLabel && cp.choiceLabel()) || ''; } catch (_e) {} try { const clp = r.prop('Color'); color = (clp && clp.choiceLabel && clp.choiceLabel()) || ''; } catch (_e) {} // #20: for card coloring
+      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type, note: this._propText(r, 'Note'), orphaned: (status === 'orphaned'), code, color }); // C-1+: Note + #16 orphaned + #20 code/color
     }
     out.sort((a, b) => (a.page || 0) - (b.page || 0));
     return out;
@@ -5109,6 +5135,45 @@ class CanvasView {
   _jumpToPdfHighlight(h) {
     if (h && h.sid) { const el = (this.scene.elements || []).find((e) => e && e.id === h.sid && !e.isDeleted); if (el) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return; } }
     const docId = this._activePdfDocId(); if (docId && h && h.page) this._jumpToPdfPage(docId, h.page);
+  }
+  // PLEXUS #20: "Explode PDF highlights onto the canvas" — query this PDF's highlights (cross-surface, by fingerprint), group
+  // by C26 outline Section, and lay them out as a section-columned mind-map: a central PDF node, a titled frame per section,
+  // a LIVE record-card per highlight (colored by Code, else its highlight Color), edges PDF→section. Additive + undoable + grouped.
+  async _explodeHighlights() {
+    const docId = this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas.', dismissible: true }); } catch (_e) {} return; }
+    const p1 = pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0];
+    const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+    const srcName = (p1.pdf && p1.pdf.srcName) || 'PDF';
+    const hls = await this._loadPdfHighlights(fp);
+    if (this.destroyed) return;
+    if (!hls.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no highlights yet for this PDF — extract a figure or highlight text first.', dismissible: true }); } catch (_e) {} return; }
+    const CAP = 150, capped = hls.length > CAP, use = capped ? hls.slice(0, CAP) : hls; // #20: cap the live-card count (each card is a live record embed) — review LOW
+    const outline = (this.scene.appState && this.scene.appState.pdfOutlines && this.scene.appState.pdfOutlines[docId]) || [];
+    const bySection = new Map();
+    for (const h of use) { const k = h.section || '(no section)'; if (!bySection.has(k)) bySection.set(k, []); bySection.get(k).push(h); }
+    const keys = [], seen = new Set();
+    for (const o of outline) { const t = o && o.title; if (t && bySection.has(t) && !seen.has(t)) { keys.push(t); seen.add(t); } } // outline order first
+    for (const k of bySection.keys()) { if (!seen.has(k) && k !== '(no section)') { keys.push(k); seen.add(k); } } // then any extras
+    if (bySection.has('(no section)')) keys.push('(no section)'); // unsectioned last
+    const groups = keys.map((k) => ({ section: k, items: bySection.get(k) }));
+    const lay = pxcHighlightLayout(groups, {});
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    let ox = c.x - lay.width / 2, oy = c.y - lay.height / 2;
+    let maxRight = -Infinity; for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length && String(el.groupIds[0]).indexOf('hlexp') === 0) maxRight = Math.max(maxRight, el.x + Math.abs(el.width || 0)); } // #20: a prior explosion exists → place this one BESIDE it, not stacked (review LOW)
+    if (isFinite(maxRight)) ox = maxRight + 80;
+    const gid = 'hlexp' + Math.floor(this._now()).toString(36);
+    const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); };
+    const pdfNode = makeText(ox + lay.pdf.x, oy + lay.pdf.y, { fontSize: 22, stroke: '#7c5cff' }); pdfNode.text = '📄 ' + srcName + '\n' + use.length + ' highlights'; try { measureText(pdfNode); } catch (_e) {} add(pdfNode);
+    for (const s of lay.sections) {
+      const fr = makeFrame(ox + s.frame.x, oy + s.frame.y, s.frame.w, s.frame.h); fr.name = s.title; add(fr);
+      const e = makeLinear(0, 0, 'arrow', { stroke: '#9aa3b2', strokeWidth: 1.5 }); e.points = [[ox + lay.pdf.x + lay.pdf.w, oy + lay.pdf.y + lay.pdf.h / 2], [ox + s.frame.x, oy + s.frame.y + s.frame.h / 2]]; e.endArrowhead = 'arrow'; e.roughness = 0.5; linearBBox(e); add(e);
+      for (const card of s.cards) { const rc = makeRecordCard(ox + card.x, oy + card.y, card.w, card.h, card.guid); const hex = PXC_CODE_COLOR[card.code] || PXC_HLCOLOR_HEX[card.color] || null; if (hex) rc.strokeColor = hex; add(rc); }
+    }
+    this.dirty = true; this.scheduleSave();
+    try { this._fitToBounds({ x: ox, y: oy - 20, w: Math.max(lay.width, 1), h: Math.max(lay.height + 40, 1) }, 60); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Exploded ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' into ' + groups.length + ' section' + (groups.length === 1 ? '' : 's') + (capped ? ' (first ' + CAP + ' of ' + hls.length + ')' : '') + ' on the canvas.', dismissible: true }); } catch (_e) {}
   }
   _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
   _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
@@ -8896,6 +8961,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
     this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });

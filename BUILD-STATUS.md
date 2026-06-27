@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.175.0 — #20: explode a PDF's highlights onto the canvas as a section mind-map (2026-06-26)
+Gap-analysis differentiator #4 — the deepest canvas/relational tie-in. New command **"Plexus: Explode PDF highlights
+onto the canvas"** (`ti-graph`): queries this PDF's highlights from the PDF Highlights collection (cross-surface, by
+**fingerprint**), groups them by **C26 outline Section** (in outline order; unsectioned last), and lays out a
+section-columned **mind-map** via the pure `pxcHighlightLayout` — a central 📄 PDF node, a titled `frame` per section,
+a **live `record`-card per highlight** (embeds the queryable record; colored by **Code** coding-scheme, else its
+highlight Color), and an edge PDF→section. **Additive + undoable + grouped** (all elements share one `hlexp…` groupId →
+move/delete as a unit; no relocation/deletion of existing elements → no confirm-gate). Reuses `makeText`/`makeFrame`/
+`makeLinear`/`makeRecordCard`/`_loadPdfHighlights`/`_fitToBounds`. **Adversarial review:** no critical/high; fixed two
+LOWs (cap at 150 live cards + "(first 150 of N)" notice; a re-run lands BESIDE an existing explosion, not stacked).
+`_loadPdfHighlights` now also reads Code/Color. Tests: new `pxc_hlexplode` 13 assertions; full suite **86/86**.
+
+
 ## ✅ v1.174.0 — #16(canvas): orphaned-highlight badge in the C26 TOC (2026-06-26)
 Gap-analysis P1 #16 (re-anchor hardening + orphan handling), canvas half. `_loadPdfHighlights` now reads the record
 **Status**; the TOC Highlights list renders an amber **⚠** badge + dims the title when a highlight is `orphaned` (the
