@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.185.0';
+const PLEXUS_VERSION = '1.186.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5170,8 +5170,12 @@ class CanvasView {
       if (created) {
         try { const cp = rec.prop('Created At'); if (cp) cp.set(DateTime.parseDateTimeString(pxcTodayISO()).value()); } catch (_e) {} // create-only
         try { rec.prop('Highlight Id').set(sid); } catch (_e) {}
-        // upload the extracted figure image ONCE (create-only) → the Highlight Image property
-        try { const blob = await this._snapshotElement(el); if (blob) { const up = await this.plugin.data.uploadBlob(new File([blob], 'pdf-figure-' + sid + '.png', { type: 'image/png' })); const ip = rec.prop('Highlight Image'); if (up && ip && ip.setFileFromBlob) ip.setFileFromBlob(up); } } catch (_e) {}
+      }
+      // Upload the figure image on CREATE or after a hi-DPI upgrade swapped the figure's pixels (el._pdfHlImageDirty) — so the
+      // durable record's Highlight Image is crisp too, not just the canvas figure (review LOW: the upgrade can finish after the
+      // create-flush). setFileFromBlob replaces the prop, so a re-upload swaps low→hi-res with no duplicate.
+      if (created || el._pdfHlImageDirty) {
+        try { const blob = await this._snapshotElement(el); if (blob) { const up = await this.plugin.data.uploadBlob(new File([blob], 'pdf-figure-' + sid + '.png', { type: 'image/png' })); const ip = rec.prop('Highlight Image'); if (up && ip && ip.setFileFromBlob) ip.setFileFromBlob(up); el._pdfHlImageDirty = false; } } catch (_e) {}
       }
       // idempotent property sync (cheap; runs every flush)
       try { rec.prop('Type').setChoice('area'); } catch (_e) {}
@@ -7494,7 +7498,16 @@ class CanvasView {
       }
     };
     try { await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, () => worker())); } catch (_e) {}
-    try { doc.destroy && doc.destroy(); } catch (_e) {} // all pages rendered → free the parsed PDF
+    // HIGH-DPI SNIP: retain the ORIGINAL PDF as a record asset (the backing is ensured by the page fill) so a later snip can
+    // re-open it + render any region at high DPI. Stored once per import, keyed by docId in appState (rides the __meta save).
+    try {
+      if (this._pendingBacking && !this._isBacking) { try { await this._ensureBackingAndMigrate(); } catch (_e) {} }
+      if (this.rec && !this.destroyed) {
+        const ref = await this._assetPut(file, srcName);
+        if (ref && ref.anchored && ref.blobGuid && !this.destroyed) { if (!this.scene.appState) this.scene.appState = {}; if (!this.scene.appState.pdfBlobs) this.scene.appState.pdfBlobs = {}; this.scene.appState.pdfBlobs[docId] = { blobGuid: ref.blobGuid, name: ref.name || srcName, mimeType: 'application/pdf' }; this.scheduleSave(); }
+      }
+    } catch (_e) {}
+    try { doc.destroy && doc.destroy(); } catch (_e) {} // all pages rendered → free the parsed PDF (the retained blob re-opens on snip)
     this.scheduleSave();
   }
   _importPdfPicker() {
@@ -8542,15 +8555,62 @@ class CanvasView {
     el.pdfFigure = { docId: pageEl.pdf.docId || null, page: pageEl.pdf.page || null, fingerprint: pageEl.pdf.fingerprint || null, srcName: pageEl.pdf.srcName || null, frac: frac || null }; // A1 tag → A2 mirror
     this.dirty = true; this.scheduleSave();
     try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(el.id); } catch (_e) {} // A2 (wired later): enqueue the durable PDF Highlights mirror
-    // SNIP PARITY (canvas image-snip): copy the lifted figure to the system clipboard so it can be pasted anywhere; it also
-    // stays a normal canvas image element (select it → Cite to drop a reference into a note). Best-effort (clipboard may be blocked).
-    this._snipToClipboard(el).then((ok) => { try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + ' as a figure' + (ok ? ' — copied to the clipboard.' : '.'), dismissible: true }); } catch (_e) {} });
+    // HIGH-DPI + SNIP PARITY: the instant figure is a crop of the page raster; if the original PDF was retained, RE-RENDER the
+    // region at high DPI (crisp at any zoom) and swap it in, THEN copy the (hi-res) figure to the system clipboard. Each is
+    // best-effort — a pre-retain PDF keeps the low-res crop; a blocked clipboard just changes the toaster. Figure persists regardless.
+    this._upgradeFigureHiDpi(el, pageEl, frac).then((hi) => { this._snipToClipboard(el).then((ok) => { try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + (hi ? ' (high-res)' : '') + ' as a figure' + (ok ? ' — copied to the clipboard.' : '.'), dismissible: true }); } catch (_e) {} }); });
     return el;
   }
   // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
   async _snipToClipboard(el) {
     try { const blob = await this._snapshotElement(el); if (blob && navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); return true; } } catch (_e) {}
     return false;
+  }
+  // HIGH-DPI SNIP: re-open the RETAINED original PDF (appState.pdfBlobs[docId]) and render JUST this region at ~300+ DPI → a
+  // crisp PNG blob. Returns null when no PDF was retained (pre-feature import) or render fails → caller keeps the low-res crop.
+  async _pdfRenderRegionHiDpi(docId, pageNum, frac) {
+    if (!docId || !pageNum || !frac) return null;
+    const meta = this.scene.appState && this.scene.appState.pdfBlobs && this.scene.appState.pdfBlobs[docId];
+    if (!meta || !meta.blobGuid) return null;
+    let url = null; try { url = await this.plugin._assetGet({ blobGuid: meta.blobGuid }); } catch (_e) {}
+    if (!url || this.destroyed) { if (url) try { URL.revokeObjectURL(url); } catch (_e) {} return null; }
+    let pdfjs = null; try { pdfjs = await loadLib(LIB.pdfjs); } catch (_e) {}
+    let doc = null, blob = null;
+    try {
+      if (!pdfjs) throw new Error('no pdfjs');
+      const hasWorker = await this._pdfSetupWorker(pdfjs);
+      const buf = await (await fetch(url)).arrayBuffer();
+      doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise;
+      const page = await doc.getPage(pageNum);
+      const unit = page.getViewport({ scale: 1 });
+      const TARGET = 2600, MAXDIM = 5000; // ~300+ DPI for a letter page; cap the region's longest side for memory
+      let scale = Math.min(8, Math.max(2, TARGET / (unit.width || TARGET)));
+      let vp = page.getViewport({ scale });
+      const longest = Math.max(frac.rw * vp.width, frac.rh * vp.height);
+      if (longest > MAXDIM) { scale *= MAXDIM / longest; vp = page.getViewport({ scale }); }
+      const rx = frac.rx * vp.width, ry = frac.ry * vp.height;
+      const rw = Math.round(frac.rw * vp.width), rh = Math.round(frac.rh * vp.height);
+      if (rw >= 1 && rh >= 1) {
+        const cv = document.createElement('canvas'); cv.width = rw; cv.height = rh;
+        await page.render({ canvasContext: cv.getContext('2d'), viewport: vp, transform: [1, 0, 0, 1, -rx, -ry] }).promise;
+        blob = await new Promise((res) => { try { cv.toBlob((b) => res(b), 'image/png'); } catch (_e) { res(null); } });
+      }
+    } catch (_e) {} finally { try { doc && doc.destroy && doc.destroy(); } catch (_e) {} try { URL.revokeObjectURL(url); } catch (_e) {} }
+    return blob;
+  }
+  // HIGH-DPI SNIP: swap a freshly-extracted figure's low-res page-raster crop for a crisp re-rendered region image (standalone
+  // fileId, crop cleared) — same world position/size, just higher source resolution. No-op (false) when no retained PDF / render fails.
+  async _upgradeFigureHiDpi(el, pageEl, frac) {
+    if (!el || el.isDeleted || !pageEl || !pageEl.pdf || !frac) return false;
+    let blob = null; try { blob = await this._pdfRenderRegionHiDpi(pageEl.pdf.docId, pageEl.pdf.page, frac); } catch (_e) {}
+    if (!blob || this.destroyed || el.isDeleted) return false;
+    const newFid = newFileId();
+    let ok = false; try { ok = await this._attachBlobToFileId(newFid, blob, 'pdf-figure-hires.webp'); } catch (_e) {}
+    if (!ok || this.destroyed || el.isDeleted) return false;
+    el.fileId = newFid; el.crop = null; el.cropOf = null; // now a standalone hi-res image (not a crop of the page raster)
+    el._pdfHlImageDirty = true; try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(el.id); } catch (_e) {} // re-sync the durable record's Highlight Image to the hi-res render (review LOW)
+    this.dirty = true; this._cacheValid = false; this.scheduleSave();
+    return true;
   }
   // REGION HIGHLIGHT (A3): pick a colour, then box a region of a PDF page → a translucent COLOURED overlay glued to the page
   // region (resolved live from frac each frame, so it tracks pan/zoom/rotate — a NON-element layer, no hit-test/lasso/export

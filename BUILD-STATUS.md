@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.186.0 — true high-DPI snip (retain PDF + re-render region) (2026-06-27)
+The user chose "retain PDF + re-render on snip" for crisp snips at any zoom. **At import** (`_addPdf`), the original PDF
+blob is now retained as a record asset (`_assetPut` → anchored on the backing Drawing's Assets shard; mapping in
+`appState.pdfBlobs[docId]={blobGuid,…}`, which rides the `__meta` save chunk) — one extra blob per imported PDF. **On
+snip** (`_extractPdfFigure`), the instant figure is still the low-res page-raster crop (no latency), then
+`_upgradeFigureHiDpi` runs async: `_pdfRenderRegionHiDpi` re-opens the retained PDF (`_assetGet`→`fetch`→`pdfjs.getDocument`),
+renders JUST that region at ~300+ DPI (TARGET 2600px page width, region longest side capped at MAXDIM 5000), and swaps the
+figure's `fileId` for the crisp standalone image (`crop`/`cropOf` cleared, same world rect) — so the figure, the clipboard
+copy, AND the mirrored PDF Highlights record image are all high-res. Fully best-effort + guarded (`destroyed`, `el.isDeleted`
+before+after awaits, `doc.destroy()`+`URL.revokeObjectURL` in `finally`); a **pre-feature PDF** (no retained blob) keeps the
+low-res crop with zero error. No asset-GC purges the anchored PDF; the new hi-res fileId is element-referenced (kept); the
+old shared page-raster fileId is untouched (no orphan). **Adversarial review: verdict SHIP** (storage/asset-lifecycle/
+re-render-robustness/swap/timing all verified clean — PDF blob GC-safe, every cleanup in `finally`, all guards present).
+Folded the one LOW: the record's `Highlight Image` re-uploads after the upgrade (`el._pdfHlImageDirty` → mirror re-sync) so
+the durable record is crisp too, not just the canvas figure. **Caveat:** only PDFs imported at v1.186.0+ retain the blob —
+existing PDFs keep the raster-crop snip until re-imported; extract-to-new-drawing figures fall back to low-res (graceful).
+
 ## ✅ v1.185.0 — #34 rotation-aware region highlight + #35 snip→clipboard parity (2026-06-27)
 - **#34 — rotation-aware:** `_drawPdfRegionHighlights` + `_regionHlAt` now resolve the region via `_imgRegionQuad` (4
   corners rotated by the page's `angle`) and draw a polygon / hit-test via `pointInPoly`, instead of the axis-aligned
