@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.187.0';
+const PLEXUS_VERSION = '1.188.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1197,6 +1197,23 @@ function pxcScrollLayout(pages, opts) {
     top += h + GAP;
   }
   return { pages: out, top: top0, bottom: top - (out.length ? GAP : 0), cx };
+}
+// F5 FLAMESHOT PIN: clamp a pin's screen position so it stays grabbable inside the viewport (the window may have shrunk
+// since the pin was saved). PURE.
+function pxcClampPin(sx, sy, w, h, vw, vh) {
+  const maxX = Math.max(0, (vw || 0) - Math.min(w, vw || w)), maxY = Math.max(0, (vh || 0) - Math.min(h, vh || h));
+  const x = Math.max(0, Math.min(maxX, sx)), y = Math.max(0, Math.min(maxY, sy));
+  return { sx: isFinite(x) ? x : 0, sy: isFinite(y) ? y : 0 };
+}
+// F5: the topmost pin under a CSS-px point + whether the ✕ close sub-rect was hit. `hits` = [{id,x,y,w,h,close:{x,y,w,h}}]
+// in draw order (last = topmost). PURE.
+function pxcPinHitTest(hits, px, py) {
+  for (let i = (hits || []).length - 1; i >= 0; i--) {
+    const r = hits[i]; if (!r) continue;
+    if (r.close && px >= r.close.x && px <= r.close.x + r.close.w && py >= r.close.y && py <= r.close.y + r.close.h) return { id: r.id, onClose: true };
+    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return { id: r.id, onClose: false };
+  }
+  return null;
 }
 const PXC_REL_HUE = { note: '#a855f7', reply: '#3b82f6', section: '#14b8a6' };
 const PXC_SECTION_GENERIC = new Set(['introduction', 'intro', 'conclusion', 'discussion', 'abstract', 'references', 'methods', 'method', 'results', 'background', 'summary', 'overview', 'appendix']);
@@ -3613,6 +3630,13 @@ class CanvasView {
       host.focus();
       if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; } // self-heal: a prior drag that was cancelled (no pointerup) left the static-layer blit locked on
       if (this._cmtPinDown) this._cmtPinDown = null; // C3 self-heal: a prior comment-pin press that never released (cancelled) must not wedge this gesture
+      if (this._pinDown) this._pinDown = null; // F5 self-heal: same for a cancelled floating-pin drag
+      // F5: floating pins sit ON TOP of everything (incl. comment pins) → hit-test them first. ✕ removes; body starts a drag.
+      if (this._pinHit && this._pinHit.length && (e.button === 0 || e.button === -1) && !this._present) {
+        const rct = this.wrap.getBoundingClientRect(), px = e.clientX - rct.left, py = e.clientY - rct.top;
+        const h = this._pinAt(px, py);
+        if (h) { try { e.preventDefault(); } catch (_e) {} if (h.onClose) { this._removePin(h.pin.id); return; } this._pinDown = { id: h.pin.id, sx: e.clientX, sy: e.clientY, x0: h.pin.sx, y0: h.pin.sy, moved: false }; try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+      }
       if (this._panMode) { this._panMode = false; if (this._panEndT) { clearTimeout(this._panEndT); this._panEndT = null; } } // a new gesture (drag/click) ends any wheel-pan still in compositor mode → the next render re-rasters crisp (HIGH: review)
       if (this._camAnim) this._abortCamAnim(); // user took over — never fight a manual move
       if (this._eyedrop) { this._sampleAt(e); return; } // CP-4: eyedropper consumes the next click
@@ -3746,6 +3770,12 @@ class CanvasView {
     };
     const onMove = (e) => {
       if (this._miniDragging) { const rct = this.wrap.getBoundingClientRect(); this._miniTeleport(e.clientX - rct.left, e.clientY - rct.top); return; } // MINIMAP drag
+      if (this._pinDown) { // F5: floating-pin drag → move its screen position (CSS px); 4px threshold = a drag, not a click
+        const dx = e.clientX - this._pinDown.sx, dy = e.clientY - this._pinDown.sy;
+        if (!this._pinDown.moved && Math.hypot(dx, dy) > 4) this._pinDown.moved = true;
+        if (this._pinDown.moved) { const pins = this.scene.appState && this.scene.appState.pins, p = pins && pins.find((x) => x.id === this._pinDown.id); if (p) { p.sx = this._pinDown.x0 + dx; p.sy = this._pinDown.y0 + dy; this.dirty = true; } }
+        return;
+      }
       if (this._cmtPinDown) { // C3: comment pin drag → offset pinDx/pinDy (world delta); past a 4px threshold it's a drag, not a click
         const dx = e.clientX - this._cmtPinDown.sx, dy = e.clientY - this._cmtPinDown.sy;
         if (!this._cmtPinDown.moved && Math.hypot(dx, dy) > 4) { this._cmtPinDown.moved = true; try { this._hideCommentPreview(); } catch (_e) {} }
@@ -3812,6 +3842,7 @@ class CanvasView {
     const onUp = (e) => {
       this._drawGesture = false; // P3.0: gesture ended → edge glow back on next raster
       if (this._miniDragging) { this._miniDragging = false; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} return; } // MINIMAP
+      if (this._pinDown) { const pd = this._pinDown; this._pinDown = null; try { host.releasePointerCapture(e.pointerId); } catch (_e) {} if (pd.moved) { this.dirty = true; this.scheduleSave(); } return; } // F5: end a floating-pin drag (persist if it moved; a no-move click is inert)
       if (this._cmtPinDown) { // C3: end a comment-pin gesture — a drag committed the nudge (scene-only); a click opens the thread
         const pd = this._cmtPinDown; this._cmtPinDown = null; try { host.releasePointerCapture(e.pointerId); } catch (_e) {}
         if (pd.moved) { this.dirty = true; this.scheduleSave(); this._cmtRailSig = null; try { this._scheduleCommentMirror(pd.id); } catch (_e) {} } // persist the scene + refresh the mirror's Anchor Data pinDx/pinDy (debounced); skip reindex (the backref label is unchanged by a nudge)
@@ -4040,7 +4071,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -8595,6 +8626,56 @@ class CanvasView {
     try { const blob = await this._snapshotElement(el); if (blob && navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); return true; } } catch (_e) {}
     return false;
   }
+  // F5 FLAMESHOT PIN ("screen as collage surface"): pin an image/figure as a FLOATING, always-on-top reference fixed in screen
+  // space — it stays visible through any pan/zoom/view-change so you can compare snips while reading elsewhere. Persisted in
+  // appState.pins (the snip's pixels → a fileId; screen pos/size). Drag to move, ✕ to remove. Mirrors the comment-pin overlay.
+  async _pinSnip(el) {
+    if (!el || el.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select an image / snip to pin.', dismissible: true }); } catch (_e) {} return; }
+    let blob = null; try { blob = await this._snapshotElement(el); } catch (_e) {}
+    if (!blob || this.destroyed) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not snapshot the image to pin.', dismissible: true }); } catch (_e) {} return; }
+    const fid = newFileId();
+    let ok = false; try { ok = await this._attachBlobToFileId(fid, blob, 'pin.webp'); } catch (_e) {}
+    if (!ok || this.destroyed) return;
+    const f = this.scene.files && this.scene.files[fid];
+    const nw = (f && f.w) || 240, nh = (f && f.h) || 180, CAP = 240, s = Math.min(1, CAP / Math.max(nw, nh, 1));
+    const w = Math.max(40, Math.round(nw * s)), h = Math.max(30, Math.round(nh * s));
+    if (!this.scene.appState) this.scene.appState = {}; if (!this.scene.appState.pins) this.scene.appState.pins = [];
+    const vw = this.wrap.clientWidth || 800, n = this.scene.appState.pins.length;
+    this.scene.appState.pins.push({ id: 'pin' + Math.floor(this._now()).toString(36) + n.toString(36), fileId: fid, sx: Math.max(8, vw - w - 16), sy: 16 + n * 10, w, h, name: (el.pdfFigure && el.pdfFigure.srcName) || 'pin' });
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: 'Pinned — a floating reference (drag to move, ✕ to remove). Stays visible as you pan/zoom.', dismissible: true }); } catch (_e) {}
+  }
+  _removePin(id) {
+    const pins = this.scene.appState && this.scene.appState.pins; if (!pins) return;
+    const i = pins.findIndex((p) => p.id === id); if (i >= 0) { pins.splice(i, 1); this.dirty = true; this.scheduleSave(); }
+  }
+  _pinAt(px, py) {
+    const h = pxcPinHitTest(this._pinHit, px, py); if (!h) return null;
+    const pin = ((this.scene.appState && this.scene.appState.pins) || []).find((p) => p.id === h.id);
+    return pin ? { pin, onClose: h.onClose } : null;
+  }
+  // F5: draw the floating pins in pure SCREEN space (above everything, after the comment pins) + build the CSS-px hit-rects.
+  _drawPins(ictx, d) {
+    this._pinHit = [];
+    const pins = this.scene.appState && this.scene.appState.pins;
+    if (!pins || !pins.length || this._present) return;
+    const vw = this.wrap.clientWidth || 0, vh = this.wrap.clientHeight || 0;
+    ictx.setTransform(1, 0, 0, 1, 0, 0);
+    for (const p of pins) {
+      const c = pxcClampPin(p.sx, p.sy, p.w, p.h, vw, vh); if (c.sx !== p.sx || c.sy !== p.sy) { p.sx = c.sx; p.sy = c.sy; } // re-clamp into a shrunken viewport
+      const x = p.sx * d, y = p.sy * d, w = p.w * d, h = p.h * d;
+      ictx.save(); ictx.shadowColor = 'rgba(0,0,0,0.4)'; ictx.shadowBlur = 10 * d; ictx.shadowOffsetY = 3 * d; ictx.fillStyle = '#1b1f2a'; this._rrect(ictx, x, y, w, h, 6 * d); ictx.fill(); ictx.restore();
+      const img = this._imgFor(p.fileId);
+      if (img && img.complete && img.naturalWidth) { ictx.save(); this._rrect(ictx, x, y, w, h, 6 * d); ictx.clip(); try { ictx.drawImage(img, x, y, w, h); } catch (_e) {} ictx.restore(); }
+      else { this.dirty = true; } // not decoded yet → repaint next frame
+      ictx.lineWidth = 1.5 * d; ictx.strokeStyle = 'rgba(255,255,255,0.5)'; this._rrect(ictx, x, y, w, h, 6 * d); ictx.stroke();
+      const cs = 16, cxp = p.sx + p.w - cs - 4, cyp = p.sy + 4, m = 4; // ✕ close button (CSS px)
+      ictx.globalAlpha = 0.9; ictx.fillStyle = '#000'; ictx.beginPath(); ictx.arc((cxp + cs / 2) * d, (cyp + cs / 2) * d, (cs / 2) * d, 0, 7); ictx.fill();
+      ictx.globalAlpha = 1; ictx.strokeStyle = '#fff'; ictx.lineWidth = 1.6 * d; ictx.beginPath(); ictx.moveTo((cxp + m) * d, (cyp + m) * d); ictx.lineTo((cxp + cs - m) * d, (cyp + cs - m) * d); ictx.moveTo((cxp + cs - m) * d, (cyp + m) * d); ictx.lineTo((cxp + m) * d, (cyp + cs - m) * d); ictx.stroke();
+      this._pinHit.push({ id: p.id, x: p.sx, y: p.sy, w: p.w, h: p.h, close: { x: cxp, y: cyp, w: cs, h: cs } });
+    }
+    ictx.setTransform(1, 0, 0, 1, 0, 0);
+  }
   // HIGH-DPI SNIP: re-open the RETAINED original PDF (appState.pdfBlobs[docId]) and render JUST this region at ~300+ DPI → a
   // crisp PNG blob. Returns null when no PDF was retained (pre-feature import) or render fails → caller keeps the low-res crop.
   async _pdfRenderRegionHiDpi(docId, pageNum, frac) {
@@ -9328,6 +9409,7 @@ class CanvasView {
         ictx.textAlign = 'left'; ictx.textBaseline = 'alphabetic';
       }
     }
+    try { this._drawPins(ictx, d); } catch (_e) {} // F5: floating pins draw LAST (above comment pins + everything) + build their hit-rects
     // Flash — a fast, attention-grabbing pulse on a navigated cross-ref target. For an in-image region:
     // SPOTLIGHT (dim the rest, region stays lit) + a glowing accent ring, recomputed LIVE so it tracks the image.
     if (this._flash) {
@@ -9735,6 +9817,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connected Margins (parallel pages, visibly connected)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._connectedMargins(false); } }); // #26: every highlight as an anchor-aligned margin card + a tapered ribbon to its true on-page position (Azlen). ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Connected Margins — across the graph (connected docs)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._connectedMargins(true); } }); // #26 V5: + a parallel column per CONNECTED document (shared Source Note / Reply To thread / Section) with relation-hued cross-doc ribbons
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Review due highlights (spaced repetition)', icon: 'ti-clock', onSelected: () => { const v = this._activeView(); if (v) v._reviewHighlights(); } }); // #25: SM-2-lite review deck over the highlight library (SR Due/Ease/Reps/Interval number props). ti-clock = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Pin selection (floating reference)', icon: 'ti-pin', onSelected: () => { const v = this._activeView(); const el = v && v._singleSel && v._singleSel(); if (v && el && el.type === 'image') v._pinSnip(el); else if (v) { try { v.plugin.ui.addToaster({ title: 'Plexus: select an image / snip to pin.', dismissible: true }); } catch (_e) {} } } }); // F5: Flameshot-style floating pin — keep a snip visible as you pan/zoom. ti-pin = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });

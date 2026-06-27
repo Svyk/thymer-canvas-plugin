@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.188.0 — F5 Flameshot-style floating pins (2026-06-27)
+"The screen as collage surface" (from tobyshooters' tweet). Pin a snip/figure as a FLOATING, always-on-top reference fixed in
+SCREEN space — it stays visible through any pan/zoom/view-change so you can compare snips while reading elsewhere. Persisted in
+`scene.appState.pins=[{id,fileId,sx,sy,w,h,name}]` (snip pixels → a fileId via `_attachBlobToFileId`; viewport CSS-px pos/size).
+`_drawPins` renders them in the overlay pass AFTER the comment-pin block (topmost), pure screen space (`*d`), with a ✕; builds
+CSS-px hit-rects. onDown hit-tests pins FIRST (above comment pins) → ✕ removes / body drags (`_pinDown`, 4px threshold, triple
+self-heal like the comment pins). Command **"Plexus: Pin selection (floating reference)"** (`ti-pin`) pins the selected image; a
+shrunken-viewport `pxcClampPin` keeps pins grabbable. **Adversarial review: SHIP** — hit-test ordering/`*d` math/persistence
+(scene.files saved wholesale, no prune → pin survives reload; blob also Assets-anchored = GC-safe)/drag-lifecycle/present-gate/
+data-safety all verified clean. Pure fns `pxcClampPin`/`pxcPinHitTest` node-tested (9). 2nd of the 5-feature plan.
+
+
 ## ✅ v1.187.0 — F3 Heptabase scroll view (2026-06-27)
 New **📜 Scroll** button in the PDF page toolbar (between Stack and Reader): `_pdfScrollView(docId)` re-lays the doc's pages as
 ONE gapless, uniform-width column you pan/scroll through and snip (snip + region highlight are layout-independent — unchanged).
