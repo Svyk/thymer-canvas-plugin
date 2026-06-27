@@ -1,5 +1,27 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.179.0 — #26 V5: Connected Margins ACROSS THE GRAPH (cross-doc columns) (2026-06-26)
+The relational soul of the Azlen feature — "open a PDF and see every comment across the graph, visibly connected."
+
+**SHIPPED — Connected Margins · across the graph:** new command **"Plexus: Connected Margins — across the graph
+(connected docs)"** (`ti-list-tree`) — `_connectedMargins(true)` keeps the active PDF's anchored margin column (V1+V2) and
+adds **one parallel column per CONNECTED document**: docs linked to the active PDF's highlights by a **shared Source Note**,
+a **Reply To thread** (either direction), or a **shared specific Section** (generic headings — Introduction/Discussion/… —
+filtered out via `PXC_SECTION_GENERIC` + length≥6). Each connection draws a **relation-hued cross-doc RIBBON** (Source Note =
+violet, Reply To = blue, Section = teal) from the active highlight card to the connected doc's card. Bounded to ≤4 columns
+× ≤40 cards, ordered by connection strength (`pxcMarginExpand`, pure). `_drawMargins` generalized to render BOTH anchor
+ribbons (`rb.anchor`, card→page) and cross-doc relation ribbons (`rb.fromCardId/toCardId`, card→card, slightly more opaque).
+Reads relations via `pxcRelValues` (never `linkedRecords`); Reply To built both directions with no self-link/dup; degrades
+gracefully to the single-doc view + an honest toaster when no connected docs exist. New pure `pxcMarginExpand` (group→order→
+cap→keep-edges). **Adversarial review: verdict SHIP** — edge logic, generalized renderer (anchor branch byte-equivalent to
+reviewed V1+V2), data-safety (cmrg-only, no writes), degenerate cases all verified clean; folded the perf LOW (pre-index
+active-by-section → the others loop is O(|others|), not O(|others|×|use|)). Tests: `pxc_margins` now **28 assertions**; full
+suite **89 files green**.
+
+**Two commands now:** "Connected Margins (parallel pages…)" = single-doc; "Connected Margins — across the graph" = + cross-doc
+columns. NEXT (documented): V3 hover-lit ribbon + click-jump (`pxcPointInRibbon` hit-test already in place), V4 org-remark /
+record-comment anchor tiers (`_lineRectWorld` Source Line).
+
 ## ✅ v1.178.0 — #26 Connected Margins V1+V2 (Azlen "parallel pages, visibly connected") (2026-06-26)
 The headline new feature, designed by a 4-agent judged Workflow (winner: a NON-element ghost-mirror ribbon layer + A's
 tapered-filled-quad geometry + single-doc-first ship order; saved `~/plexus/CONNECTED-MARGINS-DESIGN.json`).

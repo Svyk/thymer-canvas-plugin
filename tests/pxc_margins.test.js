@@ -48,6 +48,25 @@ function pxcPointInRibbon(quad, px, py) {
   }
   return inside;
 }
+function pxcMarginExpand(edges, opts) {
+  const o = opts || {};
+  const maxDocs = o.maxDocs || 4, perCol = o.perCol || 40;
+  const byDoc = new Map();
+  for (const e of (edges || [])) {
+    if (!e || !e.aGuid || !e.bGuid || !e.bDoc) continue;
+    if (!byDoc.has(e.bDoc)) byDoc.set(e.bDoc, { docKey: e.bDoc, name: e.bName || e.bDoc, guidOrder: [], guidSeen: new Set(), count: 0, edges: [] });
+    const d = byDoc.get(e.bDoc); d.count++; d.edges.push(e);
+    if (!d.guidSeen.has(e.bGuid)) { d.guidSeen.add(e.bGuid); d.guidOrder.push(e.bGuid); }
+  }
+  const docs = [...byDoc.values()].sort((a, b) => (b.count - a.count) || (a.docKey < b.docKey ? -1 : 1)).slice(0, maxDocs);
+  const columns = [], keptEdges = [];
+  for (const d of docs) {
+    const guids = d.guidOrder.slice(0, perCol), guidSet = new Set(guids);
+    columns.push({ docKey: d.docKey, name: d.name, guids, count: d.count });
+    for (const e of d.edges) if (guidSet.has(e.bGuid)) keptEdges.push({ aGuid: e.aGuid, bGuid: e.bGuid, rel: e.rel });
+  }
+  return { columns, edges: keptEdges };
+}
 const approx = (a, b, e) => Math.abs(a - b) <= (e || 1e-6);
 
 // ── pxcMarginBandFrac ──
@@ -95,5 +114,31 @@ const approx = (a, b, e) => Math.abs(a - b) <= (e || 1e-6);
   ok(pxcPointInRibbon(q, 50, 100) === false, 'point far above the band is outside');
   ok(pxcPointInRibbon(q, 200, 0) === false, 'point past the band end is outside'); }
 
+// ── pxcMarginExpand (across-graph cross-doc columns) ──
+{ const edges = [
+    { aGuid: 'a1', bGuid: 'bx', rel: 'note', bDoc: 'fpB', bName: 'B.pdf' },
+    { aGuid: 'a2', bGuid: 'by', rel: 'reply', bDoc: 'fpB', bName: 'B.pdf' },
+    { aGuid: 'a1', bGuid: 'cz', rel: 'section', bDoc: 'fpC', bName: 'C.pdf' },
+  ];
+  const exp = pxcMarginExpand(edges, {});
+  ok(exp.columns.length === 2, 'two connected docs → two columns');
+  ok(exp.columns[0].docKey === 'fpB' && exp.columns[0].count === 2, 'docs ordered by connection count desc (fpB has 2)');
+  ok(exp.columns[0].guids.join() === 'bx,by', 'column guids in first-seen order, deduped');
+  ok(exp.edges.length === 3, 'all edges kept (every b is placed)'); }
+{ // maxDocs cap drops the lowest-count doc + its edges
+  const edges = [];
+  for (let i = 0; i < 5; i++) edges.push({ aGuid: 'a', bGuid: 'g' + i, rel: 'note', bDoc: 'doc' + i, bName: 'D' + i });
+  edges.push({ aGuid: 'a', bGuid: 'g0b', rel: 'note', bDoc: 'doc0', bName: 'D0' }); // doc0 gets a 2nd edge → highest count
+  const exp = pxcMarginExpand(edges, { maxDocs: 2 });
+  ok(exp.columns.length === 2 && exp.columns[0].docKey === 'doc0', 'maxDocs caps to 2; highest-count doc kept first');
+  ok(exp.edges.every((e) => exp.columns.some((c) => c.docKey && c.guids.includes(e.bGuid))), 'kept edges only reference placed cards'); }
+{ // perCol cap
+  const edges = []; for (let i = 0; i < 60; i++) edges.push({ aGuid: 'a', bGuid: 'g' + i, rel: 'note', bDoc: 'd', bName: 'D' });
+  const exp = pxcMarginExpand(edges, { perCol: 40 });
+  ok(exp.columns[0].guids.length === 40, 'perCol caps a column at 40 cards');
+  ok(exp.edges.length === 40, 'edges to over-cap cards are dropped'); }
+{ ok(pxcMarginExpand([], {}).columns.length === 0, 'no edges → no columns');
+  ok(pxcMarginExpand([{ aGuid: 'a', bGuid: 'b' }], {}).columns.length === 0, 'edge missing bDoc → ignored'); }
+
 if (fail) { console.error('\npxc_margins FAILED:', fail); process.exit(1); }
-console.log('pxc_margins ok (' + (4 + 4 + 2 + 5 + 3) + ' assertions)');
+console.log('pxc_margins ok (' + (4 + 4 + 2 + 5 + 3 + 4 + 2 + 2 + 2) + ' assertions)');
