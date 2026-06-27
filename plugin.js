@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.188.0';
+const PLEXUS_VERSION = '1.189.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1216,6 +1216,22 @@ function pxcPinHitTest(hits, px, py) {
   return null;
 }
 const PXC_REL_HUE = { note: '#a855f7', reply: '#3b82f6', section: '#14b8a6' };
+// F4 EVIDENCE LIGHTBOX: lay grouped items as a stacked set of grids — each group is a titled frame holding a `cols`-wide grid
+// of cards. Returns per-group frame + card positions (relative to the group origin x=0) + total width/height. PURE, node-tested.
+function pxcLightboxLayout(groups, opts) {
+  const o = opts || {};
+  const cols = o.cols || 4, cardW = o.cardW || 200, cardH = o.cardH || 130, gap = o.gap || 16, headerH = o.headerH || 34, groupGap = o.groupGap || 28, pad = o.pad || 14;
+  const out = []; let y = 0, maxW = 0;
+  for (const g of (groups || [])) {
+    const items = (g && g.items) || [];
+    const usedCols = Math.min(cols, Math.max(1, items.length)), rows = Math.max(1, Math.ceil(items.length / cols));
+    const gw = usedCols * (cardW + gap) - gap + pad * 2, gh = headerH + rows * (cardH + gap) - gap + pad;
+    const cards = items.map((it, i) => { const c = i % cols, r = Math.floor(i / cols); return { it, x: pad + c * (cardW + gap), y: y + headerH + r * (cardH + gap), w: cardW, h: cardH }; });
+    out.push({ key: (g && g.key) || '', frame: { x: 0, y, w: gw, h: gh }, cards });
+    maxW = Math.max(maxW, gw); y += gh + groupGap;
+  }
+  return { groups: out, width: maxW, height: Math.max(0, y - groupGap) };
+}
 const PXC_SECTION_GENERIC = new Set(['introduction', 'intro', 'conclusion', 'discussion', 'abstract', 'references', 'methods', 'method', 'results', 'background', 'summary', 'overview', 'appendix']);
 // pxcPointInRibbon: even-odd point-in-polygon over the ribbon outline (top forward + bottom back). For hover hit-test. PURE.
 function pxcPointInRibbon(quad, px, py) {
@@ -4059,7 +4075,7 @@ class CanvasView {
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else { const rb = this._margins && this._margins.ribbons.find((x) => x.cardId === hit.id); if (rb) { const ar = this._marginAnchorRect(rb.anchor); if (ar) { try { this._flashAnchor({ region: { x: ar.x, y: ar.y, w: ar.w, h: ar.h } }); } catch (_e) {} return; } } this._editCardBody(hit); } } // dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline; #26 V3: a margin card's body → fly to its on-page anchor
+      else if (hit && hit.type === 'record') { const lbi = this._lightbox && this._lightbox.byGuid && this._lightbox.byGuid.get(hit.id); if (lbi) { this._lightboxJump(lbi); return; } const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else { const rb = this._margins && this._margins.ribbons.find((x) => x.cardId === hit.id); if (rb) { const ar = this._marginAnchorRect(rb.anchor); if (ar) { try { this._flashAnchor({ region: { x: ar.x, y: ar.y, w: ar.w, h: ar.h } }); } catch (_e) {} return; } } this._editCardBody(hit); } } // F4: a lightbox card → fly to its source; else: dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline; #26 V3: a margin card's body → fly to its on-page anchor
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -5411,6 +5427,52 @@ class CanvasView {
     this._renderHighlightMindmap(groups, '🗂 Argument map — all PDFs', use.length + ' highlights · ' + nPdf + ' PDF' + (nPdf === 1 ? '' : 's') + (capped ? ' (first ' + CAP + ')' : ''));
     try { this.plugin.ui.addToaster({ title: 'Assembled ' + use.length + ' highlight' + (use.length === 1 ? '' : 's') + ' across ' + nPdf + ' PDF' + (nPdf === 1 ? '' : 's') + ' by code.', dismissible: true }); } catch (_e) {}
   }
+  // F4 EVIDENCE / FIGURE LIGHTBOX: a gallery of EVERYTHING pulled from this PDF — extracted figures (el.pdfFigure), region
+  // highlights (_pdfHlRegions), and text/area highlight records (_loadPdfHighlights) — as cards in a grid, grouped by page /
+  // Code / Color; double-click a card → fly to its source. Additive + undoable + grouped (one pdflb gid); re-runs land beside.
+  async _pdfLightbox(docId, opts) {
+    const by = (opts && opts.by) || 'page';
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas.', dismissible: true }); } catch (_e) {} return; }
+    const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+    const srcName = ((pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0]).pdf || {}).srcName || 'PDF';
+    const items = [], seenGuid = new Set(), seenSid = new Set();
+    for (const e of (this.scene.elements || [])) { if (e && e.type === 'image' && e.pdfFigure && e.pdfFigure.docId === docId && !e.isDeleted) { items.push({ guid: e.pdfFigureGuid || null, sid: e.id, kind: 'figure', page: (e.pdfFigure.page || 0), code: '', color: '', title: 'fig p' + (e.pdfFigure.page || '?'), elId: e.id }); seenSid.add(e.id); } } // extracted figures (dedup highlights by sid)
+    for (const r of (this._pdfHlRegions || [])) { if (r.deleted || r.docId !== docId) continue; if (r.guid && seenGuid.has(r.guid)) continue; if (r.guid) seenGuid.add(r.guid); items.push({ guid: r.guid || null, sid: null, kind: 'region', page: (r.page || 0), code: '', color: (r.color || ''), title: 'p' + (r.page || '?') + ' region', frac: r.frac, regDoc: docId }); } // regions BEFORE highlights so a region wins the guid-dedup over its area-mirror record → keeps its precise frac jump (review LOW)
+    if (fp) { const hls = await this._loadPdfHighlights(fp); if (this.destroyed) return; for (const h of hls) { if (h.sid && seenSid.has(h.sid)) continue; if (h.guid && seenGuid.has(h.guid)) continue; if (h.guid) seenGuid.add(h.guid); items.push({ guid: h.guid, sid: h.sid || null, kind: (h.type === 'area' ? 'area' : 'text'), page: (h.page || 0), code: (h.code || ''), color: (h.color || ''), title: h.title || 'highlight', elId: null }); } }
+    if (this.destroyed) return;
+    if (!items.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing extracted from this PDF yet — snip a figure or highlight first.', dismissible: true }); } catch (_e) {} return; }
+    const CAP = 200, capped = items.length > CAP, use = capped ? items.slice(0, CAP) : items;
+    const facet = (it) => by === 'code' ? (it.code || '(uncoded)') : by === 'color' ? (it.color || '(no colour)') : ('Page ' + (it.page || '?'));
+    const byKey = new Map(); for (const it of use) { const k = facet(it); if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(it); }
+    let keys = [...byKey.keys()];
+    if (by === 'page') keys.sort((a, b) => (parseInt(a.replace(/\D/g, ''), 10) || 0) - (parseInt(b.replace(/\D/g, ''), 10) || 0));
+    else if (by === 'code') { const order = ['claim', 'evidence', 'objection', 'method', 'question', 'definition']; keys.sort((a, b) => { const ia = order.indexOf(a), ib = order.indexOf(b); if (ia < 0 && ib < 0) return a < b ? -1 : 1; if (ia < 0) return 1; if (ib < 0) return -1; return ia - ib; }); }
+    const groups = keys.map((k) => ({ key: k, items: byKey.get(k) }));
+    const lay = pxcLightboxLayout(groups, {});
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    let ox = c.x - lay.width / 2, oy = c.y - lay.height / 2;
+    for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length && String(el.groupIds[0]).indexOf('pdflb') === 0) el.isDeleted = true; } // refresh-in-place: a lightbox is a transient view — retire the prior one (one undo step) so re-grouping replaces it
+    const gid = 'pdflb' + Math.floor(this._now()).toString(36);
+    const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); return el; };
+    const byGuid = new Map();
+    const title = makeText(ox, oy - 40, { fontSize: 18, stroke: '#7c5cff' }); title.text = '🖼 ' + srcName + ' — evidence (' + use.length + ', by ' + by + ')' + (capped ? ' · first ' + CAP : ''); try { measureText(title); } catch (_e) {} add(title);
+    for (const g of lay.groups) {
+      const fr = makeFrame(ox + g.frame.x, oy + g.frame.y, g.frame.w, g.frame.h); fr.name = g.key; add(fr);
+      for (const cd of g.cards) { const it = cd.it; if (!it.guid) continue; const rc = makeRecordCard(ox + cd.x, oy + cd.y, cd.w, cd.h, it.guid); const hex = PXC_CODE_COLOR[it.code] || PXC_HLCOLOR_HEX[it.color] || null; if (hex) rc.strokeColor = hex; add(rc); byGuid.set(rc.id, it); } // require a record guid (a figure whose mirror record isn't ready yet is skipped, not blank); the jump still uses it.elId for figures
+    }
+    this._lightbox = { gid, byGuid };
+    this.dirty = true; this._cacheValid = false; this.scheduleSave();
+    try { this._fitToBounds({ x: ox - 20, y: oy - 60, w: Math.max(lay.width, 1) + 40, h: Math.max(lay.height, 1) + 80 }, 50); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Evidence: ' + use.length + ' item' + (use.length === 1 ? '' : 's') + ' in ' + groups.length + ' group' + (groups.length === 1 ? '' : 's') + ' (by ' + by + ')' + (capped ? ' · first ' + CAP : '') + '.', dismissible: true }); } catch (_e) {}
+  }
+  // F4: click a lightbox card → fly to its source (figure element / region anchor / highlight).
+  _lightboxJump(it) {
+    if (!it) return;
+    if (it.kind === 'figure' && it.elId) { const el = this._byId(it.elId); if (el && !el.isDeleted) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return; } }
+    if (it.kind === 'region' && it.frac && it.regDoc) { const pageEl = this._pdfPagesOf(it.regDoc).find((p) => p.pdf && p.pdf.page === it.page); if (pageEl) { const rw = this._imgRegionWorld(pageEl, it.frac); if (rw && isFinite(rw.x)) { try { this._flashAnchor({ region: { x: rw.x, y: rw.y, w: rw.w, h: rw.h } }); } catch (_e) {} return; } } }
+    this._jumpToPdfHighlight({ sid: it.sid, page: it.page });
+  }
   // Shared (#20/#21): lay out `groups` ([{section, items:[hl]}]) as a section-columned mind-map of LIVE record-cards + a centre
   // node + PDF→section edges. Additive + undoable + grouped (one hlexp groupId); a re-run lands BESIDE any existing explosion.
   _renderHighlightMindmap(groups, centerLabel, countLabel) {
@@ -5819,6 +5881,7 @@ class CanvasView {
     const sep2 = document.createElement('span'); sep2.className = 'pxc-pdfnav-sep'; box.appendChild(sep2);
     mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
     mk('✂ Figure', 'Extract a region (chart/figure) of this page as an image', () => this._startPdfFigureExtract()); // #32: surface the existing extract-region command on the page toolbar
+    mk('🖼 Evidence', 'Gallery of every figure + highlight — click to cycle group by page → code → colour', () => { const order = ['page', 'code', 'color']; const cur = order[(order.indexOf(this._lightboxBy || '') + 1) % 3] || 'page'; this._lightboxBy = cur; this._pdfLightbox(page.pdf.docId, { by: cur }); }); // F4: evidence/figure lightbox; repeated clicks regroup in place
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
   _closePdfNav() { if (this._pdfNavEl) { try { this._pdfNavEl.remove(); } catch (_e) {} this._pdfNavEl = null; } this._pdfNavId = null; }

@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.189.0 — F4 Evidence / figure lightbox view (2026-06-27)
+New **🖼 Evidence** PDF-toolbar button → `_pdfLightbox(docId,{by})`: a gallery of EVERYTHING pulled from this PDF — extracted
+**figures** (`el.pdfFigure`), **region highlights** (`_pdfHlRegions`), and **text/area highlight records** (`_loadPdfHighlights`)
+— unified + deduped (regions gathered BEFORE highlights so a region keeps its precise `frac` jump over its area-mirror record;
+figures dedup their mirror by Scene-Element-Id), grouped by **page / Code / Colour** and laid as a stacked grid (pure
+`pxcLightboxLayout`, node-tested 11). Double-click a card → fly to its source (`_lightboxJump`: figure→its element, region→
+`_flashAnchor` the frac box, text→`_jumpToPdfHighlight`). **Clicking 🖼 again cycles the grouping** (page→code→colour) and
+**refreshes in place** (retires the prior `pdflb` group, one undo). Additive/undoable, CAP 200, cards require a record guid (a
+figure whose mirror isn't ready is skipped, never blank). **Adversarial review: SHIP** (dedup, dblclick priority/collision/
+staleness, jump null-derefs, data-safety, layout purity all clean); folded both LOWs (region-dedup order + the regroup control).
+3rd of the 5-feature plan.
+
+
 ## ✅ v1.188.0 — F5 Flameshot-style floating pins (2026-06-27)
 "The screen as collage surface" (from tobyshooters' tweet). Pin a snip/figure as a FLOATING, always-on-top reference fixed in
 SCREEN space — it stays visible through any pan/zoom/view-change so you can compare snips while reading elsewhere. Persisted in
