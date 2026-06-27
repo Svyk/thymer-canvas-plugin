@@ -1,5 +1,32 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.176.0 — #21: cross-PDF argument assembly (+ the AI/graph differentiators documented) (2026-06-26)
+The gap analysis's final differentiator batch. **SHIPPED — cross-PDF argument assembly:** new command **"Plexus:
+Assemble highlights across all PDFs (argument map)"** (`ti-stack`) — `_loadAllHighlights` pulls EVERY highlight across
+ALL PDFs (no fingerprint filter), groups them by **Code** into canonical argument order
+(claim→evidence→objection→method→question→definition, custom codes, "(uncoded)" last), and renders one mind-map so the
+**cross-paper argument structure** is visible at a glance (all evidence together, all objections together, regardless of
+source). Refactor: extracted `_readHlRecord` (shared record→hl reader, + pdfName/fingerprint) and `_renderHighlightMindmap`
+(the shared layout+element-creation, verbatim from #20's reviewed `_explodeHighlights`); both `_explodeHighlights` (#20)
+and `_assembleAcrossPdfs` (#21) call it; a re-run lands beside the prior map. Additive + undoable + grouped + 150-cap.
+Tests: new `pxc_crosspdf` 9 assertions (code ordering, cross-PDF spanning, PDF count); full suite **87/87**.
+
+**DOCUMENTED — ready-to-build designs (fleet/AI/key-dependent; need the deployed plugins + a key + real highlight data
+to build+verify):**
+- **AI synthesis per-PDF** — the canvas HAS an in-plugin LLM path (`plexus_llm_key` localStorage + Anthropic/Gemini
+  `fetch`, `_aiRelationSuggest` ~7699, `_aiTokens` tracking). A "Synthesize this PDF's highlights" command would pull the
+  typed highlight set by fingerprint → LLM → a structured section-grouped summary RECORD (each claim `ref`-linked to its
+  highlight, written back to the collection). Ready to wire onto that AI path.
+- **Brain citation graph / focus** — the Canvas↔Brain round-trip exists (`_dropSubgraph` ~5562 drops a Brain focus's
+  neighbourhood as bound cards + role-coloured arrows; shared ontology). Highlights already carry **Reply To / Source
+  Note / Drawing** relations + Section/Code, so Plexus Brain (`1JR8DFB0T8KB5V5R75B1J9EJ62`) can graph them today; a
+  "focus highlights in Brain" command would reuse that hook.
+- **Smart Connections semantic clustering** (`153SXYV3N7P5E4ETW2SD7JY51C`) — embed Highlight Text → "similar highlights
+  across PDFs" + per-paper theme clusters (local transformers.js; it already indexes Thymer records).
+- **Spaced-repetition over highlights**, **auto-enrich into the LLM Wiki** (wiki-maintain pipeline), **QA provenance
+  backlinks** (the backlink URL already gives audit-traceable provenance) — record-substrate features, designed.
+
+
 ## ✅ v1.175.0 — #20: explode a PDF's highlights onto the canvas as a section mind-map (2026-06-26)
 Gap-analysis differentiator #4 — the deepest canvas/relational tie-in. New command **"Plexus: Explode PDF highlights
 onto the canvas"** (`ti-graph`): queries this PDF's highlights from the PDF Highlights collection (cross-surface, by
