@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.173.0 — P0(canvas): notes on highlights surface in the C26 TOC (2026-06-26)
+Gap-analysis P0 (notes ON a highlight), canvas half. `_loadPdfHighlights` now reads the new **Note** property (the
+user's thinking on a highlight — collection prop added via MCP alongside **Reply To** for threading); the TOC Highlights
+list shows a **💬 indicator** on any highlight with a note + a 2-line **note preview** sub-row (`.pxc-pdf-toc-note`,
+line-clamped, theme-muted). Live-verified via browser harness (note→badge+sub-row; no-note→neither; 1 note row for 2
+highlights). The write/edit side is in the Plexus PDF Highlighter plugin (panel menu "📝 Add / edit note" → inline
+editor → writes the Note field). Full suite **85/85**.
+
+
 ## ✅ v1.172.0 — C-1: PDF highlights surfaced in the C26 outline/TOC panel (2026-06-26)
 The PDF-outline panel (`_showPdfOutline`, now **async**) also surfaces the PDF's highlights from the **PDF Highlights**
 collection — **per-section `✦ N` count badges** on outline rows + a clickable **Highlights (N)** list. A click flies to

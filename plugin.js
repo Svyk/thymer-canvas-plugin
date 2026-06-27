@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.172.0';
+const PLEXUS_VERSION = '1.173.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -5071,9 +5071,11 @@ class CanvasView {
       for (const h of hls) {
         const row = document.createElement('div'); row.className = 'pxc-pdf-toc-row pxc-pdf-toc-nav';
         const t = document.createElement('span'); t.className = 'pxc-pdf-toc-t'; t.textContent = (h.type === 'area' ? '▢ ' : '“ ') + (h.title || '(highlight)'); row.appendChild(t);
+        if (h.note) { const n = document.createElement('span'); n.className = 'pxc-pdf-toc-cnt'; n.textContent = '💬'; n.title = 'has a note'; row.appendChild(n); } // P0: note indicator
         if (h.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + h.page; row.appendChild(pg); }
         row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfHighlight(h); });
         ul.appendChild(row);
+        if (h.note) { const nr = document.createElement('div'); nr.className = 'pxc-pdf-toc-note'; nr.textContent = h.note; ul.appendChild(nr); } // P0: the note preview, indented under the highlight
       }
     }
     box.appendChild(ul); this.wrap.appendChild(box);
@@ -5096,7 +5098,7 @@ class CanvasView {
       if (sid && seen.has(sid)) continue; if (sid) seen.add(sid); // dedup a kill-mid-flush duplicate by Scene Element Id (review LOW)
       let page = null; try { const np = r.prop('Page'); page = np && np.number ? np.number() : null; } catch (_e) {}
       let type = ''; try { const tp = r.prop('Type'); type = (tp && tp.choiceLabel && tp.choiceLabel()) || ''; } catch (_e) {}
-      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type });
+      out.push({ guid: r.guid, title: ((r.getName && r.getName()) || '').trim() || '(highlight)', page: (page != null ? page : null), section: this._propText(r, 'Section'), sid, type, note: this._propText(r, 'Note') }); // C-1+: Note = the user's thinking on this highlight
     }
     out.sort((a, b) => (a.page || 0) - (b.page || 0));
     return out;
@@ -10761,6 +10763,7 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-pdf-toc-pg { flex: none; color: var(--color-text-600, #9aa3b2); font-variant-numeric: tabular-nums; font-size: 11px; }
 .pxc-host .pxc-root .pxc-pdf-toc-cnt { flex: none; color: var(--button-primary-bg-color, #7c5cff); font-size: 10px; font-weight: 600; }
 .pxc-host .pxc-root .pxc-pdf-toc-sec { padding: 7px 9px 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--color-text-600, #9aa3b2); border-top: 1px solid var(--cards-border-color, #333a4a); margin-top: 4px; }
+.pxc-host .pxc-root .pxc-pdf-toc-note { padding: 0 9px 5px 22px; color: var(--color-text-600, #9aa3b2); font-size: 11px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-head { display: flex; flex-direction: column; gap: 6px; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-title { width: 100%; padding: 5px 7px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-50, #fff); font: 600 13px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-recpanel .pxc-rp-btns { display: flex; gap: 5px; flex-wrap: wrap; }
