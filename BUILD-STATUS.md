@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.190.0 — F1 body comments on highlight cards (2026-06-27)
+Comments you add to a PDF Highlights record's BODY now SHOW on its canvas/margin card, and you can add a comment from the canvas.
+A new `this._hlCardGuids` Set marks highlight cards (populated in explode/assemble, margins primary [only `!isRemark`], cross-doc,
+and the lightbox — never org-remark cards). For those: `_recFor` loads up to **40** body lines (was 10), and the card **auto-grows**
+to fit (`_drawRecordCard`→`_growCardToFit`→pure `pxcCardContentHeight`, grow-only, clamp 600, re-grows when the body line-count
+changes). The shared **double-click gate** now routes a HIGHLIGHT margin card's body → `_editCardBody` (add/edit a comment, append-
+only + rich-line-safe via `pxcWriteCardTree`); fly-to-anchor moved to the left 8px stripe / Alt-click. **org-remark margin cards keep
+body→fly-to (the #26 V3 behavior).** **Adversarial review: SHIP** — all four dblclick cases (normal / remark / highlight / lightbox)
+preserve prior behavior, no render-loop/oscillation, no data-safety hole (comment-add can't touch Highlight Text/props), no
+manual-shrink fight. Pure `pxcCardContentHeight` node-tested (7). 4th of the 5-feature plan.
+
+
 ## ✅ v1.189.0 — F4 Evidence / figure lightbox view (2026-06-27)
 New **🖼 Evidence** PDF-toolbar button → `_pdfLightbox(docId,{by})`: a gallery of EVERYTHING pulled from this PDF — extracted
 **figures** (`el.pdfFigure`), **region highlights** (`_pdfHlRegions`), and **text/area highlight records** (`_loadPdfHighlights`)

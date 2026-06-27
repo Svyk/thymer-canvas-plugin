@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.189.0';
+const PLEXUS_VERSION = '1.190.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1231,6 +1231,16 @@ function pxcLightboxLayout(groups, opts) {
     maxW = Math.max(maxW, gw); y += gh + groupGap;
   }
   return { groups: out, width: maxW, height: Math.max(0, y - groupGap) };
+}
+// F1 BODY COMMENTS: estimate the natural height a record card needs to show its title + properties + body lines (comments),
+// so a highlight card can auto-grow to fit. Approximate wrap by chars/line; clamped [minH, maxH]. PURE, node-tested.
+function pxcCardContentHeight(nProps, lines, opts) {
+  const o = opts || {};
+  const titleH = o.titleH || 26, propH = o.propH || 15, lineH = o.lineH || 16, pad = o.pad || 14, maxH = o.maxH || 600, minH = o.minH || 70, cpl = o.charsPerLine || 34;
+  let h = pad + titleH + (nProps || 0) * propH + (nProps ? 6 : 0);
+  for (const ln of (lines || [])) { const len = ((ln && ln.text) || '').length; h += Math.max(1, Math.ceil(len / Math.max(1, cpl))) * lineH; }
+  h += pad;
+  return Math.max(minH, Math.min(maxH, Math.round(h)));
 }
 const PXC_SECTION_GENERIC = new Set(['introduction', 'intro', 'conclusion', 'discussion', 'abstract', 'references', 'methods', 'method', 'results', 'background', 'summary', 'overview', 'appendix']);
 // pxcPointInRibbon: even-odd point-in-polygon over the ribbon outline (top forward + bottom back). For hover hit-test. PURE.
@@ -4075,7 +4085,7 @@ class CanvasView {
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
-      else if (hit && hit.type === 'record') { const lbi = this._lightbox && this._lightbox.byGuid && this._lightbox.byGuid.get(hit.id); if (lbi) { this._lightboxJump(lbi); return; } const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else { const rb = this._margins && this._margins.ribbons.find((x) => x.cardId === hit.id); if (rb) { const ar = this._marginAnchorRect(rb.anchor); if (ar) { try { this._flashAnchor({ region: { x: ar.x, y: ar.y, w: ar.w, h: ar.h } }); } catch (_e) {} return; } } this._editCardBody(hit); } } // F4: a lightbox card → fly to its source; else: dblclick a property row → edit it inline; title band → open the record; body → edit body lines inline; #26 V3: a margin card's body → fly to its on-page anchor
+      else if (hit && hit.type === 'record') { const lbi = this._lightbox && this._lightbox.byGuid && this._lightbox.byGuid.get(hit.id); if (lbi) { this._lightboxJump(lbi); return; } const pr = this._cardPropAt(hit, w.x, w.y); if (pr) { this._editCardProp(hit, pr); return; } const tb = 28 + ((this._cardPropsH && this._cardPropsH.get(hit.id)) || 0); if ((w.y - hit.y) < tb) this._openCard(hit); else { const rb = this._margins && this._margins.ribbons.find((x) => x.cardId === hit.id); const isHl = this._hlCardGuids && this._hlCardGuids.has(hit.recordGuid); if (rb && (!isHl || (w.x - hit.x) < 8 || e.altKey)) { const ar = this._marginAnchorRect(rb.anchor); if (ar) { try { this._flashAnchor({ region: { x: ar.x, y: ar.y, w: ar.w, h: ar.h } }); } catch (_e) {} return; } } this._editCardBody(hit); } } // F4: lightbox card → fly to source. F1: a HIGHLIGHT margin card's body → ADD/edit a comment (_editCardBody); fly-to-anchor moves to the left stripe (<8px) / Alt-click. Non-highlight (remark) cards keep body→fly-to (#26 V3). Property row → edit; title band → open.
       else if (hit && hit.type === 'linecard') { this._editCardBody(hit); } // EDIT the transcluded line + its children inline, written back to the source via setSegments
       else if (hit && (hit.type === 'arrow' || hit.type === 'line')) { this._editConnLabel(hit); } // CONNECTION: dblclick a connector → add/edit its midpoint label (a bound, connectable text element)
       else if (hit && hit.type === 'query') { this._promptText('Query (Thymer search syntax):', hit.query).then((q) => { if (q != null) { hit.query = q; this.dirty = true; this.scheduleSave(); } }); }
@@ -4739,7 +4749,7 @@ class CanvasView {
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
-        try { const items = await rec.getLineItems(); entry.lines = pxcOutlineRows(items, null, 10, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // [{text, depth, lineGuid}] — depth from parent_guid chain (getChildren() returns [] on the flat load); lineGuid → line-level connection targeting (Phase 4)
+        try { const items = await rec.getLineItems(); const cap = (this._hlCardGuids && this._hlCardGuids.has(guid)) ? 40 : 10; entry.lines = pxcOutlineRows(items, null, cap, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // F1: highlight cards load up to 40 body lines (comments), others 10. [{text, depth, lineGuid}] — depth from parent_guid chain; lineGuid → line-level targeting
         try { entry.props = this._recPanelFields(rec).filter((p) => p && p.name).slice(0, 8); } catch (_e) {} // INLINE PROPERTIES: ALL editable typed properties (incl. Title — per the user, so it's editable inline — and empty fields, schema-visible like the side panel). Dblclick a value to edit (see _editCardProp).
         entry.ready = true; this.dirty = true;
       } catch (_e) { entry.title = '(error)'; entry.ready = true; this.dirty = true; }
@@ -5459,7 +5469,7 @@ class CanvasView {
     const title = makeText(ox, oy - 40, { fontSize: 18, stroke: '#7c5cff' }); title.text = '🖼 ' + srcName + ' — evidence (' + use.length + ', by ' + by + ')' + (capped ? ' · first ' + CAP : ''); try { measureText(title); } catch (_e) {} add(title);
     for (const g of lay.groups) {
       const fr = makeFrame(ox + g.frame.x, oy + g.frame.y, g.frame.w, g.frame.h); fr.name = g.key; add(fr);
-      for (const cd of g.cards) { const it = cd.it; if (!it.guid) continue; const rc = makeRecordCard(ox + cd.x, oy + cd.y, cd.w, cd.h, it.guid); const hex = PXC_CODE_COLOR[it.code] || PXC_HLCOLOR_HEX[it.color] || null; if (hex) rc.strokeColor = hex; add(rc); byGuid.set(rc.id, it); } // require a record guid (a figure whose mirror record isn't ready yet is skipped, not blank); the jump still uses it.elId for figures
+      for (const cd of g.cards) { const it = cd.it; if (!it.guid) continue; const rc = makeRecordCard(ox + cd.x, oy + cd.y, cd.w, cd.h, it.guid); const hex = PXC_CODE_COLOR[it.code] || PXC_HLCOLOR_HEX[it.color] || null; if (hex) rc.strokeColor = hex; (this._hlCardGuids = this._hlCardGuids || new Set()).add(it.guid); add(rc); byGuid.set(rc.id, it); } // F1: lightbox cards get body comments. Require a record guid (a figure whose mirror record isn't ready yet is skipped, not blank); jump uses it.elId for figures
     }
     this._lightbox = { gid, byGuid };
     this.dirty = true; this._cacheValid = false; this.scheduleSave();
@@ -5487,7 +5497,7 @@ class CanvasView {
     for (const s of lay.sections) {
       const fr = makeFrame(ox + s.frame.x, oy + s.frame.y, s.frame.w, s.frame.h); fr.name = s.title; add(fr);
       const e = makeLinear(0, 0, 'arrow', { stroke: '#9aa3b2', strokeWidth: 1.5 }); e.points = [[ox + lay.pdf.x + lay.pdf.w, oy + lay.pdf.y + lay.pdf.h / 2], [ox + s.frame.x, oy + s.frame.y + s.frame.h / 2]]; e.endArrowhead = 'arrow'; e.roughness = 0.5; linearBBox(e); add(e);
-      for (const card of s.cards) { const rc = makeRecordCard(ox + card.x, oy + card.y, card.w, card.h, card.guid); const hex = PXC_CODE_COLOR[card.code] || PXC_HLCOLOR_HEX[card.color] || null; if (hex) rc.strokeColor = hex; add(rc); }
+      for (const card of s.cards) { const rc = makeRecordCard(ox + card.x, oy + card.y, card.w, card.h, card.guid); const hex = PXC_CODE_COLOR[card.code] || PXC_HLCOLOR_HEX[card.color] || null; if (hex) rc.strokeColor = hex; (this._hlCardGuids = this._hlCardGuids || new Set()).add(card.guid); add(rc); } // F1: register as a highlight card (body comments + body-edit)
     }
     this.dirty = true; this.scheduleSave();
     try { this._fitToBounds({ x: ox, y: oy - 20, w: Math.max(lay.width, 1), h: Math.max(lay.height + 40, 1) }, 60); } catch (_e) {}
@@ -5669,7 +5679,7 @@ class CanvasView {
     const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); return el; };
     const fr = makeFrame(lay.frame.x, lay.frame.y, lay.frame.w, lay.frame.h); fr.name = (readerPage ? '📖 ' + srcName + ' · p.' + readerPage : '📄 ' + srcName + ' — margins') + (capped ? ' (first ' + CAP + ' of ' + pool.length + ')' : ''); add(fr);
     const ribbons = [], activeCardByGuid = new Map();
-    descriptors.forEach((d, i) => { const cd = lay.cards[i]; const rc = makeRecordCard(cd.x, cd.y, cd.w, cd.h, d.guid); if (d.hue) rc.strokeColor = d.hue; add(rc); activeCardByGuid.set(d.guid, rc.id); if (d.anchor && d.anchor.kind !== 'none') ribbons.push({ cardId: rc.id, anchor: d.anchor, hue: d.hue }); });
+    descriptors.forEach((d, i) => { const cd = lay.cards[i]; const rc = makeRecordCard(cd.x, cd.y, cd.w, cd.h, d.guid); if (d.hue) rc.strokeColor = d.hue; if (!d.isRemark) (this._hlCardGuids = this._hlCardGuids || new Set()).add(d.guid); add(rc); activeCardByGuid.set(d.guid, rc.id); if (d.anchor && d.anchor.kind !== 'none') ribbons.push({ cardId: rc.id, anchor: d.anchor, hue: d.hue }); }); // F1: PDF-highlight cards get body comments + body-edit; remark cards keep body→fly-to (#26 V3)
     // ── ACROSS GRAPH: cross-document columns + relation ribbons ─────────────────────────────────────────────────────
     let unionRight = lay.frame.x + lay.frame.w, nDocs = 0, nRel = 0;
     if (across) {
@@ -5696,7 +5706,7 @@ class CanvasView {
       for (const column of exp.columns) {
         const n = column.guids.length, colH = Math.max(CHc, n * (CHc + GAPc) - GAPc), fy0 = primaryCenterY - colH / 2;
         const cfr = makeFrame(colX - 12, fy0 - HEADc - 12, CWc + 24, colH + HEADc + 24); cfr.name = '📄 ' + column.name; add(cfr);
-        column.guids.forEach((g, j) => { const o = othersByGuid.get(g); const hue = o ? (PXC_CODE_COLOR[o.code] || PXC_HLCOLOR_HEX[o.color] || '#7c5cff') : '#7c5cff'; const rc = makeRecordCard(colX, fy0 + j * (CHc + GAPc), CWc, CHc, g); rc.strokeColor = hue; add(rc); otherCardByGuid.set(g, rc.id); });
+        column.guids.forEach((g, j) => { const o = othersByGuid.get(g); const hue = o ? (PXC_CODE_COLOR[o.code] || PXC_HLCOLOR_HEX[o.color] || '#7c5cff') : '#7c5cff'; const rc = makeRecordCard(colX, fy0 + j * (CHc + GAPc), CWc, CHc, g); rc.strokeColor = hue; (this._hlCardGuids = this._hlCardGuids || new Set()).add(g); add(rc); otherCardByGuid.set(g, rc.id); }); // F1: cross-doc highlight cards too
         unionRight = colX + CWc + 12; colX += CWc + 90;
       }
       for (const e of exp.edges) { const fromId = activeCardByGuid.get(e.aGuid), toId = otherCardByGuid.get(e.bGuid); if (fromId && toId) { ribbons.push({ fromCardId: fromId, toCardId: toId, hue: PXC_REL_HUE[e.rel] || '#7c5cff', rel: e.rel }); nRel++; } }
@@ -6199,9 +6209,20 @@ class CanvasView {
     ctx.restore();
     return rowH;
   }
+  // F1: grow a highlight card to fit its body comments. Returns whether it grew. Grow-only (never shrinks below the user's size).
+  _growCardToFit(el, rec) {
+    if (!el || el.type !== 'record') return false;
+    rec = rec || this._recFor(el.recordGuid); if (!rec || !rec.ready) return false;
+    const cpl = Math.max(12, Math.floor((Math.abs(el.width) - 24) / 7));
+    const want = pxcCardContentHeight((rec.props || []).length, rec.lines || [], { charsPerLine: cpl, minH: Math.abs(el.height) });
+    if (want > Math.abs(el.height) + 2) { el.height = want; this.dirty = true; this._cacheValid = false; this.scheduleSave(); return true; }
+    return false;
+  }
   _drawRecordCard(ctx, el) {
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
     if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    // F1: a highlight card auto-grows to fit its body comments — re-grow whenever the body line-count changes (a comment added).
+    if (this._hlCardGuids && this._hlCardGuids.has(el.recordGuid)) { const _r = this._recFor(el.recordGuid); if (_r && _r.ready) { const n = _r.lines ? _r.lines.length : 0; if (el._grownN !== n) { this._growCardToFit(el, _r); el._grownN = n; } } }
     const x = el.x, y = el.y, w = el.width, h = el.height, rad = Math.min(8, Math.abs(w) / 2, Math.abs(h) / 2);
     const sk = (this._recCache && this._recCache.get(el.recordGuid) || {}).skin || {}; // CS-8: property-conditional style
     if (sk.urgent) { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x - 3, y - 3, w + 6, h + 6, rad + 3); else ctx.rect(x - 3, y - 3, w + 6, h + 6); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ef4444'; ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * 0.8; ctx.stroke(); ctx.restore(); } // Due-past urgency ring
