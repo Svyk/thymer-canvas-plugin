@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.169.0';
+const PLEXUS_VERSION = '1.170.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2131,7 +2131,7 @@ class CanvasView {
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
   // region-draw never self-cancels.
-  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -3672,10 +3672,12 @@ class CanvasView {
       else if (mode === 'crop') {
         const rect = this._cropRect; this._cropRect = null;
         const ipTarget = this._cropInPlaceTarget; this._cropInPlaceTarget = null; // B1: consume the one-shot in-place target — ALWAYS cleared so it can't leak into the next region-reference crop
+        const figArm = this._pdfFigureArm; this._pdfFigureArm = false; // A1: consume the one-shot PDF-figure-extract arm
         if (rect && rect.w > 3 && rect.h > 3) {
-          if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
+          if (figArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._extractPdfFigure(pg, rect); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A1: lift the PDF region into a figure
+          else if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
           else { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
-        } else if (ipTarget) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
+        } else if (ipTarget || figArm) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
       }
       else if (mode === 'cmtregion') { // D-D: finalize a comment gesture — a real drag over an image → a REGION comment; a click → a point/element comment
         const rect = this._cropRect; this._cropRect = null; const dn = this._cmtRegionDown; this._cmtRegionDown = null;
@@ -3800,8 +3802,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -3829,7 +3831,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -6696,6 +6698,7 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: 'Plexus: importing PDF…', dismissible: true }); } catch (_e) {}
     let doc; try { const buf = await file.arrayBuffer(); doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise; } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: could not read the PDF.', dismissible: true }); } catch (_e) {} return; }
     const pageCount = doc.numPages, CAP = 100, n = Math.min(pageCount, CAP);
+    const fingerprint = (doc.fingerprints && doc.fingerprints[0]) || doc.fingerprint || null; // A0: stable cross-surface key (pdf.js 4.x = fingerprints[]) — unifies canvas figures with native-panel text highlights of the SAME pdf
     const docId = 'pdf' + Date.now().toString(36) + Math.floor(this._now()).toString(36);
     const scale = (this.plugin._settings && this.plugin._settings.pdfScale) || 2, srcName = (file.name || 'document.pdf'), nameBase = srcName.replace(/\.[a-z0-9]+$/i, '');
     // 1) cheap viewport pass → correctly-sized placeholder elements (dashed-box stub renders until the raster lands)
@@ -6704,7 +6707,7 @@ class CanvasView {
       let w = DISP, h = Math.round(DISP * 1.294);
       try { const page = await doc.getPage(p); const vp = page.getViewport({ scale: 1 }); if (vp.width > 0) { const s = DISP / vp.width; w = DISP; h = Math.max(20, Math.round(vp.height * s)); } } catch (_e) {}
       const fileId = newFileId();
-      const el = makeImage(wx - w / 2, top, w, h, fileId); el.pdf = { docId, page: p, pageCount, srcName, renderScale: scale };
+      const el = makeImage(wx - w / 2, top, w, h, fileId); el.pdf = { docId, page: p, pageCount, srcName, renderScale: scale, fingerprint };
       this.scene.elements.push(el); jobs.push({ fileId, p }); top += h + GAP;
     }
     this.dirty = true; this.scheduleSave();
@@ -6746,7 +6749,7 @@ class CanvasView {
       try {
         const blob = await this._pdfPageBlob(doc, p, scale);
         const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
-        if (blob) { const el = await this._addImageFromFile(new File([blob], 'pdf-' + srcName.replace(/\.[a-z0-9]+$/i, '') + '-p' + p + '.webp', { type: blob.type || 'image/webp' }), c.x, c.y); if (el) { el.pdf = { docId: 'pdf' + Date.now().toString(36) + 'single', page: p, pageCount: doc.numPages, srcName, renderScale: scale }; this.dirty = true; this.scheduleSave(); } }
+        if (blob) { const el = await this._addImageFromFile(new File([blob], 'pdf-' + srcName.replace(/\.[a-z0-9]+$/i, '') + '-p' + p + '.webp', { type: blob.type || 'image/webp' }), c.x, c.y); if (el) { el.pdf = { docId: 'pdf' + Date.now().toString(36) + 'single', page: p, pageCount: doc.numPages, srcName, renderScale: scale, fingerprint: (doc.fingerprints && doc.fingerprints[0]) || doc.fingerprint || null }; this.dirty = true; this.scheduleSave(); } }
         try { this.plugin.ui.addToaster({ title: 'PDF page ' + p + ' imported.', dismissible: true }); } catch (_e) {}
       } catch (e) { try { this.plugin.ui.addToaster({ title: 'Plexus: page render failed.', dismissible: true }); } catch (_e) {} }
       try { doc.destroy && doc.destroy(); } catch (_e) {}
@@ -7750,8 +7753,29 @@ class CanvasView {
     const img = this._singleSel();
     if (!img || img.type !== 'image') { try { this.plugin.ui.addToaster({ title: 'Plexus: select a single image to crop.', dismissible: true }); } catch (_e) {} return; }
     if (img.angle) { try { this.plugin.ui.addToaster({ title: 'Plexus: rotate the image back to 0° before cropping in place.', dismissible: true }); } catch (_e) {} return; } // B1: the crop math is axis-aligned (ignores el.angle) — block in-place crop on a rotated image rather than crop the wrong region
-    this._cropInPlaceTarget = img; this.tool = 'crop'; this._syncToolbar();
+    this._cropInPlaceTarget = img; this._pdfFigureArm = null; this.tool = 'crop'; this._syncToolbar(); // clear the sibling crop-arm so the two one-shot crop modes can't both be live (review MED-1)
     try { this.plugin.ui.addToaster({ title: 'Crop: drag a box over the image to crop it in place (Esc cancels).', dismissible: true }); } catch (_e) {}
+  }
+  // A1: extract a region of a PDF page as a standalone figure (the "grab this chart" gesture). Arms a one-shot crop-box;
+  // the next box drawn over a PDF page → _extractPdfFigure, which reuses the proven _referenceRegion crop primitive.
+  _startPdfFigureExtract() {
+    const docId = this._activePdfDocId();
+    if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then extract a region.', dismissible: true }); } catch (_e) {} return; }
+    this._pdfFigureArm = true; this._cropInPlaceTarget = null; this.tool = 'crop'; this._syncToolbar(); // clear the sibling crop-arm so the two one-shot crop modes can't both be live (review MED-1)
+    try { this.plugin.ui.addToaster({ title: 'Extract: drag a box over the PDF region (chart/figure) to lift it out (Esc cancels).', dismissible: true }); } catch (_e) {}
+  }
+  // A1: lift the boxed region of a PDF page into a new cropped image element (live crop, shares the page's fileId), and tag it
+  // with the source page/fingerprint/frac so A2 can mirror it to a queryable PDF Highlights record. Returns the new element.
+  _extractPdfFigure(pageEl, rect) {
+    if (!pageEl || !pageEl.pdf) return null;
+    const el = this._referenceRegion(pageEl, rect);
+    if (!el) { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the PDF page.', dismissible: true }); } catch (_e) {} return null; }
+    let frac = null; try { frac = this._imgRegionFrac(pageEl, rect); } catch (_e) {}
+    el.pdfFigure = { docId: pageEl.pdf.docId || null, page: pageEl.pdf.page || null, fingerprint: pageEl.pdf.fingerprint || null, srcName: pageEl.pdf.srcName || null, frac: frac || null }; // A1 tag → A2 mirror
+    this.dirty = true; this.scheduleSave();
+    try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(el.id); } catch (_e) {} // A2 (wired later): enqueue the durable PDF Highlights mirror
+    try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + ' region as a figure.', dismissible: true }); } catch (_e) {}
+    return el;
   }
   // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
   _snapshotElement(el) {
@@ -8733,6 +8757,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Select whole PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._selectPdfDocument(); } }); // C15: select all pages of the PDF as a unit (move/delete/align together)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to PDF document', icon: 'ti-file-text', onSelected: () => { const v = this._activeView(); if (v) v._fitToPdfDocument(); } }); // C16: frame the camera to all pages of the PDF
     this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });

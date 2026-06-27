@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.170.0 — A0+A1: PDF region → figure extraction (the "grab this chart" gesture) (2026-06-26)
+First ship of the **PDF Highlights** feature (plan: `~/.claude/plans/staged-finding-ritchie.md`; two surfaces — canvas
+region-extraction + a native-panel text highlighter — unified by PDF fingerprint into a dedicated, queryable **PDF
+Highlights** collection, `1E9ZMXHM46GSQ6Z323YN3HPNFZ`, created via MCP w/ 15 props). This ship = the canvas half's
+foundation, on-canvas only (no Thymer writes yet — that's A2). **A0:** `_addPdf` (+ `_importPdfPagePicker`) now capture
+`doc.fingerprints[0]` onto `el.pdf.fingerprint` (live-verified pdf.js 4.6.82 returns `["<hash>",null]`) — the stable
+cross-surface key. **A1:** command **"Plexus: Extract PDF region as figure"** (`ti-photo`) arms a one-shot crop-box;
+boxing a region of a PDF page → `_extractPdfFigure` reuses the proven `_referenceRegion` crop primitive to lift it into
+a standalone cropped image element (live crop, shares the page's fileId), tagged `el.pdfFigure = {docId, page,
+fingerprint, srcName, frac}` for the A2 mirror. One-shot arm `_pdfFigureArm` disarmed in all 4 cleanup paths
+(tool-switch/Esc/pointercancel/lostpointercapture) + a forward `_schedulePdfHlMirror` hook (guarded, no-op until A2).
+**Adversarial review:** fixed MED-1 (the two one-shot crop modes — in-place crop + figure-extract — could both be
+armed at once → wrong-mode action; each arm now clears its sibling). LOW double-undo-step accepted (durable state
+correct, live mirror reads the tagged element). Tests: new `pxc_pdffigure` 11 assertions (frac/crop geometry +
+crop-of-crop + clamp + tag shape); full suite **83/83**.
+
+
 ## ✅ v1.169.0 — C26: PDF OUTLINE / table of contents (extract the bookmark tree → clickable TOC, jump to page) — pdf.js API PLATFORM-VERIFIED (2026-06-26)
 The 2nd previously-"platform-blocked" feature, now unblocked. **Platform resolution:** the uncertainty was pdf.js
 4.6.82 `getOutline`/`getDestination`/`getPageIndex` behavior — **live-verified in Chrome** on a synthetic 2-page PDF
