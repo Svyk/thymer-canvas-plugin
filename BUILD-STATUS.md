@@ -1,5 +1,34 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.177.0 — #23 AI synthesis per-PDF + #24 Brain citation-graph seam (2026-06-26)
+Building the documented AI/graph differentiators for real.
+
+**#23 — SHIPPED — AI synthesis per-PDF:** new command **"Plexus: Synthesize this PDF's highlights (AI argument map)"**
+(`ti-sparkles`) — `_synthesizePdf()` pulls this PDF's typed highlights (by fingerprint, `_loadPdfHighlights`), sends them
+to the in-plugin LLM (`_aiComplete`, key encrypted at rest), and the model returns a structured `{thesis, themes:[{title,
+points:[{text, cites:[hlIds]}]}]}`. Rendered as a **3-tier argument map** on the canvas: a 🧠 Synthesis node (with the
+thesis) → a titled `frame` per **theme** (holding its wrapped point text) → the **cited highlight RECORD-cards** (deduped,
+colored by Code/Color), with Synthesis→theme arrows + faint point→evidence arrows. Every synthesized claim is **visibly
+grounded** in its source highlight cards — canvas/relational thinking end-to-end. Scene-only (no record writes), additive
++ undoable + grouped (`hlsyn`), lands beside any prior map. New pure fns `pxcParseSynthesis` (tolerant `{thesis,themes}`
+parse), `pxcWrap` (word-wrap), `pxcSynthesisLayout` (3-tier geometry + deduped cited cards + per-point cardIdxs).
+**Adversarial review (code-reviewer):** confirmed data-safe (scene-only, no deletes/overwrites), `this.destroyed` guards
+correct, `ti-sparkles` bundled, bounded (CAP 120 + dedup + 12-theme cap). Fixed one **HIGH**: a hallucinated cite id
+`>= use.length` deposited a permanent "(record not found)" card + dangling arrow → now clamp `cites` to `< N` after parse,
+before layout (cardOrder/cardIdxs stay in sync). Tests: new `pxc_synthesis` **19 assertions**.
+
+**#24 — SHIPPED — Brain citation-graph seam + command:** Plexus Brain (`v0.32.0`) now exposes `window.__plexusBrain.focus(guid)`
+(→ `_open(guid)`), completing the Canvas→Brain direction (the reverse of `dropSubgraph`). New Canvas command **"Plexus:
+Open citation graph in Plexus Brain"** (`ti-graph`) — `_openInBrain()` focuses the right hub: a **selected highlight
+record-card**, else the **active PDF's Source Note** (resolved from the highlights' `Source Note` relation — the note +
+all its highlights + co-cited/connected docs all render as edges), else this canvas's record. No new writes — the Brain
+graphs the relations that already exist (Source Note matches the `source`→parents bucket; Reply To / Section / Drawing
+render as inferred edges). Both files `node --check` clean. Full canvas suite **88 files green**.
+
+**DOCUMENTED (still fleet-dependent — no local plugin API to hook):** Smart Connections semantic clustering
+(`153SXYV3N7P5E4ETW2SD7JY51C` — no local dir/window seam found), LLM-Wiki auto-enrich (wiki-maintain pipeline),
+QA provenance backlinks. Spaced-rep + Connected Margins (the Azlen "parallel pages, visibly connected" view): in flight.
+
 ## ✅ v1.176.0 — #21: cross-PDF argument assembly (+ the AI/graph differentiators documented) (2026-06-26)
 The gap analysis's final differentiator batch. **SHIPPED — cross-PDF argument assembly:** new command **"Plexus:
 Assemble highlights across all PDFs (argument map)"** (`ti-stack`) — `_loadAllHighlights` pulls EVERY highlight across

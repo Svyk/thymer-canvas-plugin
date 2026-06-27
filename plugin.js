@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.176.0';
+const PLEXUS_VERSION = '1.177.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1052,6 +1052,69 @@ function pxcParseLinkSuggestions(text) {
   return out;
 }
 function pxcParseStringArray(text) { let arr = null; try { arr = JSON.parse(text); } catch (_e) { const m = String(text == null ? '' : text).match(/\[[\s\S]*\]/); if (m) { try { arr = JSON.parse(m[0]); } catch (_e2) {} } } return Array.isArray(arr) ? arr.map((x) => String(x == null ? '' : x)) : []; }
+// AI SYNTHESIS: tolerant parse of the model's {thesis, themes:[{title, points:[{text, cites:[ids]}]}]} output. Coerces
+// shapes (string point → {text}, citations→cites), clamps lengths, drops empties. Pure + node-tested.
+function pxcParseSynthesis(text) {
+  let obj = null;
+  try { obj = JSON.parse(text); } catch (_e) { const m = String(text == null ? '' : text).match(/\{[\s\S]*\}/); if (m) { try { obj = JSON.parse(m[0]); } catch (_e2) {} } }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { thesis: '', themes: [] };
+  const thesis = String(obj.thesis || obj.summary || '').slice(0, 600).trim();
+  const themesIn = Array.isArray(obj.themes) ? obj.themes : [];
+  const themes = [];
+  for (const t of themesIn) {
+    if (!t || typeof t !== 'object') continue;
+    const title = String(t.title || t.theme || '').slice(0, 120).trim();
+    const ptsIn = Array.isArray(t.points) ? t.points : [];
+    const points = [];
+    for (const p of ptsIn) {
+      if (p == null) continue;
+      let ptext = '', cites = [];
+      if (typeof p === 'string') ptext = p;
+      else if (typeof p === 'object') { ptext = String(p.text || p.point || ''); const c = Array.isArray(p.cites) ? p.cites : (Array.isArray(p.citations) ? p.citations : []); for (const x of c) { const n = Number(x); if (Number.isInteger(n) && n >= 0) cites.push(n); } }
+      ptext = ptext.slice(0, 400).trim();
+      if (ptext) points.push({ text: ptext, cites: cites.slice(0, 12) });
+    }
+    if (title || points.length) themes.push({ title: title || 'Theme', points });
+  }
+  return { thesis, themes: themes.slice(0, 12) };
+}
+// AI SYNTHESIS: word-wrap a string to <= maxChars per line (inserts \n; measureText handles \n multi-line height).
+function pxcWrap(text, maxChars) {
+  const words = String(text == null ? '' : text).split(/\s+/).filter(Boolean); const lines = []; let cur = '';
+  for (const w of words) { if (!cur) cur = w; else if ((cur + ' ' + w).length <= maxChars) cur += ' ' + w; else { lines.push(cur); cur = w; } }
+  if (cur) lines.push(cur); return lines.join('\n');
+}
+// AI SYNTHESIS: pure 3-tier layout — Synthesis node (tier 0) → theme frames stacked vertically (tier 1, each holding its
+// wrapped point text) → cited highlight cards deduped in first-seen order (tier 2). Returns world-relative geometry +
+// per-point cited-card indices. No DOM; unit-tested. `syn` = pxcParseSynthesis output.
+function pxcSynthesisLayout(syn, opts) {
+  const o = opts || {};
+  const synW = o.synW || 300, synH = o.synH || 120, themeW = o.themeW || 320, cardW = o.cardW || 230, cardH = o.cardH || 64;
+  const colGap = o.colGap || 90, pad = o.pad || 14, lineH = o.lineH || 19, gap = o.gap || 16, wrapChars = o.wrapChars || 40;
+  const x0 = synW + colGap;                 // theme tier x
+  const x1 = x0 + themeW + colGap;          // card tier x
+  const cardOrder = [], cardIndex = new Map();
+  for (const t of (syn.themes || [])) for (const p of (t.points || [])) for (const c of (p.cites || [])) { if (!cardIndex.has(c)) { cardIndex.set(c, cardOrder.length); cardOrder.push(c); } }
+  const themes = []; let ty = 0;
+  for (const t of (syn.themes || [])) {
+    const points = []; let py = pad + lineH + 8;       // below the frame title row
+    for (const p of (t.points || [])) {
+      const nlines = Math.max(1, pxcWrap(p.text, wrapChars).split('\n').length);
+      const cardIdxs = (p.cites || []).map((c) => cardIndex.get(c)).filter((n) => n != null);
+      points.push({ text: p.text, cites: (p.cites || []).slice(), cardIdxs, y: py, h: nlines * lineH });
+      py += nlines * lineH + 10;
+    }
+    const fh = Math.max(cardH, py + pad);
+    themes.push({ title: t.title, frame: { x: x0, y: ty, w: themeW, h: fh }, points });
+    ty += fh + gap;
+  }
+  const themesH = Math.max(cardH, ty - gap);
+  const cards = cardOrder.map((hid, i) => ({ hid, idx: i, x: x1, y: i * (cardH + gap), w: cardW, h: cardH }));
+  const cardsH = Math.max(cardH, cards.length ? cards.length * (cardH + gap) - gap : cardH);
+  const totalH = Math.max(themesH, cardsH, synH);
+  const synthesis = { x: 0, y: Math.max(0, (totalH - synH) / 2), w: synW, h: synH };
+  return { synthesis, themes, cards, width: x1 + cardW, height: totalH };
+}
 // AI AUTO-CLUSTER: connected-components clustering — elements with cosine similarity > threshold join the same group
 // (single-linkage via union-find). Pure + node-tested; the on-device embedding lives in _aiAutoCluster.
 function pxcClusterByThreshold(vecs, threshold) {
@@ -5212,6 +5275,87 @@ class CanvasView {
     this.dirty = true; this.scheduleSave();
     try { this._fitToBounds({ x: ox, y: oy - 20, w: Math.max(lay.width, 1), h: Math.max(lay.height + 40, 1) }, 60); } catch (_e) {}
   }
+  // AI SYNTHESIS — "Synthesize this PDF's highlights": pull this PDF's typed highlights (by fingerprint), ask the model to
+  // group them into themes with a thesis (each point citing the highlight ids it draws on), then render a 3-tier argument
+  // map on the canvas — Synthesis node → theme frames → the cited highlight RECORD-CARDS, with arrows point→evidence. The
+  // synthesis is canvas content (persists in the Drawing's scene) and every claim is visibly grounded in its source
+  // highlight. Direct provider call via _aiComplete (key encrypted at rest). Additive + undoable + grouped.
+  async _synthesizePdf() {
+    const docId = this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas.', dismissible: true }); } catch (_e) {} return; }
+    const p1 = pages.find((p) => p.pdf && p.pdf.page === 1) || pages[0];
+    const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+    const srcName = (p1.pdf && p1.pdf.srcName) || 'PDF';
+    const hls = await this._loadPdfHighlights(fp);
+    if (this.destroyed) return;
+    if (hls.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: need 2+ highlights to synthesize — highlight or extract a few first.', dismissible: true }); } catch (_e) {} return; }
+    const CAP = 120, use = hls.slice(0, CAP); // bound the prompt; the cited cards are a subset anyway
+    const payload = use.map((h, i) => ({ id: i, page: h.page || null, section: h.section || '', code: h.code || '', text: (h.title + (h.note ? ' — ' + h.note : '')).slice(0, 300) }));
+    try { this.plugin.ui.addToaster({ title: 'Plexus: synthesizing ' + use.length + ' highlights…', dismissible: true }); } catch (_e) {}
+    const SYS = 'You synthesize a researcher\'s highlights from ONE document into a structured argument map. Input: a JSON array of highlights {id,page,section,code,text} (code is one of claim/evidence/objection/method/question/definition, or empty). Output ONLY a JSON object {"thesis":"<1-2 sentence overall thesis of the document as the highlights reveal it>","themes":[{"title":"<short theme name>","points":[{"text":"<a synthesized point in your own words>","cites":[<the highlight ids this point is grounded in>]}]}]}. Group the highlights into 2-6 coherent themes. EVERY point must cite the highlight ids it draws on. Be faithful: synthesize only what the highlights support, never invent.';
+    let txt = null; try { txt = await this._aiComplete(SYS, JSON.stringify(payload)); } catch (_e) {}
+    if (this.destroyed) return;
+    if (txt == null) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI request failed or no key set (Settings → AI provider).', dismissible: true }); } catch (_e) {} return; }
+    const syn = pxcParseSynthesis(txt);
+    const N = use.length; for (const t of syn.themes) for (const p of t.points) p.cites = (p.cites || []).filter((c) => c < N); // review HIGH: drop hallucinated out-of-range cite ids BEFORE layout so every card maps to a real highlight (cardOrder/cardIdxs both derive from cites — filter once, stay in sync)
+    if (!syn.themes.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: the model returned no themes — try again.', dismissible: true }); } catch (_e) {} return; }
+    this._renderSynthesis(syn, use, srcName);
+    const nCited = new Set(); for (const t of syn.themes) for (const p of t.points) for (const c of (p.cites || [])) if (use[c]) nCited.add(c);
+    try { this.plugin.ui.addToaster({ title: 'Synthesized ' + syn.themes.length + ' theme' + (syn.themes.length === 1 ? '' : 's') + ' grounded in ' + nCited.size + ' highlight' + (nCited.size === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+  }
+  // AI SYNTHESIS render: lay out pxcSynthesisLayout as canvas elements — a Synthesis text node, a titled frame per theme
+  // holding its wrapped point text, the cited highlight record-cards (deduped, colored by Code/Color), Synthesis→theme
+  // arrows + faint point→evidence arrows. Additive + undoable + grouped (hlsyn); a re-run lands beside any prior map.
+  _renderSynthesis(syn, hls, srcName) {
+    const lay = pxcSynthesisLayout(syn, {});
+    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    let ox = c.x - lay.width / 2, oy = c.y - lay.height / 2;
+    let maxRight = -Infinity; for (const el of (this.scene.elements || [])) { if (el && !el.isDeleted && el.groupIds && el.groupIds.length) { const g = String(el.groupIds[0]); if (g.indexOf('hlexp') === 0 || g.indexOf('hlsyn') === 0) maxRight = Math.max(maxRight, el.x + Math.abs(el.width || 0)); } }
+    if (isFinite(maxRight)) ox = maxRight + 80;
+    const gid = 'hlsyn' + Math.floor(this._now()).toString(36);
+    const add = (el) => { el.groupIds = [gid]; this.scene.elements.push(el); };
+    const sNode = makeText(ox + lay.synthesis.x, oy + lay.synthesis.y, { fontSize: 18, stroke: '#7c5cff' });
+    sNode.text = '🧠 Synthesis — ' + srcName + (syn.thesis ? '\n\n' + pxcWrap(syn.thesis, 34) : ''); try { measureText(sNode); } catch (_e) {} add(sNode);
+    const synCx = ox + lay.synthesis.x + lay.synthesis.w, synCy = oy + lay.synthesis.y + lay.synthesis.h / 2;
+    const cardEls = lay.cards.map((cd) => { const h = hls[cd.hid]; const rc = makeRecordCard(ox + cd.x, oy + cd.y, cd.w, cd.h, h && h.guid); const hex = (h && (PXC_CODE_COLOR[h.code] || PXC_HLCOLOR_HEX[h.color])) || null; if (hex) rc.strokeColor = hex; add(rc); return { cx: ox + cd.x, cy: oy + cd.y + cd.h / 2 }; });
+    for (const t of lay.themes) {
+      const fr = makeFrame(ox + t.frame.x, oy + t.frame.y, t.frame.w, t.frame.h); fr.name = t.title; add(fr);
+      const e = makeLinear(0, 0, 'arrow', { stroke: '#9aa3b2', strokeWidth: 1.5 }); e.points = [[synCx, synCy], [ox + t.frame.x, oy + t.frame.y + t.frame.h / 2]]; e.endArrowhead = 'arrow'; e.roughness = 0.5; linearBBox(e); add(e);
+      for (const p of t.points) {
+        const pt = makeText(ox + t.frame.x + 14, oy + t.frame.y + p.y, { fontSize: 13, stroke: '#1e1e1e' }); pt.text = '• ' + pxcWrap(p.text, 40); try { measureText(pt); } catch (_e) {} add(pt);
+        for (const ci of (p.cardIdxs || [])) { const card = cardEls[ci]; if (!card) continue; const a = makeLinear(0, 0, 'arrow', { stroke: '#7c5cff', strokeWidth: 1 }); a.points = [[ox + t.frame.x + t.frame.w, oy + t.frame.y + p.y + 8], [card.cx, card.cy]]; a.endArrowhead = 'arrow'; a.roughness = 0.4; a.opacity = 0.65; linearBBox(a); add(a); }
+      }
+    }
+    this.dirty = true; this.scheduleSave();
+    try { this._fitToBounds({ x: ox - 20, y: oy - 20, w: Math.max(lay.width + 40, 1), h: Math.max(lay.height + 40, 1) }, 60); } catch (_e) {}
+  }
+  // CITATION GRAPH (#24): open the Plexus Brain graph focused on the right hub — a selected highlight record-card, else
+  // the active PDF's Source Note (the note + all its highlights + co-cited/connected docs all render as edges), else this
+  // canvas's own record. Completes the Canvas→Brain direction (the reverse of dropSubgraph). Brain graphs the relations
+  // that already exist (Source Note / Reply To thread / Section / Drawing) — no new writes here.
+  async _openInBrain() {
+    const B = (typeof window !== 'undefined') && window.__plexusBrain;
+    if (!B || !B.focus) { try { this.plugin.ui.addToaster({ title: 'Plexus: enable the Plexus Brain plugin to graph citations.', dismissible: true }); } catch (_e) {} return; }
+    let guid = null, label = '';
+    if (this.selected.size === 1) { const a = this._byId(this.selected.values().next().value); if (a && a.type === 'record' && a.recordGuid && !a.isDeleted) { guid = a.recordGuid; label = 'this highlight'; } }
+    if (!guid) {
+      const docId = this._activePdfDocId();
+      const pages = docId ? this._pdfPagesOf(docId) : [];
+      const fp = (pages.find((p) => p.pdf && p.pdf.fingerprint) || { pdf: {} }).pdf.fingerprint || null;
+      if (fp) { try {
+        const col = await this.plugin._pdfHlCollection();
+        if (col) { const recs = await col.getAllRecords() || [];
+          for (const r of recs) { if (this._propText(r, 'PDF Fingerprint') !== fp) continue; let sn = []; try { sn = pxcRelValues(r.prop('Source Note')); } catch (_e) {} if (sn.length) { guid = sn[0]; label = 'this PDF\'s source note'; break; } }
+        }
+      } catch (_e) {} }
+    }
+    if (this.destroyed) return;
+    if (!guid && this.recordGuid) { guid = this.recordGuid; label = 'this canvas'; }
+    if (!guid) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing to graph — select a highlight card or open a PDF with highlights.', dismissible: true }); } catch (_e) {} return; }
+    try { await B.focus(guid); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Opened the citation graph for ' + label + ' in Plexus Brain.', dismissible: true }); } catch (_e) {}
+  }
   _closePdfOutline() { if (this._pdfOutlineEl) { try { this._pdfOutlineEl.remove(); } catch (_e) {} this._pdfOutlineEl = null; } }
   _jumpToPdfPage(docId, page) { const el = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === page); if (!el) return; this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); }
   _activePdfDocId() { // the selected PDF page's doc, else the first PDF doc on the board
@@ -9000,6 +9144,8 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Open citation graph in Plexus Brain', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._openInBrain(); } }); // #24: focus the selected highlight / this PDF's source note in the Brain graph. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit to selection', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToSelection(); } }); // C19: frame the camera to the current selection. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Fit whole canvas', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._fitToScene(); } }); // C21: expose the (existing, reviewed) fit-whole-scene action as a command — completes the fit set (scene / PDF / selection)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Text to path (flow text along a line)', icon: 'ti-vector', onSelected: () => { const v = this._activeView(); if (v) v._textToPath(); } });
