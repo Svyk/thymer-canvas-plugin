@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.192.0';
+const PLEXUS_VERSION = '1.193.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1204,6 +1204,18 @@ function pxcParseExtractJSON(raw) {
   if (body.charAt(0) !== '{') { const i = body.indexOf('{'), j = body.lastIndexOf('}'); if (i >= 0 && j > i) body = body.slice(i, j + 1); }
   try { const o = JSON.parse(body); if (o && typeof o === 'object') return o; } catch (_e) {}
   return { kind: 'text', markdown: s };
+}
+// AI EXTRACT (page parse): deterministic dedup key for a parsed block so a re-parse REPLACES its records (never duplicates). Pure.
+function pxcParseBlockKey(fp, page, idx) { return 'parse:' + (fp || '') + ':p' + (page == null ? 0 : page) + ':b' + (idx == null ? 0 : idx); }
+// AI EXTRACT (page parse): render one parsed block to Markdown (table→GFM, equation→$$latex$$, figure→"> caption", text→md).
+// Used for BOTH the per-block record's Extracted Text and the joined page-transcript card. Clamps an unknown kind to text. Pure.
+function pxcBlockToMd(b) {
+  if (!b || typeof b !== 'object') return '';
+  const kind = ['table', 'equation', 'figure', 'text'].indexOf(b.kind) >= 0 ? b.kind : 'text';
+  if (kind === 'table') return String(b.markdown || b.csv || '');
+  if (kind === 'equation') return b.latex ? ('$$' + String(b.latex) + '$$') : String(b.markdown || '');
+  if (kind === 'figure') return b.caption ? ('> ' + String(b.caption)) : '';
+  return String(b.markdown || b.text || '');
 }
 // F3 HEPTABASE SCROLL VIEW: gapless single-column page layout (pure). Optionally normalize each page to `uniformW` (keep
 // aspect) for a clean reading lane. Returns the new {x,y,w,h} per page (contiguous, centered on cx). Node-tested.
@@ -4091,7 +4103,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._parsing) { this._parseCancel = true; } if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -5918,6 +5930,7 @@ class CanvasView {
     mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
     mk('✂ Figure', 'Extract a region (chart/figure) of this page as an image', () => this._startPdfFigureExtract()); // #32: surface the existing extract-region command on the page toolbar
     mk('✨ Extract', 'AI-extract a snipped region → table (Markdown+CSV) / equation (LaTeX) / figure / text', () => this._startAiExtract()); // Heptabase-parser port: vision-LLM on the region → typed, page-anchored, queryable
+    mk('🧠 Parse', 'AI-parse this whole page → ordered typed blocks (queryable records + a Markdown transcript card)', () => this._parsePdfPage(this._byId(this._pdfNavId) || page, { cards: true })); // Heptabase "Parse" port (single page; whole-PDF via the command palette)
     mk('🖼 Evidence', 'Gallery of every figure + highlight — click to cycle group by page → code → colour', () => { const order = ['page', 'code', 'color']; const cur = order[(order.indexOf(this._lightboxBy || '') + 1) % 3] || 'page'; this._lightboxBy = cur; this._pdfLightbox(page.pdf.docId, { by: cur }); }); // F4: evidence/figure lightbox; repeated clicks regroup in place
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
@@ -8777,16 +8790,110 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: '✨ Extracted ' + kind + (copied ? ' — copied to the clipboard' : '') + ' · ' + m, dismissible: true }); } catch (_e) {}
   }
   // AI EXTRACT: drop the extracted content as a text card beside the source figure (or canvas center if the figure is gone).
-  _dropExtractCard(anchorEl, kind, text) {
-    const icon = kind === 'table' ? '▦' : kind === 'equation' ? '∑' : kind === 'figure' ? '🖼' : '¶';
+  _dropExtractCard(anchorEl, kind, text, cap) {
+    const icon = kind === 'table' ? '▦' : kind === 'equation' ? '∑' : kind === 'figure' ? '🖼' : kind === 'page' ? '📄' : '¶';
     let x, y;
     if (anchorEl && !anchorEl.isDeleted) { const b = this._elBBox(anchorEl); x = (b ? b.x + (b.w || 0) : anchorEl.x) + 24; y = b ? b.y : anchorEl.y; }
     else { const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); x = c.x; y = c.y; }
     const el = makeText(this._snap(x), this._snap(y), { fontSize: 13, stroke: '#7c5cff' });
-    el.text = icon + ' ' + String(kind).toUpperCase() + '\n\n' + String(text || '').slice(0, 1400);
+    el.text = icon + ' ' + String(kind).toUpperCase() + '\n\n' + String(text || '').slice(0, cap || 1400);
     el.wrapW = 420; measureText(el); // wrapW (not width) is the wrap field — measureText overwrites width with the longest-line px otherwise
     this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this.dirty = true; this.scheduleSave();
     return el;
+  }
+  // AI EXTRACT (page parse): index this PDF's existing parsed-block records by their deterministic key → so a re-parse REPLACES
+  // (never duplicates), and we can skip already-parsed pages. Returns {map: key→rec, pages: Set<pageNum>}. One getAllRecords call.
+  async _parseRecIndex(col, fp) {
+    const map = new Map(), pages = new Set();
+    let recs = []; try { recs = (await col.getAllRecords()) || []; } catch (_e) {}
+    const prefix = 'parse:' + (fp || '') + ':';
+    for (const r of recs) {
+      if (!r) continue;
+      const hid = this._propText(r, 'Highlight Id') || '';
+      if (hid.indexOf(prefix) !== 0) continue;
+      map.set(hid, r);
+      const mm = hid.match(/:p(\d+):b/); if (mm) pages.add(parseInt(mm[1], 10));
+    }
+    return { map, pages };
+  }
+  // AI EXTRACT (Heptabase "Parse" port): render the WHOLE page hi-DPI, segment it into ordered typed blocks via the vision LLM,
+  // and write one queryable PDF Highlights record per block (Extracted Kind/Text + Block Index + Page, deduped by a deterministic
+  // key so re-parse replaces). opts.cards (single-page only) also drops ONE joined Markdown "page transcript" card beside the page.
+  async _parsePdfPage(pageEl, opts) {
+    opts = opts || {};
+    if (!pageEl || !pageEl.pdf) { try { this.plugin.ui.addToaster({ title: 'Plexus: select a PDF page to parse.', dismissible: true }); } catch (_e) {} return 0; }
+    const docId = pageEl.pdf.docId, page = pageEl.pdf.page, fp = pageEl.pdf.fingerprint || '';
+    const col = opts.col || await this.plugin._pdfHlCollection();
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF Highlights collection — cannot store the parse.', dismissible: true }); } catch (_e) {} return 0; }
+    if (!opts.silent) { try { this.plugin.ui.addToaster({ title: '🧠 Parsing page ' + page + ' with AI…', dismissible: true }); } catch (_e) {} }
+    let blob = null; try { blob = await this._pdfRenderRegionHiDpi(docId, page, { rx: 0, ry: 0, rw: 1, rh: 1 }); } catch (_e) {}
+    if (!blob) { try { blob = await this._snapshotElement(pageEl); } catch (_e) {} } // fallback: the page raster (pre-retain PDFs)
+    if (!blob || this.destroyed) return 0;
+    const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(String(fr.result || '')); fr.onerror = () => r(''); fr.readAsDataURL(blob); });
+    if (!dataUrl || this.destroyed) return 0;
+    let raw = null; try { raw = await this._aiVision(pxcExtractSysPrompt('page'), 'Parse this PDF page into ordered blocks. Return only the JSON.', dataUrl, this._aiStrongVisionModel()); } catch (_e) {}
+    if (this.destroyed || this._parseCancel) return 0; // bail if Esc cancelled DURING the (non-abortable) vision request — don't write a page of records after the user stopped
+    if (!raw) { if (!opts.silent) { try { this.plugin.ui.addToaster({ title: 'Plexus: page ' + page + ' — AI returned nothing (check the provider + key).', dismissible: true }); } catch (_e) {} } return 0; }
+    const parsed = pxcParseExtractJSON(raw);
+    const blocks = Array.isArray(parsed.blocks) ? parsed.blocks : []; // page mode demands {blocks:[...]}; a non-array reply (prose dump via the parse fallback) is malformed → treat as nothing-parsed, don't persist the raw model output
+    if (!blocks.length) { if (!opts.silent) { try { this.plugin.ui.addToaster({ title: 'Plexus: page ' + page + ' — nothing parsed.', dismissible: true }); } catch (_e) {} } return 0; }
+    const idx = opts.index || (await this._parseRecIndex(col, fp)).map;
+    const section = this._sectionForPage(docId, page);
+    let made = 0; const mdParts = [];
+    for (let i = 0; i < blocks.length; i++) {
+      if (this.destroyed) break;
+      const b = blocks[i] || {};
+      const kind = ['table', 'equation', 'figure', 'text'].indexOf(b.kind) >= 0 ? b.kind : 'text';
+      const md = pxcBlockToMd(b); mdParts.push(md);
+      const key = pxcParseBlockKey(fp, page, i);
+      let rec = idx.get(key);
+      if (!rec) { let g = null; try { g = col.createRecord(((pageEl.pdf.srcName || 'PDF') + ' · p' + page + ' #' + (i + 1) + ' (' + kind + ')').slice(0, 60)); } catch (_e) {} if (typeof g !== 'string') continue; rec = await getRecordPoll(this.plugin, g, 8); if (!rec) continue; idx.set(key, rec); }
+      try { rec.prop('Highlight Id').set(key); } catch (_e) {}
+      try { rec.prop('Extracted Kind').setChoice(kind); } catch (_e) {}
+      try { rec.prop('Extracted Text').set(md); } catch (_e) {}
+      try { rec.prop('Block Index').set(i); } catch (_e) {}
+      try { rec.prop('Type').setChoice('area'); } catch (_e) {}
+      try { rec.prop('Page').set(page); } catch (_e) {}
+      try { rec.prop('Section').set(section); } catch (_e) {}
+      try { rec.prop('PDF Fingerprint').set(fp); } catch (_e) {}
+      try { rec.prop('PDF Name').set(pageEl.pdf.srcName || ''); } catch (_e) {}
+      try { rec.prop('Status').setChoice('open'); } catch (_e) {}
+      try { await this._setRel(rec, 'Drawing', this.recordGuid); } catch (_e) {}
+      made++;
+    }
+    // RE-PARSE REPLACES: a prior parse may have made MORE blocks than this one. Surplus records (block index ≥ the new count) on
+    // THIS page would otherwise persist with stale text and keep matching every query. No delete API → archive + blank them.
+    for (const [k, rec] of idx) { const mm = k.match(/^parse:.*:p(\d+):b(\d+)$/); if (!mm || parseInt(mm[1], 10) !== page || parseInt(mm[2], 10) < blocks.length) continue; try { rec.prop('Status').setChoice('archived'); } catch (_e) {} try { rec.prop('Extracted Text').set(''); } catch (_e) {} }
+    if (opts.cards && made) { this._dropExtractCard(pageEl, 'page', mdParts.filter(Boolean).join('\n\n'), 4000); } // single-page: one joined Markdown transcript card beside the page
+    if (!opts.silent) { try { this.plugin.ui.addToaster({ title: '🧠 Parsed page ' + page + ': ' + made + ' block(s).', dismissible: true }); } catch (_e) {} }
+    return made;
+  }
+  // AI EXTRACT: parse EVERY page of a PDF (records only — no per-page cards, to avoid flooding the board). Confirms with a page
+  // count + rough cost estimate, SKIPS already-parsed pages (don't re-bill), runs sequentially, and aborts on Esc (this._parseCancel).
+  async _parsePdfAll(docId) {
+    docId = docId || this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas to parse.', dismissible: true }); } catch (_e) {} return; }
+    if (this._parsing) { try { this.plugin.ui.addToaster({ title: 'Plexus: a PDF parse is already running.', dismissible: true }); } catch (_e) {} return; }
+    const col = await this.plugin._pdfHlCollection();
+    if (!col) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF Highlights collection — cannot store the parse.', dismissible: true }); } catch (_e) {} return; }
+    const fp = pages[0].pdf.fingerprint || '';
+    const ix = await this._parseRecIndex(col, fp);
+    const todo = pages.filter((p) => !ix.pages.has(p.pdf.page));
+    if (!todo.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: all ' + pages.length + ' page(s) already parsed.', dismissible: true }); } catch (_e) {} return; }
+    const est = (todo.length * 0.02).toFixed(2);
+    const go = await this._promptText('Parse ' + todo.length + ' page(s) with AI — roughly $' + est + ' (' + (pages.length - todo.length) + ' already done). Type "go" to proceed:', 'go');
+    if (go !== 'go') { try { this.plugin.ui.addToaster({ title: 'Plexus: PDF parse cancelled.', dismissible: true }); } catch (_e) {} return; }
+    this._parsing = true; this._parseCancel = false;
+    let done = 0, blocks = 0;
+    for (const p of todo) {
+      if (this.destroyed || this._parseCancel) break;
+      let n = 0; try { n = await this._parsePdfPage(p, { col, index: ix.map, silent: true }); } catch (_e) {}
+      done++; blocks += n;
+      try { this.plugin.ui.addToaster({ title: '🧠 Parsing… ' + done + '/' + todo.length + ' page(s), ' + blocks + ' block(s) (Esc to stop)', dismissible: true }); } catch (_e) {}
+    }
+    this._parsing = false;
+    try { this.plugin.ui.addToaster({ title: '🧠 PDF parse ' + (this._parseCancel ? 'stopped' : 'complete') + ': ' + done + '/' + todo.length + ' page(s), ' + blocks + ' block(s).', dismissible: true }); } catch (_e) {}
   }
   // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
   async _snipToClipboard(el) {
@@ -9978,6 +10085,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)

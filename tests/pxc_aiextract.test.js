@@ -46,4 +46,32 @@ function pxcParseExtractJSON(raw) {
 { const o = pxcParseExtractJSON('{"kind":"table","markdown":"| x |\\n|---|\\n| 1 |","csv":"x\\n1"}');
   ok(o.markdown.indexOf('|') === 0 && o.csv === 'x\n1', 'table: markdown + csv both present'); }
 
+// ── page-parse pure helpers (verbatim replicas) ──
+function pxcParseBlockKey(fp, page, idx) { return 'parse:' + (fp || '') + ':p' + (page == null ? 0 : page) + ':b' + (idx == null ? 0 : idx); }
+function pxcBlockToMd(b) {
+  if (!b || typeof b !== 'object') return '';
+  const kind = ['table', 'equation', 'figure', 'text'].indexOf(b.kind) >= 0 ? b.kind : 'text';
+  if (kind === 'table') return String(b.markdown || b.csv || '');
+  if (kind === 'equation') return b.latex ? ('$$' + String(b.latex) + '$$') : String(b.markdown || '');
+  if (kind === 'figure') return b.caption ? ('> ' + String(b.caption)) : '';
+  return String(b.markdown || b.text || '');
+}
+
+// dedup key: deterministic, unique per (fp,page,idx), stable across re-parse
+{ ok(pxcParseBlockKey('FP', 3, 0) === 'parse:FP:p3:b0', 'block key shape');
+  ok(pxcParseBlockKey('FP', 3, 1) !== pxcParseBlockKey('FP', 3, 0), 'distinct idx → distinct key');
+  ok(pxcParseBlockKey('FP', 4, 0) !== pxcParseBlockKey('FP', 3, 0), 'distinct page → distinct key');
+  ok(pxcParseBlockKey('FP', 3, 2) === pxcParseBlockKey('FP', 3, 2), 'same inputs → same key (re-parse replaces)');
+  ok(pxcParseBlockKey('', null, null) === 'parse::p0:b0', 'null-safe defaults');
+  ok((pxcParseBlockKey('FP', 3, 0).match(/:p(\d+):b/) || [])[1] === '3', 'page parses back out of the key (for parsed-pages set)'); }
+
+// block → markdown, per kind
+{ ok(pxcBlockToMd({ kind: 'table', markdown: '| a |' }) === '| a |', 'table → markdown');
+  ok(pxcBlockToMd({ kind: 'table', csv: 'a,b' }) === 'a,b', 'table → csv fallback');
+  ok(pxcBlockToMd({ kind: 'equation', latex: 'E=mc^2' }) === '$$E=mc^2$$', 'equation → $$latex$$');
+  ok(pxcBlockToMd({ kind: 'figure', caption: 'A chart' }) === '> A chart', 'figure → > caption');
+  ok(pxcBlockToMd({ kind: 'text', markdown: '# H' }) === '# H', 'text → markdown');
+  ok(pxcBlockToMd({ kind: 'chart', markdown: 'x' }) === 'x', 'unknown kind → text path');
+  ok(pxcBlockToMd(null) === '' && pxcBlockToMd('nope') === '', 'non-object → empty, never throws'); }
+
 if (fail) { console.error(fail + ' FAILED'); process.exit(1); } else { console.log('pxc_aiextract: all passed'); }

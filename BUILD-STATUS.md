@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.193.0 — AI Parse: whole-page / whole-PDF → typed blocks (Heptabase "Parse" port) (2026-06-27)
+New **🧠 Parse** toolbar button (single page) + **"Parse entire PDF (AI)"** command. Renders each page hi-DPI, sends it to the
+vision LLM with a "segment into ordered reading-order blocks" prompt, and writes **one queryable PDF Highlights record per block**
+(`Extracted Kind` + `Extracted Text` + `Block Index` + Page/Section/Fingerprint), deduped by a deterministic key
+`parse:<fp>:p<page>:b<idx>` so **re-parse REPLACES** (and a shrinking re-parse archives+blanks the surplus stale records). Single-
+page parse also drops ONE joined **Markdown transcript card** beside the page (Heptabase stores parsed PDFs "in clean Markdown").
+Whole-PDF: confirm + rough cost estimate, **skips already-parsed pages** (don't re-bill), sequential, **Esc aborts** (checked between
+pages/blocks AND right after each page's vision request). Pure `pxcParseBlockKey` + `pxcBlockToMd` (node-tested, +13 cases).
+**Adversarial review (code-reviewer): 1 HIGH (shrinking-re-parse orphans → prune/archive), 1 MED (cancel can't interrupt the
+in-flight page → re-check after the await), 3 LOW (count display, prose-dump guard = blocks-array-only, card cap 8000→4000) — ALL
+FIXED → SHIP.** Ship #3 of 5 in the Heptabase-port plan; suite 8/8 green.
+
 ## ✅ v1.192.0 — AI Extract: snip a PDF region → typed extraction (Heptabase-parser port) (2026-06-27)
 New **✨ Extract** toolbar button + command. Box a region of a PDF page → it's lifted as a figure (canvas image + clipboard +
 queryable mirror), re-rendered hi-DPI, and sent to the vision LLM (`_aiVision`, now with an optional `modelOverride`) with a
