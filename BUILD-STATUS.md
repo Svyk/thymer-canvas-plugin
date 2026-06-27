@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.185.0 — #34 rotation-aware region highlight + #35 snip→clipboard parity (2026-06-27)
+- **#34 — rotation-aware:** `_drawPdfRegionHighlights` + `_regionHlAt` now resolve the region via `_imgRegionQuad` (4
+  corners rotated by the page's `angle`) and draw a polygon / hit-test via `pointInPoly`, instead of the axis-aligned
+  `_imgRegionWorld` AABB. A region highlight now sits + clicks correctly on a rotated PDF page (the deferred #32 LOW); for
+  `angle===0` it's a strict superset of the old box → no regression for the common case.
+- **#35 — snip → clipboard (canvas-snip parity):** `_extractPdfFigure` now also copies the lifted figure to the SYSTEM
+  clipboard (`_snipToClipboard` → `_snapshotElement` → `ClipboardItem`, best-effort) so you can paste it anywhere; the figure
+  stays a normal canvas image element (select → **Cite** drops a reference into a note), matching the canvas image-snip.
+  **Known tradeoff (NOT yet done):** the snip is a crop of the page raster (`pdfScale=2`, ~1200px/page), so a region snipped
+  while zoomed-in a lot is only as crisp as that raster. A TRUE high-DPI re-render needs retaining the PDF blob + re-opening
+  it on snip (the doc is `destroy()`ed after import) — a storage-cost follow-up to offer the user.
+
 ## ✅ v1.184.0 — #32 On-canvas PDF region-highlight + extract tools in the page toolbar (2026-06-27)
 The user wanted highlight + extract-region tools right on the page (not buried in the palette). Two new buttons in the
 PDF page nav toolbar (beside ⤢ Grid / ▤ Stack / 📖 Reader): **"✦ Highlight"** and **"✂ Figure"**.

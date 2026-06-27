@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.184.0';
+const PLEXUS_VERSION = '1.185.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -8542,8 +8542,15 @@ class CanvasView {
     el.pdfFigure = { docId: pageEl.pdf.docId || null, page: pageEl.pdf.page || null, fingerprint: pageEl.pdf.fingerprint || null, srcName: pageEl.pdf.srcName || null, frac: frac || null }; // A1 tag → A2 mirror
     this.dirty = true; this.scheduleSave();
     try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(el.id); } catch (_e) {} // A2 (wired later): enqueue the durable PDF Highlights mirror
-    try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + ' region as a figure.', dismissible: true }); } catch (_e) {}
+    // SNIP PARITY (canvas image-snip): copy the lifted figure to the system clipboard so it can be pasted anywhere; it also
+    // stays a normal canvas image element (select it → Cite to drop a reference into a note). Best-effort (clipboard may be blocked).
+    this._snipToClipboard(el).then((ok) => { try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + ' as a figure' + (ok ? ' — copied to the clipboard.' : '.'), dismissible: true }); } catch (_e) {} });
     return el;
+  }
+  // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
+  async _snipToClipboard(el) {
+    try { const blob = await this._snapshotElement(el); if (blob && navigator.clipboard && window.ClipboardItem) { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); return true; } } catch (_e) {}
+    return false;
   }
   // REGION HIGHLIGHT (A3): pick a colour, then box a region of a PDF page → a translucent COLOURED overlay glued to the page
   // region (resolved live from frac each frame, so it tracks pan/zoom/rotate — a NON-element layer, no hit-test/lasso/export
@@ -8598,17 +8605,18 @@ class CanvasView {
     for (const r of regions) {
       if (r.deleted) continue;
       const pageEl = this._pdfPagesOf(r.docId).find((p) => p.pdf && p.pdf.page === r.page); if (!pageEl) continue;
-      const rw = this._imgRegionWorld(pageEl, r.frac); if (!rw || !isFinite(rw.x)) continue;
+      const quad = this._imgRegionQuad(pageEl, r.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue; // rotation-aware: 4 corners rotated by the page's angle
       const hex = PXC_HLCOLOR_HEX[r.color] || '#eab308';
-      ctx.globalAlpha = 0.26; ctx.fillStyle = hex; ctx.fillRect(rw.x, rw.y, rw.w, rw.h);
-      ctx.globalAlpha = 0.85; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hex; ctx.strokeRect(rw.x, rw.y, rw.w, rw.h);
+      const path = () => { ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y); ctx.closePath(); };
+      ctx.globalAlpha = 0.26; ctx.fillStyle = hex; path(); ctx.fill();
+      ctx.globalAlpha = 0.85; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hex; path(); ctx.stroke();
     }
     ctx.globalAlpha = 1; ctx.restore();
   }
-  // The topmost region highlight under a world point (for the dblclick recolour/delete menu).
+  // The topmost region highlight under a world point (for the dblclick recolour/delete menu). Rotation-aware (point-in-quad).
   _regionHlAt(wx, wy) {
     const regions = this._pdfHlRegions; if (!regions) return null;
-    for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.deleted) continue; const pageEl = this._pdfPagesOf(r.docId).find((p) => p.pdf && p.pdf.page === r.page); if (!pageEl) continue; const rw = this._imgRegionWorld(pageEl, r.frac); if (rw && isFinite(rw.x) && wx >= rw.x && wx <= rw.x + rw.w && wy >= rw.y && wy <= rw.y + rw.h) return r; }
+    for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.deleted) continue; const pageEl = this._pdfPagesOf(r.docId).find((p) => p.pdf && p.pdf.page === r.page); if (!pageEl) continue; const quad = this._imgRegionQuad(pageEl, r.frac); if (quad && quad.length && isFinite(quad[0].x) && pointInPoly(wx, wy, quad.map((p) => [p.x, p.y]))) return r; }
     return null;
   }
   _regionHlMenu(region, sx, sy) {
