@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.170.0';
+const PLEXUS_VERSION = '1.171.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -18,6 +18,7 @@ const PANEL_ID = 'plexus-canvas';
 const GALLERY_PANEL_ID = 'plexus-gallery';
 const DRAWINGS_COLLECTION = 'Plexus Drawings';
 const COMMENTS_COLLECTION = 'Canvas Comments'; // C1: the durable mirror for anchored comments (created via MCP; the plugin only writes records)
+const PDF_HIGHLIGHTS_COLLECTION = 'PDF Highlights'; // A2: the durable, queryable mirror for PDF figures/highlights (created via MCP; plugin only writes records)
 const SCENE_SCHEMA = 1;
 const SCENE_FILENAME = 'plexus-scene.json'; // sentinel: the file line item that carries a record's scene
 // SCALE Phase 2: image-asset anchoring is SHARDED across these many-file properties on the backing drawing. This is a
@@ -4926,6 +4927,94 @@ class CanvasView {
     }
     if (changed) { this.dirty = true; this.scheduleSave(); }
   }
+  // ── A2: durable PDF Highlights mirror (scene figure element = hot source; a "PDF Highlights" record = queryable, cross-surface).
+  // Mirrors el.pdfFigure-tagged elements (from _extractPdfFigure). The record OUTLIVES the canvas figure (a highlight is a
+  // first-class record), so deleting the figure does NOT trash the record — create + idempotent sync + cold-start rejoin only.
+  _schedulePdfHlMirror(id) {
+    if (this.destroyed || !id) return;
+    if (!this._pdfHlMirrorQ) this._pdfHlMirrorQ = new Set();
+    this._pdfHlMirrorQ.add(id);
+    if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT);
+    this._pdfHlMirrorT = setTimeout(() => { this._pdfHlMirrorT = null; this._flushPdfHlMirror(); }, 800);
+  }
+  async _flushPdfHlMirror() {
+    if (this.destroyed) return;
+    const q = this._pdfHlMirrorQ; this._pdfHlMirrorQ = new Set(); if (!q || !q.size) return;
+    for (const id of q) { try { const el = (this.scene.elements || []).find((e) => e && e.id === id && e.pdfFigure && !e.isDeleted); if (el) await this._mirrorPdfHl(el); } catch (_e) {} if (this.destroyed) return; } // !isDeleted: an extract-then-quick-delete inside the 800ms debounce must NOT mint a stray record (review LOW; matches the reconcile filter)
+  }
+  // The C26 outline section a page falls under = the title of the last outline entry whose page ≤ the figure's page.
+  _sectionForPage(docId, page) {
+    try {
+      const ol = (this.scene.appState && this.scene.appState.pdfOutlines && this.scene.appState.pdfOutlines[docId]) || null;
+      if (!ol || !ol.length || !page) return '';
+      let best = '';
+      for (const it of ol) { if (!it || it.page == null) continue; if (it.page <= page) best = it.title || best; else break; }
+      return best || '';
+    } catch (_e) { return ''; }
+  }
+  // Mirror ONE extracted figure to its PDF Highlights record. Create-once (in-flight guarded) → reconcile keys FIRST →
+  // create-only props (Created At, Highlight Id, the uploaded figure image) → idempotent property sync. Scene stays source of truth.
+  async _mirrorPdfHl(el) {
+    if (!el || !el.pdfFigure) return;
+    const col = await this.plugin._pdfHlCollection(); if (!col) return; // no collection → scene-only, no-op
+    const sid = el.id, fig = el.pdfFigure || {};
+    if (!this._pdfHlInflight) this._pdfHlInflight = new Map();
+    if (this._pdfHlInflight.has(sid)) { try { await this._pdfHlInflight.get(sid); } catch (_e) {} } // serialize concurrent runs for the same figure (create-once)
+    const run = (async () => {
+      let rec = null, created = false;
+      if (el.pdfFigureGuid) { try { rec = await getRecordPoll(this.plugin, el.pdfFigureGuid, 4); } catch (_e) {} }
+      if (!rec) {
+        const title = ((fig.srcName || 'PDF') + ' · p' + (fig.page || '?') + ' figure').replace(/\s+/g, ' ').trim().slice(0, 60) || 'PDF figure';
+        let g = null; try { g = col.createRecord(title); } catch (_e) {}
+        if (typeof g !== 'string') return;
+        rec = await getRecordPoll(this.plugin, g, 8); if (!rec) return;
+        created = true; el.pdfFigureGuid = g; this.dirty = true; this.scheduleSave(); // persist the join NOW (kill-safety: reconcile rejoins via Scene Element Id + Drawing even if this write is lost)
+      }
+      // BOTH RECONCILE KEYS FIRST (Scene Element Id + Drawing) so a kill mid-flush can never orphan the record.
+      if (created || !(this._propText(rec, 'Scene Element Id'))) { try { rec.prop('Scene Element Id').set(sid); } catch (_e) {} }
+      await this._setRel(rec, 'Drawing', this.recordGuid);
+      if (created) {
+        try { const cp = rec.prop('Created At'); if (cp) cp.set(DateTime.parseDateTimeString(pxcTodayISO()).value()); } catch (_e) {} // create-only
+        try { rec.prop('Highlight Id').set(sid); } catch (_e) {}
+        // upload the extracted figure image ONCE (create-only) → the Highlight Image property
+        try { const blob = await this._snapshotElement(el); if (blob) { const up = await this.plugin.data.uploadBlob(new File([blob], 'pdf-figure-' + sid + '.png', { type: 'image/png' })); const ip = rec.prop('Highlight Image'); if (up && ip && ip.setFileFromBlob) ip.setFileFromBlob(up); } } catch (_e) {}
+      }
+      // idempotent property sync (cheap; runs every flush)
+      try { rec.prop('Type').setChoice('area'); } catch (_e) {}
+      try { if (fig.page != null) rec.prop('Page').set(fig.page); } catch (_e) {}
+      try { rec.prop('Section').set(this._sectionForPage(fig.docId, fig.page)); } catch (_e) {}
+      try { rec.prop('PDF Fingerprint').set(fig.fingerprint || ''); } catch (_e) {}
+      try { rec.prop('PDF Name').set(fig.srcName || ''); } catch (_e) {}
+      try { rec.prop('Anchor Data').set(JSON.stringify({ frac: fig.frac || null, docId: fig.docId || null })); } catch (_e) {}
+      try { rec.prop('Status').setChoice('open'); } catch (_e) {}
+    })();
+    this._pdfHlInflight.set(sid, run);
+    try { await run; } finally { this._pdfHlInflight.delete(sid); }
+  }
+  // Cold-start: rejoin scene figures to their existing PDF Highlights records (by Scene Element Id, scoped to this Drawing) so a
+  // kill between record-create and guid-writeback never dupes; enqueue a create for any never-mirrored figure. Runs once post-load.
+  async _reconcilePdfFigures() {
+    if (this.destroyed) return;
+    const figs = (this.scene.elements || []).filter((e) => e && !e.isDeleted && e.pdfFigure);
+    if (!figs.length) return;
+    const col = await this.plugin._pdfHlCollection(); if (!col) return;
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) {}
+    const bySid = new Map();
+    for (const r of recs) {
+      if (!r || !r.guid) continue;
+      let dr = []; try { dr = pxcRelValues(r.prop('Drawing')); } catch (_e) {}
+      if (!dr.includes(this.recordGuid)) continue; // only THIS drawing's figure records
+      const sid = this._propText(r, 'Scene Element Id'); if (sid && !bySid.has(sid)) bySid.set(sid, r.guid);
+    }
+    let changed = false;
+    for (const el of figs) {
+      if (el.pdfFigureGuid) continue;
+      const g = bySid.get(el.id);
+      if (g) { el.pdfFigureGuid = g; changed = true; } // rejoin to the existing record
+      else this._schedulePdfHlMirror(el.id); // never mirrored → create
+    }
+    if (changed) { this.dirty = true; this.scheduleSave(); }
+  }
   _closeRecPanel() { if (this._recPanelEl) { try { this._recPanelEl.remove(); } catch (_e) {} this._recPanelEl = null; } this._recPanelId = null; }
   // ── D-C: PDF document chrome — page-nav + explode/stack (operates on el.pdf.docId; pages are plain images) ──
   _pdfPagesOf(docId) { return ((this.scene && this.scene.elements) || []).filter((e) => e && e.type === 'image' && e.pdf && e.pdf.docId === docId && !e.isDeleted).sort((a, b) => (a.pdf.page || 0) - (b.pdf.page || 0)); }
@@ -8015,6 +8104,7 @@ class CanvasView {
     try { this._updateBindings(); } catch (_e) {} // CONNECTIONS Phase 4: settle bindings + build the line/region flag-target maps on open (so the blue flag shows without waiting for the first edit)
     try { this._reindexBackrefs(); } catch (_e) {} // A1 (round 3): rebuild THIS drawing's backref sub-map from live elements on OPEN — self-heals orphaned/stale connector entries left by deletions in a prior session (was only rebuilt in saveNow)
     try { setTimeout(() => { if (!this.destroyed) this._reconcileComments().catch(() => {}); }, 1200); } catch (_e) {} // C1: rejoin/seed comment mirrors a moment after load (deferred, non-blocking; backing + scene settled by then)
+    try { setTimeout(() => { if (!this.destroyed) this._reconcilePdfFigures().catch(() => {}); }, 1300); } catch (_e) {} // A2: rejoin/seed PDF-figure mirrors (staggered after comments so the two reconciles don't contend on getAllRecords)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -8624,7 +8714,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -8955,6 +9045,12 @@ class Plugin extends AppPlugin {
     let cols = []; try { cols = await this.data.getAllCollections(); } catch (_e) {}
     this._commentsCol = (cols || []).find((c) => c.getName && c.getName() === COMMENTS_COLLECTION) || null;
     return this._commentsCol;
+  }
+  async _pdfHlCollection() { // A2: the "PDF Highlights" mirror collection (find-by-name, cached). Null ⇒ stay scene-only (graceful).
+    if (this._pdfHlCol) return this._pdfHlCol;
+    let cols = []; try { cols = await this.data.getAllCollections(); } catch (_e) {}
+    this._pdfHlCol = (cols || []).find((c) => c.getName && c.getName() === PDF_HIGHLIGHTS_COLLECTION) || null;
+    return this._pdfHlCol;
   }
   // SCALE/backing: scan Plexus Drawings ONCE (cached) → the set of drawing guids + a {sourceNoteGuid → drawingGuid}
   // map (from each drawing's `Source Note` relation). Powers "is this a drawing?" + "which drawing backs note H?".

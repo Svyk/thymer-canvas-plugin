@@ -1,5 +1,25 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.171.0 — A2: extracted PDF figures → durable, queryable "PDF Highlights" records (2026-06-26)
+The canvas figure-extraction (A1) now mirrors each `el.pdfFigure`-tagged element to a first-class **PDF Highlights**
+record — so an extracted chart/figure is queryable (Type=area, Page, **Section** from the C26 outline, PDF Fingerprint,
+PDF Name, Anchor Data JSON {frac,docId}, the uploaded figure image, Status, Highlight Id) and surfaces cross-surface
+via the **Drawing** relation. A faithful CLONE of the proven comment dual-write: `_schedulePdfHlMirror`/`_flushPdfHlMirror`
+(800ms debounce) → `_mirrorPdfHl` (create-once via an in-flight Map; **reconcile keys — Scene Element Id + Drawing —
+written first** for kill-safety; create-only Created At/Highlight Id/image-upload via `_snapshotElement`→`uploadBlob`→
+`setFileFromBlob`; idempotent property re-sync) + `_reconcilePdfFigures` (cold-start rejoin by Scene Element Id scoped
+to this Drawing; staggered 1300ms post-load after the comment reconcile). `_sectionForPage` maps a page → its outline
+section (last entry with page ≤ figure's page). **Design:** the record OUTLIVES the canvas figure (a highlight is a
+first-class record) → deleting the figure does NOT trash the record (create + idempotent sync + rejoin only; no
+delete-trash branch, intentional). **Schema validated live via MCP** (a throwaway record persisted Page=number,
+Type/Status choices, all text props; then trashed). **Adversarial review:** confirmed correct-by-clone (create-once,
+reconcile-keys-first, scoped rejoin); fixed LOW (extract-then-quick-delete inside the debounce could mint a stray
+record → added `!e.isDeleted` to the flush filter, matching the reconcile path). Image-upload-on-reload gap and
+per-view in-flight are accepted (inherited from the comment mirror / create-only design). Tests: new `pxc_pdfsection`
+13 assertions (section-from-page incl. nested/empty-title/front-matter); full suite **84/84**. Collection
+`1E9ZMXHM46GSQ6Z323YN3HPNFZ`.
+
+
 ## ✅ v1.170.0 — A0+A1: PDF region → figure extraction (the "grab this chart" gesture) (2026-06-26)
 First ship of the **PDF Highlights** feature (plan: `~/.claude/plans/staged-finding-ritchie.md`; two surfaces — canvas
 region-extraction + a native-panel text highlighter — unified by PDF fingerprint into a dedicated, queryable **PDF
