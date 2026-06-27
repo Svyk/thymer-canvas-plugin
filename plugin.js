@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.183.0';
+const PLEXUS_VERSION = '1.184.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2081,7 +2081,7 @@ class Canvas2DRenderer {
     else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
-  margins() { this.view._drawMargins(this.ctx); }
+  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawMargins(this.ctx); }
   end() {}
 }
 // #RRGGBB → [r,g,b] in 0..1 (for GL clear/uniform colours). Falls back to white on a bad value.
@@ -2142,7 +2142,7 @@ class WebGLRenderer {
     if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'table') v._drawTableNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
-  margins() { this.view._drawMargins(this.ctx); }
+  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawMargins(this.ctx); }
   end() {
     const gl = this.gl; if (!gl || !this._images.length) return;
     try {
@@ -2323,7 +2323,7 @@ class CanvasView {
   // A USER-initiated tool switch (toolbar/flyout click) — disarms any pending void-drop link state so a later stroke/lasso isn't
   // hijacked (mirrors the keyboard tool-switch guard). NOT called by _armRegionDraw (which sets this.tool directly), so arming a
   // region-draw never self-cancels.
-  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
+  _userToolSwitch(id) { this._pendingRegionDraw = null; this._pendingGroupLink = null; this._pendingRegionLink = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; try { this._closeRegionChoice(); } catch (_e) {} this.tool = id; this._syncToolbar(); } // B1: a manual tool switch disarms a pending in-place crop
   _syncToolbar() {
     const shapeActive = Object.prototype.hasOwnProperty.call(SHAPE_DRAW, this.tool); // a flyout shape is selected
     if (this._toolBtns) for (const id in this._toolBtns) this._toolBtns[id].classList.toggle('active', id === '_shapes' ? shapeActive : id === this.tool);
@@ -3865,11 +3865,13 @@ class CanvasView {
         const rect = this._cropRect; this._cropRect = null;
         const ipTarget = this._cropInPlaceTarget; this._cropInPlaceTarget = null; // B1: consume the one-shot in-place target — ALWAYS cleared so it can't leak into the next region-reference crop
         const figArm = this._pdfFigureArm; this._pdfFigureArm = false; // A1: consume the one-shot PDF-figure-extract arm
+        const hlArm = this._pdfHlArm; this._pdfHlArm = null; // A3: consume the one-shot PDF-region-highlight arm
         if (rect && rect.w > 3 && rect.h > 3) {
           if (figArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._extractPdfFigure(pg, rect); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A1: lift the PDF region into a figure
+          else if (hlArm) { const pg = this._topImageIn(rect); if (pg && pg.pdf) { this._highlightPdfRegion(pg, rect, hlArm.color); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over a PDF page.', dismissible: true }); } catch (_e) {} } this.tool = 'select'; this._syncToolbar(); } // A3: highlight the PDF region
           else if (ipTarget && !ipTarget.isDeleted) { if (this._cropInPlace(ipTarget, rect)) { this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the image to crop it.', dismissible: true }); } catch (_e) {} } } // B1: crop the armed image IN PLACE
           else { const img = this._topImageIn(rect); if (img) { this._setPendingImgRegion(img, rect, null, true); this.tool = 'select'; this._syncToolbar(); } else { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the crop box over an image.', dismissible: true }); } catch (_e) {} } } // round-5 G: keepSel=true → a cropped region can combine with a selected text in the Cite
-        } else if (ipTarget || figArm) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
+        } else if (ipTarget || figArm || hlArm) { this.tool = 'select'; this._syncToolbar(); } // armed but no real drag → quietly back to select
       }
       else if (mode === 'cmtregion') { // D-D: finalize a comment gesture — a real drag over an image → a REGION comment; a click → a point/element comment
         const rect = this._cropRect; this._cropRect = null; const dn = this._cmtRegionDown; this._cmtRegionDown = null;
@@ -3994,8 +3996,8 @@ class CanvasView {
       // ref-only box (one click selects it without navigating, then Enter edits). Image chips (isRef) keep dblclick=open.
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
-      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
+      if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
+      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -4008,6 +4010,7 @@ class CanvasView {
       }
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
+      { const _rh = this._regionHlAt(w.x, w.y); if (_rh) { const _r = this.wrap.getBoundingClientRect(); this._regionHlMenu(_rh, e.clientX - _r.left, e.clientY - _r.top); return; } } // #32: dblclick a region highlight → recolour / remove menu
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
@@ -4023,7 +4026,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -5763,6 +5766,9 @@ class CanvasView {
     mk('⤢ Grid', 'Explode the document into a grid', () => this._pdfExplode(page.pdf.docId));
     mk('▤ Stack', 'Re-stack the pages into a column', () => this._pdfStack(page.pdf.docId));
     mk('📖 Reader', 'Read this page with its highlights beside it', () => { const p = this._byId(this._pdfNavId) || page; this._connectedMargins(false, (p.pdf && p.pdf.page) || 1); }); // #30: single-page reader + highlights sidebar (scoped Connected Margins)
+    const sep2 = document.createElement('span'); sep2.className = 'pxc-pdfnav-sep'; box.appendChild(sep2);
+    mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
+    mk('✂ Figure', 'Extract a region (chart/figure) of this page as an image', () => this._startPdfFigureExtract()); // #32: surface the existing extract-region command on the page toolbar
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
   _closePdfNav() { if (this._pdfNavEl) { try { this._pdfNavEl.remove(); } catch (_e) {} this._pdfNavEl = null; } this._pdfNavId = null; }
@@ -8523,7 +8529,7 @@ class CanvasView {
   _startPdfFigureExtract() {
     const docId = this._activePdfDocId();
     if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then extract a region.', dismissible: true }); } catch (_e) {} return; }
-    this._pdfFigureArm = true; this._cropInPlaceTarget = null; this.tool = 'crop'; this._syncToolbar(); // clear the sibling crop-arm so the two one-shot crop modes can't both be live (review MED-1)
+    this._pdfFigureArm = true; this._cropInPlaceTarget = null; this._pdfHlArm = null; this.tool = 'crop'; this._syncToolbar(); // clear BOTH sibling crop-arms so only one one-shot crop mode is ever live (review HIGH: figure must clear the highlight arm too)
     try { this.plugin.ui.addToaster({ title: 'Extract: drag a box over the PDF region (chart/figure) to lift it out (Esc cancels).', dismissible: true }); } catch (_e) {}
   }
   // A1: lift the boxed region of a PDF page into a new cropped image element (live crop, shares the page's fileId), and tag it
@@ -8538,6 +8544,108 @@ class CanvasView {
     try { this._schedulePdfHlMirror && this._schedulePdfHlMirror(el.id); } catch (_e) {} // A2 (wired later): enqueue the durable PDF Highlights mirror
     try { this.plugin.ui.addToaster({ title: 'Extracted page ' + (pageEl.pdf.page || '?') + ' region as a figure.', dismissible: true }); } catch (_e) {}
     return el;
+  }
+  // REGION HIGHLIGHT (A3): pick a colour, then box a region of a PDF page → a translucent COLOURED overlay glued to the page
+  // region (resolved live from frac each frame, so it tracks pan/zoom/rotate — a NON-element layer, no hit-test/lasso/export
+  // churn) + a queryable Type=area PDF Highlights record (no figure image). Surfaces in Connected Margins + the TOC like any
+  // highlight. Delete / recolour via double-click. Mirrors the figure-extract arm/crop flow.
+  _startPdfRegionHighlight() {
+    const docId = this._activePdfDocId();
+    if (!docId) { try { this.plugin.ui.addToaster({ title: 'Plexus: drop or select a PDF first, then highlight a region.', dismissible: true }); } catch (_e) {} return; }
+    const arm = (key) => { this._closeRegionChoice(); this._pdfHlColor = key; this._pdfHlArm = { color: key }; this._cropInPlaceTarget = null; this._pdfFigureArm = false; this.tool = 'crop'; this._syncToolbar(); try { this.plugin.ui.addToaster({ title: 'Highlight (' + key + '): drag a box over the region (Esc cancels).', dismissible: true }); } catch (_e) {} };
+    const rows = ['yellow', 'green', 'blue', 'pink', 'orange'].map((key) => ({ txt: '● ' + key, on: (this._pdfHlColor || 'yellow') === key, fn: () => arm(key) }));
+    this._showNestingChoice('Highlight colour', rows, this.cssW / 2, 70);
+  }
+  async _highlightPdfRegion(pageEl, rect, color) {
+    if (!pageEl || !pageEl.pdf) return;
+    let frac = null; try { frac = this._imgRegionFrac(pageEl, rect); } catch (_e) {}
+    if (!frac) { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the PDF page.', dismissible: true }); } catch (_e) {} return; }
+    const pdf = pageEl.pdf, col = color || this._pdfHlColor || 'yellow';
+    const region = { guid: null, docId: pdf.docId || null, fingerprint: pdf.fingerprint || null, page: pdf.page || null, frac, color: col };
+    if (!this._pdfHlRegions) this._pdfHlRegions = [];
+    this._pdfHlRegions.push(region); this.dirty = true; // optimistic: show it immediately, before the record write returns
+    const collection = await this.plugin._pdfHlCollection(); if (this.destroyed) return;
+    if (collection) {
+      const title = ((pdf.srcName || 'PDF') + ' · p' + (pdf.page || '?') + ' highlight').replace(/\s+/g, ' ').trim().slice(0, 60) || 'PDF highlight';
+      let g = null; try { g = collection.createRecord(title); } catch (_e) {}
+      if (typeof g === 'string') {
+        const rec = await getRecordPoll(this.plugin, g, 8);
+        if (rec) {
+          region.guid = g;
+          try { rec.prop('Type').setChoice('area'); } catch (_e) {}
+          try { rec.prop('Color').setChoice(col); } catch (_e) {}
+          try { if (pdf.page != null) rec.prop('Page').set(pdf.page); } catch (_e) {}
+          try { rec.prop('Section').set(this._sectionForPage(pdf.docId, pdf.page)); } catch (_e) {}
+          try { rec.prop('PDF Fingerprint').set(pdf.fingerprint || ''); } catch (_e) {}
+          try { rec.prop('PDF Name').set(pdf.srcName || ''); } catch (_e) {}
+          try { rec.prop('Anchor Data').set(JSON.stringify({ frac, docId: pdf.docId || null, kind: 'region' })); } catch (_e) {}
+          try { rec.prop('Status').setChoice('open'); } catch (_e) {}
+          try { rec.prop('Highlight Id').set('rh' + Math.floor(this._now()).toString(36)); } catch (_e) {}
+          try { const cp = rec.prop('Created At'); if (cp) cp.set(DateTime.parseDateTimeString(pxcTodayISO()).value()); } catch (_e) {}
+          try { await this._setRel(rec, 'Drawing', this.recordGuid); } catch (_e) {}
+        }
+      }
+    }
+    this.dirty = true;
+    try { this.plugin.ui.addToaster({ title: 'Highlighted a region on page ' + (pdf.page || '?') + '.', dismissible: true }); } catch (_e) {}
+  }
+  // The translucent overlay for every region highlight, resolved LIVE from its page each frame (tracks pan/zoom/rotate). A
+  // non-element layer (rides the cached raster like the ghosts/margins); zero cost when there are no region highlights.
+  _drawPdfRegionHighlights(ctx) {
+    const regions = this._pdfHlRegions; if (!regions || !regions.length) return;
+    const z = this.camera.zoom;
+    ctx.save();
+    for (const r of regions) {
+      if (r.deleted) continue;
+      const pageEl = this._pdfPagesOf(r.docId).find((p) => p.pdf && p.pdf.page === r.page); if (!pageEl) continue;
+      const rw = this._imgRegionWorld(pageEl, r.frac); if (!rw || !isFinite(rw.x)) continue;
+      const hex = PXC_HLCOLOR_HEX[r.color] || '#eab308';
+      ctx.globalAlpha = 0.26; ctx.fillStyle = hex; ctx.fillRect(rw.x, rw.y, rw.w, rw.h);
+      ctx.globalAlpha = 0.85; ctx.lineWidth = 1.5 / z; ctx.strokeStyle = hex; ctx.strokeRect(rw.x, rw.y, rw.w, rw.h);
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+  }
+  // The topmost region highlight under a world point (for the dblclick recolour/delete menu).
+  _regionHlAt(wx, wy) {
+    const regions = this._pdfHlRegions; if (!regions) return null;
+    for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.deleted) continue; const pageEl = this._pdfPagesOf(r.docId).find((p) => p.pdf && p.pdf.page === r.page); if (!pageEl) continue; const rw = this._imgRegionWorld(pageEl, r.frac); if (rw && isFinite(rw.x) && wx >= rw.x && wx <= rw.x + rw.w && wy >= rw.y && wy <= rw.y + rw.h) return r; }
+    return null;
+  }
+  _regionHlMenu(region, sx, sy) {
+    const rows = [{ txt: '🗑 Remove highlight', fn: () => { this._closeRegionChoice(); this._deleteRegionHighlight(region); } }];
+    for (const key of ['yellow', 'green', 'blue', 'pink', 'orange']) rows.push({ txt: '● ' + key, on: region.color === key, fn: () => { this._closeRegionChoice(); this._recolorRegionHighlight(region, key); } });
+    this._showNestingChoice('Highlight', rows, sx, sy);
+  }
+  _deleteRegionHighlight(region) {
+    if (!region) return;
+    region.deleted = true; this.dirty = true;
+    if (region.guid) { (async () => { try { const r = await getRecordPoll(this.plugin, region.guid, 3); if (r && r.trash) r.trash(); } catch (_e) {} })(); } // trash the record (best-effort; confirm-before-delete satisfied by the explicit menu choice)
+    try { this.plugin.ui.addToaster({ title: 'Highlight removed.', dismissible: true }); } catch (_e) {}
+  }
+  _recolorRegionHighlight(region, color) {
+    region.color = color; this.dirty = true;
+    if (region.guid) { (async () => { try { const r = await getRecordPoll(this.plugin, region.guid, 3); if (r) { try { r.prop('Color').setChoice(color); } catch (_e) {} } } catch (_e) {} })(); }
+  }
+  // Cold-start: load existing region highlights for the PDFs ON this canvas (matched by fingerprint → live docId) so they
+  // re-appear after a reload. Rebuilds the cache from records + keeps any unsaved in-session ones. Safe to re-run.
+  async _loadPdfRegionHighlights() {
+    const col = await this.plugin._pdfHlCollection(); if (this.destroyed || !col) return;
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) { return; }
+    if (this.destroyed) return;
+    const fpToDoc = new Map(); for (const e of (this.scene.elements || [])) { if (e && e.type === 'image' && e.pdf && !e.isDeleted && e.pdf.fingerprint && e.pdf.docId && !fpToDoc.has(e.pdf.fingerprint)) fpToDoc.set(e.pdf.fingerprint, e.pdf.docId); }
+    if (!fpToDoc.size) return;
+    const out = [];
+    for (const rec of recs) {
+      if (!rec || !rec.guid) continue;
+      const ad = this._readHlAnchor(rec); if (!ad || ad.kind !== 'region' || !ad.frac) continue;
+      const fp = this._propText(rec, 'PDF Fingerprint'); const docId = fpToDoc.get(fp); if (!docId) continue;
+      let page = null; try { const p = rec.prop('Page'); page = p && p.number ? p.number() : null; } catch (_e) {}
+      let color = ''; try { const p = rec.prop('Color'); color = (p && p.choiceLabel && p.choiceLabel()) || ''; } catch (_e) {}
+      out.push({ guid: rec.guid, docId, fingerprint: fp, page, frac: ad.frac, color: color || 'yellow' });
+    }
+    const loaded = new Set(out.map((r) => r.guid));
+    for (const r of (this._pdfHlRegions || [])) { if (r.deleted) continue; if (r.guid && loaded.has(r.guid)) continue; out.push(r); } // keep unsaved/in-session regions
+    this._pdfHlRegions = out; this.dirty = true;
   }
   // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
   _snapshotElement(el) {
@@ -8778,6 +8886,7 @@ class CanvasView {
     try { this._reindexBackrefs(); } catch (_e) {} // A1 (round 3): rebuild THIS drawing's backref sub-map from live elements on OPEN — self-heals orphaned/stale connector entries left by deletions in a prior session (was only rebuilt in saveNow)
     try { setTimeout(() => { if (!this.destroyed) this._reconcileComments().catch(() => {}); }, 1200); } catch (_e) {} // C1: rejoin/seed comment mirrors a moment after load (deferred, non-blocking; backing + scene settled by then)
     try { setTimeout(() => { if (!this.destroyed) this._reconcilePdfFigures().catch(() => {}); }, 1300); } catch (_e) {} // A2: rejoin/seed PDF-figure mirrors (staggered after comments so the two reconciles don't contend on getAllRecords)
+    try { setTimeout(() => { if (!this.destroyed) this._loadPdfRegionHighlights().catch(() => {}); }, 1500); } catch (_e) {} // A3: re-show region highlights for the PDFs on this canvas (staggered after the figure reconcile)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync

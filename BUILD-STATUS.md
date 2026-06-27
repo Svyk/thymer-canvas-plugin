@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.184.0 — #32 On-canvas PDF region-highlight + extract tools in the page toolbar (2026-06-27)
+The user wanted highlight + extract-region tools right on the page (not buried in the palette). Two new buttons in the
+PDF page nav toolbar (beside ⤢ Grid / ▤ Stack / 📖 Reader): **"✦ Highlight"** and **"✂ Figure"**.
+- **✂ Figure** → the existing `_startPdfFigureExtract()` (surfaced).
+- **✦ Highlight** → `_startPdfRegionHighlight()`: a 5-colour picker, then a one-shot crop box → `_highlightPdfRegion()`
+  writes a queryable **Type=area** PDF Highlights record (Color/Page/Section/Fingerprint/Anchor Data `{frac,docId,kind:'region'}`
+  /Drawing — NO figure image) and paints a **translucent coloured overlay glued to the page region**, resolved LIVE from
+  `frac` each frame so it tracks pan/zoom (`_drawPdfRegionHighlights`, a non-element layer in both renderers' `margins()`).
+  Cross-surface with the canvas figures + the highlighter — it shows in Connected Margins + the TOC. Existing region
+  highlights reload on cold-start (`_loadPdfRegionHighlights`, fingerprint→live-docId, `kind:'region'` filter). **Double-click
+  a highlight** → recolour / remove menu (`_regionHlMenu`; remove trashes the record). `_pdfHlArm` cleared in Esc / tool-switch
+  / cancel beside `_pdfFigureArm`. **Adversarial review: FIX-FIRST → fixed** the one HIGH (✂ Figure must clear `_pdfHlArm` too,
+  restoring the single-live-arm invariant); two LOWs deferred (page-rotation: overlay/hit-test are axis-aligned via
+  `_imgRegionWorld` — PDF pages are rarely rotated; per-frame `_pdfPagesOf` resolution — bounded). Suite green; syntax clean.
+
 ## ✅ v1.183.0 — #30 Reader view (one page + highlights sidebar, alongside Grid/Stack) (2026-06-26)
 A Heptabase-style single-page reader, the user's chosen "normal view." New **"📖 Reader"** button in the PDF nav toolbar
 (beside ⤢ Grid / ▤ Stack) runs Connected Margins **scoped to the focused page**: `_connectedMargins(across, readerPage)`
