@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.187.0 — F3 Heptabase scroll view (2026-06-27)
+New **📜 Scroll** button in the PDF page toolbar (between Stack and Reader): `_pdfScrollView(docId)` re-lays the doc's pages as
+ONE gapless, uniform-width column you pan/scroll through and snip (snip + region highlight are layout-independent — unchanged).
+Pure `pxcScrollLayout(pages,{cx,top,gap,uniformW})` (clone of `_pdfStack` with GAP=0 + width-normalize, node-tested 11 assertions);
+frames page 1 so panning down reads like a scroll. Page-width normalization is saved + reversible via Grid/Stack (toasted). First
+of the approved 5-feature plan (`~/.claude/plans/staged-finding-ritchie.md`). Suite green.
+
+
 ## ✅ v1.186.0 — true high-DPI snip (retain PDF + re-render region) (2026-06-27)
 The user chose "retain PDF + re-render on snip" for crisp snips at any zoom. **At import** (`_addPdf`), the original PDF
 blob is now retained as a record asset (`_assetPut` → anchored on the backing Drawing's Assets shard; mapping in

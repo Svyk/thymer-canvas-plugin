@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.186.0';
+const PLEXUS_VERSION = '1.187.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1184,6 +1184,20 @@ function pxcMarginExpand(edges, opts) {
   return { columns, edges: keptEdges };
 }
 // ACROSS GRAPH: ribbon hue by cross-doc relation type (matches the Brain's relation palette intent).
+// F3 HEPTABASE SCROLL VIEW: gapless single-column page layout (pure). Optionally normalize each page to `uniformW` (keep
+// aspect) for a clean reading lane. Returns the new {x,y,w,h} per page (contiguous, centered on cx). Node-tested.
+function pxcScrollLayout(pages, opts) {
+  const o = opts || {};
+  const cx = o.cx || 0, top0 = o.top || 0, GAP = o.gap || 0, uniformW = o.uniformW || 0;
+  const out = []; let top = top0;
+  for (const p of pages) {
+    let w = Math.abs(p.width) || 1, h = Math.abs(p.height) || 1;
+    if (uniformW > 0) { const s = uniformW / w; w = uniformW; h = h * s; }
+    out.push({ x: cx - w / 2, y: top, w, h });
+    top += h + GAP;
+  }
+  return { pages: out, top: top0, bottom: top - (out.length ? GAP : 0), cx };
+}
 const PXC_REL_HUE = { note: '#a855f7', reply: '#3b82f6', section: '#14b8a6' };
 const PXC_SECTION_GENERIC = new Set(['introduction', 'intro', 'conclusion', 'discussion', 'abstract', 'references', 'methods', 'method', 'results', 'background', 'summary', 'overview', 'appendix']);
 // pxcPointInRibbon: even-odd point-in-polygon over the ribbon outline (top forward + bottom back). For hover hit-test. PURE.
@@ -5769,6 +5783,7 @@ class CanvasView {
     const sep = document.createElement('span'); sep.className = 'pxc-pdfnav-sep'; box.appendChild(sep);
     mk('⤢ Grid', 'Explode the document into a grid', () => this._pdfExplode(page.pdf.docId));
     mk('▤ Stack', 'Re-stack the pages into a column', () => this._pdfStack(page.pdf.docId));
+    mk('📜 Scroll', 'Read as one gapless scroll column (pan + snip)', () => this._pdfScrollView(page.pdf.docId)); // F3: Heptabase-style continuous scroll reader
     mk('📖 Reader', 'Read this page with its highlights beside it', () => { const p = this._byId(this._pdfNavId) || page; this._connectedMargins(false, (p.pdf && p.pdf.page) || 1); }); // #30: single-page reader + highlights sidebar (scoped Connected Margins)
     const sep2 = document.createElement('span'); sep2.className = 'pxc-pdfnav-sep'; box.appendChild(sep2);
     mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
@@ -5787,6 +5802,20 @@ class CanvasView {
     for (const p of pages) { const w = Math.abs(p.width), h = Math.abs(p.height); p.x = wx - w / 2; p.y = top; top += h + GAP; }
     this.dirty = true; this.scheduleSave();
     try { this.plugin.ui.addToaster({ title: 'Stacked ' + pages.length + ' pages.', dismissible: true }); } catch (_e) {}
+  }
+  // F3: Heptabase-style scroll reader — re-lay the doc's pages as ONE gapless, uniform-width column you pan/scroll through and
+  // snip (snip + region highlight are layout-independent, so they keep working). Normalizes page widths for a clean lane (saved,
+  // reversible via Grid/Stack). Frames page 1 so panning down reads like a scroll.
+  _pdfScrollView(docId) {
+    const pages = this._pdfPagesOf(docId); if (!pages.length) return;
+    const cx = Math.min(pages[0].x, pages[0].x + pages[0].width) + Math.abs(pages[0].width) / 2;
+    const top = Math.min(pages[0].y, pages[0].y + pages[0].height);
+    const uniformW = Math.max.apply(null, pages.map((p) => Math.abs(p.width) || 1));
+    const lay = pxcScrollLayout(pages, { cx, top, gap: 0, uniformW });
+    pages.forEach((p, i) => { const r = lay.pages[i]; p.x = r.x; p.y = r.y; p.width = r.w; p.height = r.h; });
+    this.dirty = true; this._cacheValid = false; this.scheduleSave();
+    try { const p1 = lay.pages[0]; this._fitToBounds({ x: cx - p1.w / 2, y: top, w: p1.w, h: p1.h }, 20); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: 'Scroll view: ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + ', gapless — pan down to read, snip anytime.', dismissible: true }); } catch (_e) {}
   }
   _pdfExplode(docId) {
     const pages = this._pdfPagesOf(docId); if (!pages.length) return;
