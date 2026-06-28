@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.193.0';
+const PLEXUS_VERSION = '1.194.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -1189,7 +1189,7 @@ function pxcMarginExpand(edges, opts) {
 // mini-tier "75% text / 13% structure" table collapse. Pure (no `this`) → node-testable. Output is strict JSON, no fences.
 function pxcExtractSysPrompt(mode) {
   if (mode === 'page') {
-    return 'You are a precise PDF-page parser. Segment the page image into ordered reading-order blocks. Return STRICT JSON only: {"blocks":[{"kind":"table|equation|figure|text","markdown":"...","latex":"...","caption":"..."}]}. Tables as GitHub-Flavored Markdown in "markdown"; equations as LaTeX (no $ delimiters) in "latex"; figures/charts as a short "caption". Preserve reading order and table structure EXACTLY. NEVER invent values or text. Omit empty fields. Output JSON only — no prose, no code fences.';
+    return 'You are a precise PDF-page parser. Segment the page image into ordered reading-order blocks. Return STRICT JSON only: {"blocks":[{"kind":"table|equation|figure|text","markdown":"...","latex":"...","caption":"...","bbox":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}]}. Tables as GitHub-Flavored Markdown in "markdown"; equations as LaTeX (no $ delimiters) in "latex"; figures/charts as a short "caption". For every block include a "bbox" with the block\'s bounding box as page fractions 0-1 (top-left origin): x=left, y=top, w=width, h=height. Preserve reading order and table structure EXACTLY. NEVER invent values or text. Omit empty fields except bbox. Output JSON only — no prose, no code fences.';
   }
   return 'You are a precise PDF-region extractor. Classify the image as EXACTLY one of: table, equation, figure, text. Return STRICT JSON only: {"kind":"table|equation|figure|text","markdown":"...","csv":"...","latex":"...","caption":"...","series":[{"label":"...","value":"..."}]}. If a table: fill BOTH "markdown" (GitHub-Flavored) AND "csv". If an equation: fill "latex" (no $ delimiters). If a figure/chart: fill "caption" and, when it is a chart with readable values, "series"; otherwise "series":[]. If plain text: fill "markdown" preserving headings/lists. Preserve structure EXACTLY, NEVER invent values, prefer "text" when unsure. Output JSON only — no prose, no code fences.';
 }
@@ -2171,7 +2171,7 @@ class Canvas2DRenderer {
     else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
-  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawMargins(this.ctx); }
+  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawPdfParsedBlocks(this.ctx); this.view._drawMargins(this.ctx); }
   end() {}
 }
 // #RRGGBB → [r,g,b] in 0..1 (for GL clear/uniform colours). Falls back to white on a bad value.
@@ -2232,7 +2232,7 @@ class WebGLRenderer {
     if (t === 'image') v._drawImage(ctx, el); else if (t === 'record') v._drawRecordCard(ctx, el); else if (t === 'linecard') v._drawLineCard(ctx, el); else if (t === 'query') v._drawQueryNode(ctx, el); else if (t === 'rollup') v._drawRollupNode(ctx, el); else if (t === 'table') v._drawTableNode(ctx, el); else if (t === 'board') v._drawBoardCard(ctx, el); else if (t === 'task') v._drawTaskNode(ctx, el); else drawElement(ctx, el);
   }
   ghosts() { this.view._drawGhosts(this.ctx); }
-  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawMargins(this.ctx); }
+  margins() { this.view._drawPdfRegionHighlights(this.ctx); this.view._drawPdfParsedBlocks(this.ctx); this.view._drawMargins(this.ctx); }
   end() {
     const gl = this.gl; if (!gl || !this._images.length) return;
     try {
@@ -4117,6 +4117,7 @@ class CanvasView {
       const dblText = (this.plugin._settings ? this.plugin._settings.dblClickText !== false : true); // S2
       const w = this._worldAt(e); const hit = this._hitTopAt(w.x, w.y);
       { const _rh = this._regionHlAt(w.x, w.y); if (_rh) { const _r = this.wrap.getBoundingClientRect(); this._regionHlMenu(_rh, e.clientX - _r.left, e.clientY - _r.top); return; } } // #32: dblclick a region highlight → recolour / remove menu
+      { const _pb = this._parsedBlockAt(w.x, w.y); if (_pb) { const _r = this.wrap.getBoundingClientRect(); this._showParsedBlockPopup(_pb, e.clientX - _r.left, e.clientY - _r.top); return; } } // PDF parsed-block overlay → content popup
       if (hit && hit.type !== 'arrow' && hit.type !== 'line' && this._xrefByEl && this._xrefByEl[hit.id] && this._xrefByEl[hit.id].length && hit.type !== 'record' && hit.type !== 'board' && !(hit.type === 'text' && (hit.isRef || hit.refGuid)) && !hit.link) { this._jumpToCiting(this._xrefByEl[hit.id][0].lineGuid); return; } // cited element → jump to its note line (connectors fall through to the label editor)
       if (hit && hit.link && hit.type !== 'text' && hit.type !== 'arrow' && hit.type !== 'line') { try { window.open(hit.link, '_blank'); } catch (_e) {} return; } // CP-7/C-CF6: per-element external URL link
       if (hit && hit.type === 'text') { if (hit.isRef || hit.refGuid) { this._openCard(hit); return; } if (!dblText) return; this.selected.clear(); this.selected.add(hit.id); this._editText(hit); } // P1.6: ref node opens its record/line (line refs may have a null parent record → gate on isRef)
@@ -8816,6 +8817,82 @@ class CanvasView {
     }
     return { map, pages };
   }
+  // PDF PARSED BLOCKS (Heptabase overlay): build a text-position index for a page using pdf.js getTextContent().
+  // Returns {alnum: string, rects: Map<charIndex, {x,y,w,h}>} in normalized page-fraction coords (0-1, top-left origin).
+  // Cached per (docId,page) on this._pdfTextCache so re-parse doesn't reload.
+  async _pdfPageTextFrac(docId, page) {
+    if (!docId || !page) return null;
+    if (!this._pdfTextCache) this._pdfTextCache = new Map();
+    const cacheKey = docId + ':' + page;
+    if (this._pdfTextCache.has(cacheKey)) return this._pdfTextCache.get(cacheKey);
+    let result = null;
+    try {
+      const meta = this.scene.appState && this.scene.appState.pdfBlobs && this.scene.appState.pdfBlobs[docId];
+      if (!meta || !meta.blobGuid) return null;
+      let url = null; try { url = await this.plugin._assetGet({ blobGuid: meta.blobGuid }); } catch (_e) {}
+      if (!url) return null;
+      let pdfjs = null; try { pdfjs = await loadLib(LIB.pdfjs); } catch (_e) {}
+      if (!pdfjs) { try { URL.revokeObjectURL(url); } catch (_e) {} return null; }
+      let doc = null;
+      try {
+        const hasWorker = await this._pdfSetupWorker(pdfjs);
+        const buf = await (await fetch(url)).arrayBuffer();
+        doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise;
+        const pg = await doc.getPage(page);
+        const vp = pg.getViewport({ scale: 1 });
+        const tc = await pg.getTextContent();
+        const W = vp.width || 1, H = vp.height || 1;
+        let alnum = '';
+        const rects = new Map();
+        for (const item of (tc.items || [])) {
+          if (!item || typeof item.str !== 'string' || !item.str) continue;
+          // pdf.js transform: [scaleX, skewX, skewY, scaleY, tx, ty] — (tx, ty) is the baseline in user space (Y up).
+          // Viewport transform maps user→device coords: vp.transform = [scaleX, 0, 0, -scaleY, tx0, ty0].
+          const [, , , , tx, ty] = pdfjs.Util.transform(vp.transform, item.transform);
+          const scaleX = Math.abs(item.transform[0]) * Math.abs(vp.transform[0]);
+          const scaleY = Math.abs(item.transform[3]) * Math.abs(vp.transform[3]);
+          const iw = (item.width || 0) * Math.abs(item.transform[0]) * Math.abs(vp.transform[0]) / (Math.abs(item.transform[0]) || 1);
+          // Compute item width in device pixels using the item's own width property scaled by the viewport.
+          const itemW = (item.width != null ? item.width : (item.str.length * scaleX)) * (Math.abs(vp.transform[0]) || 1);
+          const itemH = (item.height != null ? item.height : scaleY) || scaleY;
+          // tx/ty are already in device (CSS) pixels from the viewport; ty is the baseline (Y down after transform).
+          const fx = tx / W, fy = (ty - itemH) / H, fw = itemW / W, fh = itemH / H;
+          const chars = item.str.replace(/[^a-z0-9]/gi, '').toLowerCase();
+          if (!chars) continue;
+          const charW = fw / Math.max(chars.length, 1);
+          for (let ci = 0; ci < chars.length; ci++) {
+            rects.set(alnum.length + ci, { x: fx + ci * charW, y: Math.max(0, fy), w: charW, h: Math.max(0.001, fh) });
+          }
+          alnum += chars;
+        }
+        result = { alnum, rects };
+      } catch (_e) {} finally { try { doc && doc.destroy && doc.destroy(); } catch (_e) {} try { URL.revokeObjectURL(url); } catch (_e) {} }
+    } catch (_e) {}
+    if (result) this._pdfTextCache.set(cacheKey, result);
+    return result;
+  }
+  // PDF PARSED BLOCKS: locate blockText in a text-position index and return the union {rx,ry,rw,rh} of matched chars.
+  // Uses the first ~80 and last ~80 alnum chars of blockText for robustness on long blocks. Returns null if not found.
+  _blockFracFromTextItems(textIndex, blockText) {
+    if (!textIndex || !blockText) return null;
+    try {
+      const alnum = String(blockText).replace(/[^a-z0-9]/gi, '').toLowerCase();
+      if (alnum.length < 2) return null;
+      const head = alnum.slice(0, 80), tail = alnum.length > 80 ? alnum.slice(-80) : null;
+      const idx = textIndex.alnum;
+      const hi = idx.indexOf(head);
+      if (hi < 0) return null;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const addRect = (charIdx) => {
+        const r = textIndex.rects.get(charIdx); if (!r) return;
+        x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y); x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h);
+      };
+      for (let ci = 0; ci < head.length; ci++) addRect(hi + ci);
+      if (tail) { const ti = idx.lastIndexOf(tail); if (ti >= 0) for (let ci = 0; ci < tail.length; ci++) addRect(ti + ci); }
+      if (!isFinite(x0) || !isFinite(y0) || x1 <= x0 || y1 <= y0) return null;
+      return { rx: Math.max(0, x0), ry: Math.max(0, y0), rw: Math.min(1, x1 - x0), rh: Math.min(1, y1 - y0) };
+    } catch (_e) { return null; }
+  }
   // AI EXTRACT (Heptabase "Parse" port): render the WHOLE page hi-DPI, segment it into ordered typed blocks via the vision LLM,
   // and write one queryable PDF Highlights record per block (Extracted Kind/Text + Block Index + Page, deduped by a deterministic
   // key so re-parse replaces). opts.cards (single-page only) also drops ONE joined Markdown "page transcript" card beside the page.
@@ -8839,7 +8916,41 @@ class CanvasView {
     if (!blocks.length) { if (!opts.silent) { try { this.plugin.ui.addToaster({ title: 'Plexus: page ' + page + ' — nothing parsed.', dismissible: true }); } catch (_e) {} } return 0; }
     const idx = opts.index || (await this._parseRecIndex(col, fp)).map;
     const section = this._sectionForPage(docId, page);
+    // Build text-position index for this page (best-effort; null = no retained PDF or pre-feature import)
+    let textIndex = null; try { textIndex = await this._pdfPageTextFrac(docId, page); } catch (_e) {}
     let made = 0; const mdParts = [];
+    // First pass: compute fracs for all blocks so we can layout-infer from neighbors
+    const blockFracs = new Array(blocks.length).fill(null);
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i] || {};
+      const md = pxcBlockToMd(b);
+      let frac = null;
+      // 1. Try text-position match using pdf.js char rects
+      if (textIndex && md) { try { frac = this._blockFracFromTextItems(textIndex, md); } catch (_e) {} }
+      // 2. Fall back to the LLM bbox (if model returned it)
+      if (!frac && b.bbox && typeof b.bbox === 'object') {
+        try {
+          const bx = b.bbox, rx = Math.max(0, Math.min(1, Number(bx.x) || 0)), ry = Math.max(0, Math.min(1, Number(bx.y) || 0));
+          const rw = Math.max(0.01, Math.min(1 - rx, Number(bx.w) || 0)), rh = Math.max(0.01, Math.min(1 - ry, Number(bx.h) || 0));
+          if (rw > 0.01 && rh > 0.005) frac = { rx, ry, rw, rh };
+        } catch (_e) {}
+      }
+      blockFracs[i] = frac;
+    }
+    // Second pass: layout-infer null fracs from matched neighbors (reading-order vertical interpolation)
+    for (let i = 0; i < blocks.length; i++) {
+      if (blockFracs[i]) continue;
+      let prev = null, next = null;
+      for (let j = i - 1; j >= 0; j--) { if (blockFracs[j]) { prev = blockFracs[j]; break; } }
+      for (let j = i + 1; j < blocks.length; j++) { if (blockFracs[j]) { next = blockFracs[j]; break; } }
+      if (prev || next) {
+        const yTop = prev ? (prev.ry + prev.rh) : (next ? Math.max(0, next.ry - 0.06) : 0);
+        const yBot = next ? next.ry : (prev ? Math.min(1, prev.ry + prev.rh + 0.06) : 1);
+        const rxEnv = (prev && next) ? Math.min(prev.rx, next.rx) : (prev ? prev.rx : (next ? next.rx : 0.05));
+        const rwEnv = (prev && next) ? Math.max(prev.rw, next.rw) : (prev ? prev.rw : (next ? next.rw : 0.9));
+        blockFracs[i] = { rx: rxEnv, ry: Math.max(0, yTop), rw: Math.max(0.1, rwEnv), rh: Math.max(0.01, yBot - yTop), _inferred: true };
+      }
+    }
     for (let i = 0; i < blocks.length; i++) {
       if (this.destroyed) break;
       const b = blocks[i] || {};
@@ -8859,6 +8970,9 @@ class CanvasView {
       try { rec.prop('PDF Name').set(pageEl.pdf.srcName || ''); } catch (_e) {}
       try { rec.prop('Status').setChoice('open'); } catch (_e) {}
       try { await this._setRel(rec, 'Drawing', this.recordGuid); } catch (_e) {}
+      // Write Anchor Data so _loadPdfParsedBlocks can find and draw this block as an overlay
+      const blockFrac = blockFracs[i] || null;
+      try { rec.prop('Anchor Data').set(JSON.stringify({ frac: blockFrac, docId, kind: 'block', inferred: !!(blockFrac && blockFrac._inferred) })); } catch (_e) {}
       made++;
     }
     // RE-PARSE REPLACES: a prior parse may have made MORE blocks than this one. Surplus records (block index ≥ the new count) on
@@ -8866,6 +8980,8 @@ class CanvasView {
     for (const [k, rec] of idx) { const mm = k.match(/^parse:.*:p(\d+):b(\d+)$/); if (!mm || parseInt(mm[1], 10) !== page || parseInt(mm[2], 10) < blocks.length) continue; try { rec.prop('Status').setChoice('archived'); } catch (_e) {} try { rec.prop('Extracted Text').set(''); } catch (_e) {} }
     if (opts.cards && made) { this._dropExtractCard(pageEl, 'page', mdParts.filter(Boolean).join('\n\n'), 4000); } // single-page: one joined Markdown transcript card beside the page
     if (!opts.silent) { try { this.plugin.ui.addToaster({ title: '🧠 Parsed page ' + page + ': ' + made + ' block(s).', dismissible: true }); } catch (_e) {} }
+    // Refresh parsed-block overlays for this page (non-blocking; skip in bulk-parse mode since _parsePdfAll calls it once at the end)
+    if (!opts.skipBlockReload) { try { this._loadPdfParsedBlocks().catch(() => {}); } catch (_e) {} }
     return made;
   }
   // AI EXTRACT: parse EVERY page of a PDF (records only — no per-page cards, to avoid flooding the board). Confirms with a page
@@ -8888,12 +9004,14 @@ class CanvasView {
     let done = 0, blocks = 0;
     for (const p of todo) {
       if (this.destroyed || this._parseCancel) break;
-      let n = 0; try { n = await this._parsePdfPage(p, { col, index: ix.map, silent: true }); } catch (_e) {}
+      let n = 0; try { n = await this._parsePdfPage(p, { col, index: ix.map, silent: true, skipBlockReload: true }); } catch (_e) {}
       done++; blocks += n;
       try { this.plugin.ui.addToaster({ title: '🧠 Parsing… ' + done + '/' + todo.length + ' page(s), ' + blocks + ' block(s) (Esc to stop)', dismissible: true }); } catch (_e) {}
     }
     this._parsing = false;
     try { this.plugin.ui.addToaster({ title: '🧠 PDF parse ' + (this._parseCancel ? 'stopped' : 'complete') + ': ' + done + '/' + todo.length + ' page(s), ' + blocks + ' block(s).', dismissible: true }); } catch (_e) {}
+    // Reload all parsed-block overlays once after the full parse
+    try { this._loadPdfParsedBlocks().catch(() => {}); } catch (_e) {}
   }
   // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
   async _snipToClipboard(el) {
@@ -9098,6 +9216,115 @@ class CanvasView {
     const loaded = new Set(out.map((r) => r.guid));
     for (const r of (this._pdfHlRegions || [])) { if (r.deleted) continue; if (r.guid && loaded.has(r.guid)) continue; out.push(r); } // keep unsaved/in-session regions
     this._pdfHlRegions = out; this.dirty = true;
+  }
+  // PDF PARSED BLOCKS (A4 overlay): cold-start load — query PDF Highlights records whose Anchor Data has kind='block'
+  // and a frac, grouped by fingerprint→live docId (same pattern as _loadPdfRegionHighlights). Safe to re-run.
+  async _loadPdfParsedBlocks() {
+    const col = await this.plugin._pdfHlCollection(); if (this.destroyed || !col) return;
+    let recs = []; try { recs = await col.getAllRecords() || []; } catch (_e) { return; }
+    if (this.destroyed) return;
+    const fpToDoc = new Map(); for (const e of (this.scene.elements || [])) { if (e && e.type === 'image' && e.pdf && !e.isDeleted && e.pdf.fingerprint && e.pdf.docId && !fpToDoc.has(e.pdf.fingerprint)) fpToDoc.set(e.pdf.fingerprint, e.pdf.docId); }
+    if (!fpToDoc.size) return;
+    const out = [];
+    for (const rec of recs) {
+      if (!rec || !rec.guid) continue;
+      const hid = this._propText(rec, 'Highlight Id'); if (!hid || hid.indexOf('parse:') !== 0) continue;
+      const ad = this._readHlAnchor(rec); if (!ad || ad.kind !== 'block' || !ad.frac) continue;
+      let status = ''; try { const sp = rec.prop('Status'); status = (sp && sp.choiceLabel && sp.choiceLabel()) || ''; } catch (_e) {} if (status === 'archived') continue;
+      const fp = this._propText(rec, 'PDF Fingerprint'); const docId = fpToDoc.get(fp) || ad.docId; if (!docId) continue;
+      let page = null; try { const p = rec.prop('Page'); page = p && p.number ? p.number() : null; } catch (_e) {}
+      if (!page) continue;
+      let kind = ''; try { const kp = rec.prop('Extracted Kind'); kind = (kp && kp.choiceLabel && kp.choiceLabel()) || ''; } catch (_e) {}
+      const text = this._propText(rec, 'Extracted Text');
+      out.push({ guid: rec.guid, docId, page, frac: ad.frac, kind: kind || 'text', text, inferred: !!ad.inferred });
+    }
+    this._pdfParsedBlocks = out; this.dirty = true;
+  }
+  // PDF PARSED BLOCKS: draw tinted, kind-colored overlay boxes on top of the PDF page images. Cloned from
+  // _drawPdfRegionHighlights — same world-space rendering, rotation-aware via _imgRegionQuad. Dashed border = inferred.
+  _drawPdfParsedBlocks(ctx) {
+    if (this._pdfBlocksVisible === false) return;
+    const blocks = this._pdfParsedBlocks; if (!blocks || !blocks.length) return;
+    const z = this.camera.zoom;
+    // Kind → tint color
+    const TINT = { table: '#3b82f6', figure: '#f97316', equation: '#8b5cf6', text: '#94a3b8' };
+    const pm = this._pdfPageElMap(); // review MED: O(elements) once, not O(blocks × elements) per frame (a full parse is hundreds of blocks)
+    ctx.save();
+    for (const blk of blocks) {
+      const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
+      const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue;
+      const hex = TINT[blk.kind] || TINT.text;
+      const path = () => { ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y); ctx.closePath(); };
+      // Fill
+      ctx.globalAlpha = 0.12; ctx.fillStyle = hex; path(); ctx.fill();
+      // Border (dashed if inferred)
+      ctx.globalAlpha = 0.8; ctx.lineWidth = 1.2 / z; ctx.strokeStyle = hex;
+      if (blk.inferred) { ctx.setLineDash([4 / z, 3 / z]); } else { ctx.setLineDash([]); }
+      path(); ctx.stroke();
+      ctx.setLineDash([]);
+      // Tiny kind label near the top-left corner of the quad (world space)
+      const lx = quad[0].x, ly = quad[0].y;
+      const labelSize = Math.max(8, Math.min(13, 11 / z));
+      ctx.globalAlpha = 0.85; ctx.font = 'bold ' + labelSize + 'px system-ui,sans-serif'; ctx.fillStyle = hex;
+      ctx.fillText(blk.kind, lx + 2 / z, ly + labelSize + 1 / z);
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+  }
+  // PDF PARSED BLOCKS: topmost block under a world point. Rotation-aware via quad (mirrors _regionHlAt).
+  // review MED: O(1) page lookup map (docId:page → page element), built once per frame instead of _pdfPagesOf (full filter+sort) per block.
+  _pdfPageElMap() {
+    const m = new Map();
+    for (const e of ((this.scene && this.scene.elements) || [])) { if (e && e.type === 'image' && e.pdf && !e.isDeleted) m.set(e.pdf.docId + ':' + e.pdf.page, e); }
+    return m;
+  }
+  _parsedBlockAt(wx, wy) {
+    if (this._pdfBlocksVisible === false) return null;
+    const blocks = this._pdfParsedBlocks; if (!blocks) return null;
+    const pm = this._pdfPageElMap();
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const blk = blocks[i];
+      const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
+      const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue;
+      if (pointInPoly(wx, wy, quad.map((p) => [p.x, p.y]))) return blk;
+    }
+    return null;
+  }
+  // PDF PARSED BLOCKS: show a small popup with the block's text content + Copy + Open Record buttons.
+  _showParsedBlockPopup(block, sx, sy) {
+    this._closeParsedBlockPopup();
+    const box = document.createElement('div'); box.className = 'pxc-pblock-popup'; this._parsedBlockPopupEl = box;
+    try { this._themePanel(box); } catch (_e) {}
+    box.addEventListener('pointerdown', (e) => e.stopPropagation());
+    box.addEventListener('wheel', (e) => e.stopPropagation());
+    // Header
+    const TINT = { table: '#3b82f6', figure: '#f97316', equation: '#8b5cf6', text: '#94a3b8' };
+    const head = document.createElement('div'); head.className = 'pxc-pblock-head';
+    const badge = document.createElement('span'); badge.className = 'pxc-pblock-badge'; badge.style.background = TINT[block.kind] || TINT.text; badge.textContent = block.kind; head.appendChild(badge);
+    const closeBtn = document.createElement('button'); closeBtn.className = 'pxc-pblock-close'; closeBtn.textContent = '✕'; closeBtn.title = 'Close'; closeBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); }); head.appendChild(closeBtn);
+    box.appendChild(head);
+    // Content
+    const body = document.createElement('div'); body.className = 'pxc-pblock-body';
+    const pre = document.createElement('pre'); pre.className = 'pxc-pblock-text'; pre.textContent = (block.text || '').slice(0, 2000) || '(no text)'; body.appendChild(pre);
+    box.appendChild(body);
+    // Buttons
+    const footer = document.createElement('div'); footer.className = 'pxc-pblock-footer';
+    const copyBtn = document.createElement('button'); copyBtn.className = 'pxc-rc-btn'; copyBtn.textContent = 'Copy'; copyBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { navigator.clipboard.writeText(block.text || ''); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block text copied.', dismissible: true }); } catch (_e2) {} }); footer.appendChild(copyBtn);
+    if (block.guid) { const openBtn = document.createElement('button'); openBtn.className = 'pxc-rc-btn'; openBtn.textContent = 'Open record'; openBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { this._openRecord(block.guid); } catch (_e) {} this._closeParsedBlockPopup(); }); footer.appendChild(openBtn); } // review HIGH: _openRecord resolves the workspace GUID + panel.navigateTo (there is no ui.openRecord on the canvas)
+    box.appendChild(footer);
+    this.wrap.appendChild(box);
+    // Position: keep in viewport
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600;
+    const bw = box.offsetWidth || 280, bh = box.offsetHeight || 160;
+    box.style.left = Math.max(4, Math.min(ww - bw - 4, sx + 12)) + 'px';
+    box.style.top = Math.max(4, Math.min(wh - bh - 4, sy - Math.min(bh / 2, 60))) + 'px';
+    // Close on Esc
+    const onKey = (e) => { if (e.key === 'Escape') { this._closeParsedBlockPopup(); document.removeEventListener('keydown', onKey, true); } };
+    document.addEventListener('keydown', onKey, true);
+    this._parsedBlockPopupKeyHandler = onKey;
+  }
+  _closeParsedBlockPopup() {
+    if (this._parsedBlockPopupEl) { try { this._parsedBlockPopupEl.remove(); } catch (_e) {} this._parsedBlockPopupEl = null; }
+    if (this._parsedBlockPopupKeyHandler) { try { document.removeEventListener('keydown', this._parsedBlockPopupKeyHandler, true); } catch (_e) {} this._parsedBlockPopupKeyHandler = null; }
   }
   // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
   _snapshotElement(el) {
@@ -9339,6 +9566,7 @@ class CanvasView {
     try { setTimeout(() => { if (!this.destroyed) this._reconcileComments().catch(() => {}); }, 1200); } catch (_e) {} // C1: rejoin/seed comment mirrors a moment after load (deferred, non-blocking; backing + scene settled by then)
     try { setTimeout(() => { if (!this.destroyed) this._reconcilePdfFigures().catch(() => {}); }, 1300); } catch (_e) {} // A2: rejoin/seed PDF-figure mirrors (staggered after comments so the two reconciles don't contend on getAllRecords)
     try { setTimeout(() => { if (!this.destroyed) this._loadPdfRegionHighlights().catch(() => {}); }, 1500); } catch (_e) {} // A3: re-show region highlights for the PDFs on this canvas (staggered after the figure reconcile)
+    try { setTimeout(() => { if (!this.destroyed) this._loadPdfParsedBlocks().catch(() => {}); }, 1700); } catch (_e) {} // A4: load parsed-block overlays (Heptabase-style) from the PDF Highlights collection
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -9950,7 +10178,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -10086,6 +10314,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)
@@ -11885,6 +12114,16 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-rc-btn { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 1px solid var(--cards-border-color, #333a4a); border-radius: 6px; background: var(--input-bg-color, #232838); color: var(--color-text-400, #e6e8ee); cursor: pointer; font: 12px/1.2 system-ui, sans-serif; }
 .pxc-host .pxc-root .pxc-rc-btn:hover { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
 .pxc-host .pxc-root .pxc-rc-btn.pxc-rc-on { border-color: #06b6d4; box-shadow: inset 0 0 0 1px #06b6d4; } /* round-5 A: the currently-targeted ref (or "Whole box") */
+/* A4: PDF parsed-block popup (Heptabase-style — dblclick a block overlay to see its content + Copy + Open) */
+.pxc-host .pxc-root .pxc-pblock-popup { position: absolute; z-index: 7; display: flex; flex-direction: column; width: 280px; max-height: 60vh; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.42); font: 12px/1.4 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); overflow: hidden; }
+.pxc-host .pxc-root .pxc-pblock-head { display: flex; align-items: center; gap: 6px; padding: 7px 8px 6px; border-bottom: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-pblock-badge { padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 600; color: #fff; letter-spacing: .02em; text-transform: uppercase; }
+.pxc-host .pxc-root .pxc-pblock-close { margin-left: auto; background: none; border: none; color: var(--color-text-400, #e6e8ee); cursor: pointer; font-size: 12px; opacity: .6; padding: 0 2px; }
+.pxc-host .pxc-root .pxc-pblock-close:hover { opacity: 1; }
+.pxc-host .pxc-root .pxc-pblock-body { flex: 1; overflow-y: auto; padding: 6px 8px; }
+.pxc-host .pxc-root .pxc-pblock-text { margin: 0; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 'Menlo','Consolas','ui-monospace',monospace; color: var(--color-text-400, #e6e8ee); }
+.pxc-host .pxc-root .pxc-pblock-footer { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--cards-border-color, #333a4a); }
+.pxc-host .pxc-root .pxc-pblock-footer .pxc-rc-btn { flex: 1; text-align: center; padding: 5px 8px; }
 /* C2 round 3: connection info card (source / direction / thumbnail) on hover or select */
 .pxc-host .pxc-root .pxc-conninfo { position: absolute; z-index: 6; display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 5px 8px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.32); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); pointer-events: none; transform: translate(-50%, 0); }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }

@@ -1,5 +1,20 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.194.0 — Parsed blocks drawn ON the PDF page images (highlighter-parity) (2026-06-28)
+Port of the PDF-Highlighter's on-PDF block overlays to the canvas's image-on-board model. After Parse (🧠), parsed blocks
+render as **tinted, rotation-aware, clickable boxes on the page images** (clone of `_drawPdfRegionHighlights` → `margins()` in
+both renderers; hit-test `_parsedBlockAt` via `_imgRegionQuad`+`pointInPoly`); **double-click a block → a popup** with its text +
+**Copy** + **Open record** (`_openRecord`). Accuracy WITHOUT a DOM text layer: `_pdfPageTextFrac` loads the retained pdf.js blob,
+`page.getTextContent()`, maps each text item via `pdfjs.Util.transform(vp.transform, item.transform)` → normalized page fractions;
+`_blockFracFromTextItems` locates a block's head+tail alnum → union → `{rx,ry,rw,rh}`. Fallbacks: LLM `bbox` ({x,y,w,h}→{rx..})
+then **layout inference** from matched neighbors (dashed border + `inferred` flag). Stored in block records' `Anchor Data
+{frac,docId,kind:'block',inferred}` (the canvas `bbox` was added to its OWN `pxcExtractSysPrompt('page')` copy). `_loadPdfParsedBlocks`
+→ `this._pdfParsedBlocks`; toggle command "Plexus: Toggle PDF parsed-block overlays". **Adversarial review: coordinate math SOUND,
+WebGL-ctx a non-issue; fixed 2 HIGH (dead `ui.openRecord`→`_openRecord`; `destroy()` popup DOM+keydown leak) + 1 MED (per-frame
+O(blocks×elements) → one `_pdfPageElMap` lookup).** Known follow-ups: figure/equation accuracy = LLM bbox only (no text-layer
+text); no outside-click popup close; head/tail text-match can over-span on repeated strings. node -c clean; suite 8/8 green.
+Next canvas ship: multi-select (Shift+click/drag-box → Copy-N) + jump-to-PDF parity. Deploy = PM reinstall from GitHub.
+
 ## ✅ v1.193.0 — AI Parse: whole-page / whole-PDF → typed blocks (Heptabase "Parse" port) (2026-06-27)
 New **🧠 Parse** toolbar button (single page) + **"Parse entire PDF (AI)"** command. Renders each page hi-DPI, sends it to the
 vision LLM with a "segment into ordered reading-order blocks" prompt, and writes **one queryable PDF Highlights record per block**
