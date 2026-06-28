@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.201.0';
+const PLEXUS_VERSION = '1.202.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9633,6 +9633,29 @@ class CanvasView {
       try { this.plugin.ui.addToaster({ title: 'Card dropped with ' + n + ' block' + (n === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
     });
     bar.appendChild(cardBtn);
+    // Ask AI button — synthesize an answer about the selected blocks, dropped as a board card
+    const askBtn = document.createElement('button'); askBtn.className = 'pxc-rc-btn'; askBtn.textContent = 'Ask AI';
+    askBtn.addEventListener('pointerdown', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const blocks = (this._pdfParsedBlocks || []).filter((b) => sel.has(b.guid));
+      blocks.sort((a, b) => {
+        if (a.page !== b.page) return (a.page || 0) - (b.page || 0);
+        const ia = (a.guid && (a.guid.match(/:b(\d+)/) || [])[1]); const ib = (b.guid && (b.guid.match(/:b(\d+)/) || [])[1]);
+        if (ia != null && ib != null) return parseInt(ia, 10) - parseInt(ib, 10);
+        return 0;
+      });
+      const combined = blocks.map((b) => b.text || '').filter(Boolean).join('\n\n---\n\n');
+      if (!combined.trim()) { try { this.plugin.ui.addToaster({ title: 'Selected blocks have no text.', dismissible: true }); } catch (_e) {} return; }
+      let q = null; try { q = await this._promptText('Ask AI about these ' + n + ' block(s):', ''); } catch (_e) {}
+      if (!q) return;
+      try { this.plugin.ui.addToaster({ title: '🧠 Asking AI…', dismissible: true }); } catch (_e) {}
+      const SYS = 'You are analyzing excerpts extracted from a PDF. Answer the question using ONLY the provided excerpts. Be concise and note which excerpt supports each claim. If the excerpts do not contain the answer, say so plainly.';
+      let ans = null; try { ans = await this._aiComplete(SYS, 'Question: ' + q + '\n\nExcerpts:\n\n' + combined); } catch (_e) {}
+      if (!ans) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI returned nothing (configure the provider + key in settings).', dismissible: true }); } catch (_e) {} return; }
+      try { this._dropExtractCard(null, 'ai', 'Q: ' + q + '\n\n' + ans, 12000); } catch (_e) {}
+      try { this.plugin.ui.addToaster({ title: 'AI answer dropped on the board.', dismissible: true }); } catch (_e) {}
+    });
+    bar.appendChild(askBtn);
     // Clear button
     const clrBtn = document.createElement('button'); clrBtn.className = 'pxc-rc-btn'; clrBtn.textContent = 'Clear';
     clrBtn.addEventListener('pointerdown', (e) => {

@@ -1,5 +1,11 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.202.0 — Ask AI about selected blocks (2026-06-28)
+PDF-feature loop iteration 8 (final). The multi-select bar gains an **Ask AI** button: it gathers the Shift-selected blocks'
+text in reading order, prompts for a question (`_promptText` in-DOM modal — Electron-safe), sends `question + excerpts` to
+`_aiComplete` under a "answer ONLY from the excerpts, cite which one" system prompt, and drops the synthesized answer as a board
+card (`_dropExtractCard`). Closes the 8-feature PDF loop. `tests/pxc_*.test.js` green.
+
 ## ✅ v1.201.0 — Nudge / resize an inferred block box (drag to fix) (2026-06-28)
 PDF-feature loop iteration 7. Inferred (dashed) block boxes are now **editable**: drag the body to move, or a corner handle to
 resize, then the corrected frac persists to the record (`inferred:false` → redraws **solid**). `_worldToImageFrac` is the
