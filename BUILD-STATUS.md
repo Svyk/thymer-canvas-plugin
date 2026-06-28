@@ -1,5 +1,15 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.195.0 — Multi-select parsed blocks (Shift+click → Copy/Card bar) (2026-06-28)
+PDF-feature loop iteration 1. **Shift+click** a parsed block (no drag) toggles it into a selection set
+(`this._pdfBlockSel`, a Set of block guids) — intercepted at the top of `onUp` gated on `e.shiftKey && !moved &&
+(mode==='move'||mode==='pan') && tool==='select'`, and only when `_parsedBlockAt` actually hits a block (falls through to
+normal canvas behavior otherwise). Selected boxes draw **brighter** (fill α .28 vs .12, border 2.2/z vs 1.2/z, solid even if
+inferred, + a filled ✓ corner). A **floating bar** (`_refreshBlockSelBar`, bottom-center of the host) shows "N selected ·
+Copy Markdown · + Card · Clear": Copy joins the selected blocks' text in reading order (page, then `:b<idx>`) with `\n\n---\n\n`
+→ clipboard; + Card drops the combined text as a board card (`_dropExtractCard(null,…)` → camera center); Clear empties the set.
+Teardown wired into `destroy()`. Shift+drag marquee deferred (canvas `grouplasso` routing). All `tests/pxc_*.test.js` green.
+
 ## ✅ v1.194.0 — Parsed blocks drawn ON the PDF page images (highlighter-parity) (2026-06-28)
 Port of the PDF-Highlighter's on-PDF block overlays to the canvas's image-on-board model. After Parse (🧠), parsed blocks
 render as **tinted, rotation-aware, clickable boxes on the page images** (clone of `_drawPdfRegionHighlights` → `margins()` in

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.194.0';
+const PLEXUS_VERSION = '1.195.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -3909,6 +3909,12 @@ class CanvasView {
         return;
       }
       if (!mode) return; clearLP(); // S10: a quick tap-release never triggers the long-press open
+      // MULTI-SELECT PARSED BLOCKS: Shift+click (no drag) on a parsed PDF block → toggle block in selection set.
+      // Intercepts both 'move' (click on canvas element) and 'pan' (click on empty space under a block).
+      if (e.shiftKey && !moved && (mode === 'move' || mode === 'pan') && this.tool === 'select') {
+        const _w = this._worldAt(e); const _pb = this._parsedBlockAt(_w.x, _w.y);
+        if (_pb) { try { host.releasePointerCapture(e.pointerId); } catch (_e2) {} mode = null; this._toggleBlockSel(_pb.guid); return; }
+      }
       if (mode === 'create' && created) {
         normRect(created);
         if (created.width < 4 && created.height < 4) created.isDeleted = true;
@@ -9249,17 +9255,19 @@ class CanvasView {
     // Kind → tint color
     const TINT = { table: '#3b82f6', figure: '#f97316', equation: '#8b5cf6', text: '#94a3b8' };
     const pm = this._pdfPageElMap(); // review MED: O(elements) once, not O(blocks × elements) per frame (a full parse is hundreds of blocks)
+    const _bsel = this._pdfBlockSel;
     ctx.save();
     for (const blk of blocks) {
       const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
       const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue;
       const hex = TINT[blk.kind] || TINT.text;
+      const isSel = _bsel && _bsel.has(blk.guid);
       const path = () => { ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y); ctx.closePath(); };
-      // Fill
-      ctx.globalAlpha = 0.12; ctx.fillStyle = hex; path(); ctx.fill();
-      // Border (dashed if inferred)
-      ctx.globalAlpha = 0.8; ctx.lineWidth = 1.2 / z; ctx.strokeStyle = hex;
-      if (blk.inferred) { ctx.setLineDash([4 / z, 3 / z]); } else { ctx.setLineDash([]); }
+      // Fill — brighter when selected
+      ctx.globalAlpha = isSel ? 0.28 : 0.12; ctx.fillStyle = hex; path(); ctx.fill();
+      // Border — solid + thicker when selected; dashed if inferred (and not selected)
+      ctx.globalAlpha = 0.8; ctx.lineWidth = (isSel ? 2.2 : 1.2) / z; ctx.strokeStyle = hex;
+      if (!isSel && blk.inferred) { ctx.setLineDash([4 / z, 3 / z]); } else { ctx.setLineDash([]); }
       path(); ctx.stroke();
       ctx.setLineDash([]);
       // Tiny kind label near the top-left corner of the quad (world space)
@@ -9267,6 +9275,15 @@ class CanvasView {
       const labelSize = Math.max(8, Math.min(13, 11 / z));
       ctx.globalAlpha = 0.85; ctx.font = 'bold ' + labelSize + 'px system-ui,sans-serif'; ctx.fillStyle = hex;
       ctx.fillText(blk.kind, lx + 2 / z, ly + labelSize + 1 / z);
+      // Check mark in top-left corner when selected
+      if (isSel) {
+        const cs = Math.max(7, 9 / z);
+        ctx.globalAlpha = 0.92; ctx.fillStyle = hex;
+        ctx.fillRect(lx - cs * 0.1, ly - cs * 0.1, cs, cs);
+        ctx.fillStyle = '#fff'; ctx.globalAlpha = 1;
+        ctx.font = 'bold ' + (cs * 0.85) + 'px system-ui,sans-serif';
+        ctx.fillText('✓', lx + cs * 0.05, ly + cs * 0.82);
+      }
     }
     ctx.globalAlpha = 1; ctx.restore();
   }
@@ -9325,6 +9342,72 @@ class CanvasView {
   _closeParsedBlockPopup() {
     if (this._parsedBlockPopupEl) { try { this._parsedBlockPopupEl.remove(); } catch (_e) {} this._parsedBlockPopupEl = null; }
     if (this._parsedBlockPopupKeyHandler) { try { document.removeEventListener('keydown', this._parsedBlockPopupKeyHandler, true); } catch (_e) {} this._parsedBlockPopupKeyHandler = null; }
+  }
+  // MULTI-SELECT PARSED BLOCKS: toggle a block guid in the selection set, refresh the floating bar.
+  _toggleBlockSel(guid) {
+    if (!this._pdfBlockSel) this._pdfBlockSel = new Set();
+    if (this._pdfBlockSel.has(guid)) { this._pdfBlockSel.delete(guid); } else { this._pdfBlockSel.add(guid); }
+    this.dirty = true;
+    this._refreshBlockSelBar();
+  }
+  // MULTI-SELECT PARSED BLOCKS: build/rebuild the floating selection bar (bottom-center of the canvas host).
+  _refreshBlockSelBar() {
+    this._closeBlockSelBar();
+    const sel = this._pdfBlockSel;
+    if (!sel || !sel.size) return;
+    const n = sel.size;
+    const bar = document.createElement('div'); bar.className = 'pxc-bsel-bar'; this._blockSelBarEl = bar;
+    bar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    bar.addEventListener('wheel', (e) => e.stopPropagation());
+    // Label
+    const lbl = document.createElement('span'); lbl.className = 'pxc-bsel-lbl'; lbl.textContent = n + ' selected'; bar.appendChild(lbl);
+    // Copy Markdown button
+    const copyBtn = document.createElement('button'); copyBtn.className = 'pxc-rc-btn'; copyBtn.textContent = 'Copy Markdown';
+    copyBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const blocks = (this._pdfParsedBlocks || []).filter((b) => sel.has(b.guid));
+      // Sort: by page, then by block index parsed from guid (parse:<fp>:p<page>:b<idx>), else array order
+      blocks.sort((a, b) => {
+        if (a.page !== b.page) return (a.page || 0) - (b.page || 0);
+        const ia = (a.guid && (a.guid.match(/:b(\d+)/) || [])[1]); const ib = (b.guid && (b.guid.match(/:b(\d+)/) || [])[1]);
+        if (ia != null && ib != null) return parseInt(ia, 10) - parseInt(ib, 10);
+        return 0;
+      });
+      const md = blocks.map((b) => b.text || '').join('\n\n---\n\n');
+      try { navigator.clipboard.writeText(md); } catch (_e) {}
+      try { this.plugin.ui.addToaster({ title: 'Copied ' + n + ' block' + (n === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+    });
+    bar.appendChild(copyBtn);
+    // + Card button
+    const cardBtn = document.createElement('button'); cardBtn.className = 'pxc-rc-btn'; cardBtn.textContent = '+ Card';
+    cardBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const blocks = (this._pdfParsedBlocks || []).filter((b) => sel.has(b.guid));
+      blocks.sort((a, b) => {
+        if (a.page !== b.page) return (a.page || 0) - (b.page || 0);
+        const ia = (a.guid && (a.guid.match(/:b(\d+)/) || [])[1]); const ib = (b.guid && (b.guid.match(/:b(\d+)/) || [])[1]);
+        if (ia != null && ib != null) return parseInt(ia, 10) - parseInt(ib, 10);
+        return 0;
+      });
+      const combined = blocks.map((b) => b.text || '').join('\n\n---\n\n');
+      try { this._dropExtractCard(null, 'selection', combined, 8000); } catch (_e) {}
+      try { this.plugin.ui.addToaster({ title: 'Card dropped with ' + n + ' block' + (n === 1 ? '' : 's') + '.', dismissible: true }); } catch (_e) {}
+    });
+    bar.appendChild(cardBtn);
+    // Clear button
+    const clrBtn = document.createElement('button'); clrBtn.className = 'pxc-rc-btn'; clrBtn.textContent = 'Clear';
+    clrBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (this._pdfBlockSel) { this._pdfBlockSel.clear(); }
+      this.dirty = true;
+      this._closeBlockSelBar();
+    });
+    bar.appendChild(clrBtn);
+    this.wrap.appendChild(bar);
+  }
+  // MULTI-SELECT PARSED BLOCKS: remove the floating selection bar DOM node.
+  _closeBlockSelBar() {
+    if (this._blockSelBarEl) { try { this._blockSelBarEl.remove(); } catch (_e) {} this._blockSelBarEl = null; }
   }
   // Render one image element (honoring its crop) to a standalone PNG Blob — for embedding into a note.
   _snapshotElement(el) {
@@ -10178,7 +10261,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -12124,6 +12207,10 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-pblock-text { margin: 0; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 'Menlo','Consolas','ui-monospace',monospace; color: var(--color-text-400, #e6e8ee); }
 .pxc-host .pxc-root .pxc-pblock-footer { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--cards-border-color, #333a4a); }
 .pxc-host .pxc-root .pxc-pblock-footer .pxc-rc-btn { flex: 1; text-align: center; padding: 5px 8px; }
+/* A4b: PDF parsed-block multi-select floating bar (Shift+click blocks → bottom-center action bar) */
+.pxc-host .pxc-root .pxc-bsel-bar { position: absolute; z-index: 8; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 7px 10px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 22px; box-shadow: 0 6px 22px rgba(0,0,0,.45); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); white-space: nowrap; }
+.pxc-host .pxc-root .pxc-bsel-bar .pxc-bsel-lbl { opacity: .75; font-weight: 600; margin-right: 2px; }
+.pxc-host .pxc-root .pxc-bsel-bar .pxc-rc-btn { width: auto; text-align: center; padding: 4px 10px; border-radius: 14px; }
 /* C2 round 3: connection info card (source / direction / thumbnail) on hover or select */
 .pxc-host .pxc-root .pxc-conninfo { position: absolute; z-index: 6; display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 5px 8px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.32); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); pointer-events: none; transform: translate(-50%, 0); }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
