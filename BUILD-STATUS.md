@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.198.0 — Extract all PDF tables → clipboard (2026-06-28)
+PDF-feature loop iteration 4. Command **Plexus: Extract all PDF tables → clipboard** (`ti-table`, validated against the live
+441-icon Thymer stylesheet). `_extractAllTables()` gathers every parsed `table` block (scoped to the active PDF doc via
+`_activePdfDocId()` when it has tables, else all on the canvas) in reading order (page, then `:b<idx>`), each table's already-
+Markdown `Extracted Text` joined under a `### Table N — pP` header → `navigator.clipboard.writeText` + count toast (graceful
+"clipboard blocked" fallback). Loads blocks first if not cached. `tests/pxc_*.test.js` green.
+
 ## ✅ v1.197.0 — Figure box accuracy via pdf.js image-XObject geometry (2026-06-28)
 PDF-feature loop iteration 3. Figures / scanned tables (no text-layer text) now snap to the **exact drawn-image box** instead of
 the model's approximate bbox. `_pdfPageImageFrac(docId,page)` runs pdf.js `getOperatorList()` and tracks the CTM (save/restore +

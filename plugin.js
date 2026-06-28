@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.197.0';
+const PLEXUS_VERSION = '1.198.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9454,6 +9454,20 @@ class CanvasView {
     const blocks = (this._pdfParsedBlocks || []).filter((b) => sel.has(b.guid)).sort((a, b) => ((a.page || 0) - (b.page || 0)) || (bidx(a.guid) - bidx(b.guid)));
     if (blocks[0]) this._gotoParsedBlock(blocks[0]);
   }
+  // EXTRACT ALL TABLES: gather every parsed table block (active PDF if there is one, else all on the canvas) in reading
+  // order → combined Markdown to the clipboard. Tables' Extracted Text is already a Markdown table (pxcBlockToMd).
+  async _extractAllTables() {
+    if (!this._pdfParsedBlocks || !this._pdfParsedBlocks.length) { try { await this._loadPdfParsedBlocks(); } catch (_e) {} }
+    let blocks = (this._pdfParsedBlocks || []).filter((b) => b.kind === 'table' && (b.text || '').trim());
+    const active = this._activePdfDocId();
+    if (active && blocks.some((b) => b.docId === active)) blocks = blocks.filter((b) => b.docId === active);
+    if (!blocks.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no parsed tables on this canvas (Parse the PDF first).', dismissible: true }); } catch (_e) {} return; }
+    const bidx = (g) => { const m = g && g.match(/:b(\d+)/); return m ? parseInt(m[1], 10) : 0; };
+    blocks.sort((a, b) => ((a.page || 0) - (b.page || 0)) || (bidx(a.guid) - bidx(b.guid)));
+    const md = blocks.map((b, i) => '### Table ' + (i + 1) + ' — p' + (b.page || '?') + '\n\n' + (b.text || '').trim()).join('\n\n');
+    let ok = false; try { await navigator.clipboard.writeText(md); ok = true; } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: (ok ? 'Copied ' : 'Collected ') + blocks.length + ' table' + (blocks.length === 1 ? '' : 's') + (ok ? ' to clipboard.' : ' (clipboard blocked).'), dismissible: true }); } catch (_e) {}
+  }
   // MULTI-SELECT PARSED BLOCKS: toggle a block guid in the selection set, refresh the floating bar.
   _toggleBlockSel(guid) {
     if (!this._pdfBlockSel) this._pdfBlockSel = new Set();
@@ -10510,6 +10524,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Go to selected PDF block', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._gotoSelectedBlock(); } }); // jump-to-PDF: fly+flash the first Shift+selected parsed block on its page. ti-target = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract all PDF tables → clipboard', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (v) v._extractAllTables(); } }); // collect every parsed table block (active PDF) → combined Markdown to clipboard. ti-table = confirmed-bundled (live stylesheet scan)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)
