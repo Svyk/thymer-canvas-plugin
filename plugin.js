@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.196.0';
+const PLEXUS_VERSION = '1.197.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -8899,6 +8899,90 @@ class CanvasView {
       return { rx: Math.max(0, x0), ry: Math.max(0, y0), rw: Math.min(1, x1 - x0), rh: Math.min(1, y1 - y0) };
     } catch (_e) { return null; }
   }
+  // PDF PARSED BLOCKS (figure box accuracy): extract drawn-image (XObject / inline) placements on a page via pdf.js
+  // getOperatorList + CTM tracking. Each painted image's unit square is mapped through the current CTM then the viewport
+  // transform → normalized page-fraction rect {rx,ry,rw,rh}. Lets figure / scanned-table blocks snap to the EXACT image
+  // box instead of the model's approximate bbox. Cached per (docId,page) on this._pdfImgCache.
+  async _pdfPageImageFrac(docId, page) {
+    if (!docId || !page) return null;
+    if (!this._pdfImgCache) this._pdfImgCache = new Map();
+    const cacheKey = docId + ':' + page;
+    if (this._pdfImgCache.has(cacheKey)) return this._pdfImgCache.get(cacheKey);
+    let result = null;
+    try {
+      const meta = this.scene.appState && this.scene.appState.pdfBlobs && this.scene.appState.pdfBlobs[docId];
+      if (!meta || !meta.blobGuid) return null;
+      let url = null; try { url = await this.plugin._assetGet({ blobGuid: meta.blobGuid }); } catch (_e) {}
+      if (!url) return null;
+      let pdfjs = null; try { pdfjs = await loadLib(LIB.pdfjs); } catch (_e) {}
+      if (!pdfjs) { try { URL.revokeObjectURL(url); } catch (_e) {} return null; }
+      let doc = null;
+      try {
+        const hasWorker = await this._pdfSetupWorker(pdfjs);
+        const buf = await (await fetch(url)).arrayBuffer();
+        doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise;
+        const pg = await doc.getPage(page);
+        const vp = pg.getViewport({ scale: 1 });
+        const W = vp.width || 1, H = vp.height || 1;
+        const opl = await pg.getOperatorList();
+        const OPS = pdfjs.OPS, U = pdfjs.Util;
+        // Real single-placement image paint ops in pdfjs-dist@4.6.82 (verified against the OPS enum): a bare unit-square through
+        // the CTM is correct for these. Excluded on purpose: *Repeat / *Group variants carry a positions[] array (tiled), so the
+        // bare-unit-square mapping would mis-box them — rare for a figure/table, accepted gap. .filter keeps it version-robust.
+        const IMG_OPS = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject].filter((v) => v != null));
+        let ctm = [1, 0, 0, 1, 0, 0]; const stack = [];
+        const rects = [];
+        const fns = opl.fnArray || [], argsA = opl.argsArray || [];
+        for (let k = 0; k < fns.length; k++) {
+          const fn = fns[k];
+          if (fn === OPS.save) { stack.push(ctm.slice()); continue; }
+          if (fn === OPS.restore) { if (stack.length) ctm = stack.pop(); continue; }
+          if (fn === OPS.transform) { const m = argsA[k]; if (m && m.length === 6) ctm = U.transform(ctm, m); continue; }
+          // Form XObjects bracket their inlined content with Begin/End and carry their own matrix (arg[0]); treat like save+cm / restore
+          if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm.slice()); const m = argsA[k] && argsA[k][0]; if (m && m.length === 6) ctm = U.transform(ctm, m); continue; }
+          if (fn === OPS.paintFormXObjectEnd) { if (stack.length) ctm = stack.pop(); continue; }
+          if (IMG_OPS.has(fn)) {
+            const full = U.transform(vp.transform, ctm); // unit-square user space → device pixels
+            let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+            for (const c of [[0, 0], [1, 0], [1, 1], [0, 1]]) { const p = U.applyTransform(c, full); x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+            if (!isFinite(x0) || x1 <= x0 || y1 <= y0) continue;
+            const rx = Math.max(0, Math.min(1, x0 / W)), ry = Math.max(0, Math.min(1, y0 / H));
+            const rw = Math.max(0, Math.min(1 - rx, (x1 - x0) / W)), rh = Math.max(0, Math.min(1 - ry, (y1 - y0) / H));
+            if (rw * rh < 0.0009) continue; // drop sub-3%-linear specks (bullets, rule lines, 1px masks)
+            rects.push({ _id: rects.length, rx, ry, rw, rh });
+          }
+        }
+        result = rects;
+      } catch (_e) {} finally { try { doc && doc.destroy && doc.destroy(); } catch (_e) {} try { URL.revokeObjectURL(url); } catch (_e) {} }
+    } catch (_e) {}
+    if (result) this._pdfImgCache.set(cacheKey, result);
+    return result;
+  }
+  // PDF PARSED BLOCKS (figure box accuracy): choose the image rect that best fits a figure / table block. With a model bbox,
+  // pick the highest-IoU rect (≥0.1, so we snap only when the model's guess actually overlaps a real image); without a bbox,
+  // pick the largest sub-full-page image. Skips already-claimed rects and full-page background scans (≥0.85 area).
+  _matchImageRect(imgRects, bbox, claimed) {
+    if (!imgRects || !imgRects.length) return null;
+    const cand = imgRects.filter((r) => !claimed.has(r._id) && (r.rw * r.rh) < 0.85);
+    if (!cand.length) return null;
+    let bx = 0, by = 0, bw = 0, bh = 0;
+    if (bbox && typeof bbox === 'object') {
+      bx = Math.max(0, Math.min(1, Number(bbox.x) || 0)); by = Math.max(0, Math.min(1, Number(bbox.y) || 0));
+      bw = Math.max(0, Math.min(1, Number(bbox.w) || 0)); bh = Math.max(0, Math.min(1, Number(bbox.h) || 0));
+    }
+    if (bw > 0.01 && bh > 0.01) {
+      let best = null, bestIoU = 0;
+      for (const r of cand) {
+        const ix0 = Math.max(bx, r.rx), iy0 = Math.max(by, r.ry), ix1 = Math.min(bx + bw, r.rx + r.rw), iy1 = Math.min(by + bh, r.ry + r.rh);
+        const inter = Math.max(0, ix1 - ix0) * Math.max(0, iy1 - iy0);
+        const uni = bw * bh + r.rw * r.rh - inter;
+        const iou = uni > 0 ? inter / uni : 0;
+        if (iou > bestIoU) { bestIoU = iou; best = r; }
+      }
+      return bestIoU >= 0.1 ? best : null;
+    }
+    return cand.slice().sort((a, b) => (b.rw * b.rh) - (a.rw * a.rh))[0] || null;
+  }
   // AI EXTRACT (Heptabase "Parse" port): render the WHOLE page hi-DPI, segment it into ordered typed blocks via the vision LLM,
   // and write one queryable PDF Highlights record per block (Extracted Kind/Text + Block Index + Page, deduped by a deterministic
   // key so re-parse replaces). opts.cards (single-page only) also drops ONE joined Markdown "page transcript" card beside the page.
@@ -8924,6 +9008,9 @@ class CanvasView {
     const section = this._sectionForPage(docId, page);
     // Build text-position index for this page (best-effort; null = no retained PDF or pre-feature import)
     let textIndex = null; try { textIndex = await this._pdfPageTextFrac(docId, page); } catch (_e) {}
+    // Image-XObject rects for figure / scanned-table box accuracy (geometry-exact, not the model's approximate bbox)
+    let imgRects = null; try { imgRects = await this._pdfPageImageFrac(docId, page); } catch (_e) {}
+    const imgClaimed = new Set();
     let made = 0; const mdParts = [];
     // First pass: compute fracs for all blocks so we can layout-infer from neighbors
     const blockFracs = new Array(blocks.length).fill(null);
@@ -8933,6 +9020,10 @@ class CanvasView {
       let frac = null;
       // 1. Try text-position match using pdf.js char rects
       if (textIndex && md) { try { frac = this._blockFracFromTextItems(textIndex, md); } catch (_e) {} }
+      // 1.5 Figures / scanned tables (no text-layer text): snap to a pdf.js image XObject rect (geometry-exact) over the LLM bbox
+      if (!frac && (b.kind === 'figure' || b.kind === 'table') && imgRects && imgRects.length) {
+        try { const snap = this._matchImageRect(imgRects, b.bbox, imgClaimed); if (snap) { frac = { rx: snap.rx, ry: snap.ry, rw: snap.rw, rh: snap.rh }; imgClaimed.add(snap._id); } } catch (_e) {}
+      }
       // 2. Fall back to the LLM bbox (if model returned it)
       if (!frac && b.bbox && typeof b.bbox === 'object') {
         try {

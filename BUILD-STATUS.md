@@ -1,5 +1,18 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.197.0 — Figure box accuracy via pdf.js image-XObject geometry (2026-06-28)
+PDF-feature loop iteration 3. Figures / scanned tables (no text-layer text) now snap to the **exact drawn-image box** instead of
+the model's approximate bbox. `_pdfPageImageFrac(docId,page)` runs pdf.js `getOperatorList()` and tracks the CTM (save/restore +
+`transform`/`cm` via `Util.transform`, **plus `paintFormXObjectBegin/End`** = save+matrix/restore so form-wrapped images place
+right), maps each painted image's unit square `[0,1]²` → device px via `Util.transform(vp.transform, ctm)` → page-fraction rect
+(cached per page). `_matchImageRect` picks the highest-IoU image rect over the model bbox (≥0.1; else the largest sub-full-page
+image), skipping claimed + ≥0.85-area background scans. Injected as step **1.5** in `_parsePdfPage` (figure/table only, after
+text-match, before the LLM-bbox fallback) → such blocks get a geometry-exact `frac` (solid border, `inferred:false`); on no match
+it falls through to bbox + layout-infer (dashed). **Adversarial review (code-reviewer vs pdfjs-dist@4.6.82 source)** confirmed the
+CTM math (validated on translation/rotation/nested-form cases) and caught a HIGH bug: `paintJpegXObject`/`paintInlineImage` don't
+exist in 4.6.82 → fixed to the real `paintInlineImageXObject` (+ dropped the tiling `*Repeat` op whose positions[] arg-shape the
+bare-unit-square mapping mis-boxes). All in try/catch — can't abort a page parse. `tests/pxc_*.test.js` green. (Highlighter port next.)
+
 ## ✅ v1.196.0 — Jump-to-PDF: fly+flash a parsed block on its page (2026-06-28)
 PDF-feature loop iteration 2. Block popup gains a **⤢ Go to page** button; new command **Plexus: Go to selected PDF block**
 (`ti-target`). Both route through `_gotoParsedBlock(block)`: resolve the page image via `_pdfPageElMap()`, then hand
