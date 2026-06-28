@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.199.0 — Block-kind filter chips (2026-06-28)
+PDF-feature loop iteration 5. A floating **kind-filter chip bar** (bottom-left) appears when overlays are on and ≥2 block
+kinds are present: one chip per kind (table/figure/equation/text), colored + counted; click toggles that kind off/on
+(`_toggleBlockKind` → `_pdfBlockKindHidden` Set, dimmed+strikethrough when off). `_drawPdfParsedBlocks` and `_parsedBlockAt`
+both skip hidden kinds (hidden boxes are neither drawn nor clickable). Bar refreshes on block-load + overlay-toggle; torn down
+in `destroy()`. `tests/pxc_*.test.js` green.
+
 ## ✅ v1.198.0 — Extract all PDF tables → clipboard (2026-06-28)
 PDF-feature loop iteration 4. Command **Plexus: Extract all PDF tables → clipboard** (`ti-table`, validated against the live
 441-icon Thymer stylesheet). `_extractAllTables()` gathers every parsed `table` block (scoped to the active PDF doc via

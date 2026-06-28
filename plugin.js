@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.198.0';
+const PLEXUS_VERSION = '1.199.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9336,6 +9336,7 @@ class CanvasView {
       out.push({ guid: rec.guid, docId, page, frac: ad.frac, kind: kind || 'text', text, inferred: !!ad.inferred });
     }
     this._pdfParsedBlocks = out; this.dirty = true;
+    try { this._refreshBlockKindBar(); } catch (_e) {}
   }
   // PDF PARSED BLOCKS: draw tinted, kind-colored overlay boxes on top of the PDF page images. Cloned from
   // _drawPdfRegionHighlights — same world-space rendering, rotation-aware via _imgRegionQuad. Dashed border = inferred.
@@ -9347,8 +9348,10 @@ class CanvasView {
     const TINT = { table: '#3b82f6', figure: '#f97316', equation: '#8b5cf6', text: '#94a3b8' };
     const pm = this._pdfPageElMap(); // review MED: O(elements) once, not O(blocks × elements) per frame (a full parse is hundreds of blocks)
     const _bsel = this._pdfBlockSel;
+    const _hidden = this._pdfBlockKindHidden;
     ctx.save();
     for (const blk of blocks) {
+      if (_hidden && _hidden.has(blk.kind)) continue; // kind-filter: this kind is toggled off
       const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
       const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue;
       const hex = TINT[blk.kind] || TINT.text;
@@ -9388,9 +9391,11 @@ class CanvasView {
   _parsedBlockAt(wx, wy) {
     if (this._pdfBlocksVisible === false) return null;
     const blocks = this._pdfParsedBlocks; if (!blocks) return null;
+    const _hidden = this._pdfBlockKindHidden;
     const pm = this._pdfPageElMap();
     for (let i = blocks.length - 1; i >= 0; i--) {
       const blk = blocks[i];
+      if (_hidden && _hidden.has(blk.kind)) continue; // kind-filter: hidden kinds aren't clickable
       const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
       const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || !quad.length || !isFinite(quad[0].x)) continue;
       if (pointInPoly(wx, wy, quad.map((p) => [p.x, p.y]))) return blk;
@@ -9467,6 +9472,42 @@ class CanvasView {
     const md = blocks.map((b, i) => '### Table ' + (i + 1) + ' — p' + (b.page || '?') + '\n\n' + (b.text || '').trim()).join('\n\n');
     let ok = false; try { await navigator.clipboard.writeText(md); ok = true; } catch (_e) {}
     try { this.plugin.ui.addToaster({ title: (ok ? 'Copied ' : 'Collected ') + blocks.length + ' table' + (blocks.length === 1 ? '' : 's') + (ok ? ' to clipboard.' : ' (clipboard blocked).'), dismissible: true }); } catch (_e) {}
+  }
+  // BLOCK-KIND FILTER: toggle a kind in/out of the hidden set, redraw, refresh the chip bar.
+  _toggleBlockKind(kind) {
+    if (!this._pdfBlockKindHidden) this._pdfBlockKindHidden = new Set();
+    if (this._pdfBlockKindHidden.has(kind)) this._pdfBlockKindHidden.delete(kind); else this._pdfBlockKindHidden.add(kind);
+    this.dirty = true;
+    this._refreshBlockKindBar();
+  }
+  // BLOCK-KIND FILTER: build/rebuild the floating kind-filter chip bar (bottom-left). One chip per kind PRESENT among the
+  // parsed blocks, colored by kind + a count; click toggles that kind off/on. Shown only when overlays are on and blocks exist.
+  _refreshBlockKindBar() {
+    this._closeBlockKindBar();
+    const blocks = this._pdfParsedBlocks;
+    if (!blocks || !blocks.length || this._pdfBlocksVisible === false) return;
+    const TINT = { table: '#3b82f6', figure: '#f97316', equation: '#8b5cf6', text: '#94a3b8' };
+    const counts = new Map();
+    for (const b of blocks) { counts.set(b.kind, (counts.get(b.kind) || 0) + 1); }
+    const order = ['table', 'figure', 'equation', 'text'].filter((k) => counts.has(k));
+    if (order.length < 2) return; // nothing to filter when there's only one kind
+    const hidden = this._pdfBlockKindHidden || (this._pdfBlockKindHidden = new Set());
+    const bar = document.createElement('div'); bar.className = 'pxc-bkind-bar'; this._blockKindBarEl = bar;
+    bar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    bar.addEventListener('wheel', (e) => e.stopPropagation());
+    for (const k of order) {
+      const on = !hidden.has(k);
+      const chip = document.createElement('button'); chip.className = 'pxc-bkind-chip' + (on ? '' : ' pxc-bkind-off');
+      const dot = document.createElement('span'); dot.className = 'pxc-bkind-dot'; dot.style.background = TINT[k] || TINT.text; chip.appendChild(dot);
+      const lbl = document.createElement('span'); lbl.textContent = k + ' ' + counts.get(k); chip.appendChild(lbl);
+      chip.title = (on ? 'Hide' : 'Show') + ' ' + k + ' blocks';
+      chip.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._toggleBlockKind(k); });
+      bar.appendChild(chip);
+    }
+    this.wrap.appendChild(bar);
+  }
+  _closeBlockKindBar() {
+    if (this._blockKindBarEl) { try { this._blockKindBarEl.remove(); } catch (_e) {} this._blockKindBarEl = null; }
   }
   // MULTI-SELECT PARSED BLOCKS: toggle a block guid in the selection set, refresh the floating bar.
   _toggleBlockSel(guid) {
@@ -10386,7 +10427,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeBlockKindBar(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -10522,7 +10563,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
-    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { v._refreshBlockKindBar(); } catch (_e) {} try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Go to selected PDF block', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._gotoSelectedBlock(); } }); // jump-to-PDF: fly+flash the first Shift+selected parsed block on its page. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract all PDF tables → clipboard', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (v) v._extractAllTables(); } }); // collect every parsed table block (active PDF) → combined Markdown to clipboard. ti-table = confirmed-bundled (live stylesheet scan)
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
@@ -12338,6 +12379,12 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-bsel-bar { position: absolute; z-index: 8; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 7px 10px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 22px; box-shadow: 0 6px 22px rgba(0,0,0,.45); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); white-space: nowrap; }
 .pxc-host .pxc-root .pxc-bsel-bar .pxc-bsel-lbl { opacity: .75; font-weight: 600; margin-right: 2px; }
 .pxc-host .pxc-root .pxc-bsel-bar .pxc-rc-btn { width: auto; text-align: center; padding: 4px 10px; border-radius: 14px; }
+/* A4c: PDF parsed-block kind-filter chip bar (bottom-left) — click a chip to hide/show that kind of overlay */
+.pxc-host .pxc-root .pxc-bkind-bar { position: absolute; z-index: 8; bottom: 14px; left: 14px; display: flex; align-items: center; gap: 5px; padding: 5px 7px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 18px; box-shadow: 0 6px 22px rgba(0,0,0,.45); font: 11px/1.2 system-ui, sans-serif; }
+.pxc-host .pxc-root .pxc-bkind-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--cards-border-color, #333a4a); background: transparent; color: var(--color-text-400, #e6e8ee); cursor: pointer; text-transform: capitalize; }
+.pxc-host .pxc-root .pxc-bkind-chip:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.06)); }
+.pxc-host .pxc-root .pxc-bkind-chip.pxc-bkind-off { opacity: .42; text-decoration: line-through; }
+.pxc-host .pxc-root .pxc-bkind-dot { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
 /* C2 round 3: connection info card (source / direction / thumbnail) on hover or select */
 .pxc-host .pxc-root .pxc-conninfo { position: absolute; z-index: 6; display: flex; align-items: center; gap: 7px; max-width: 300px; padding: 5px 8px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.32); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); pointer-events: none; transform: translate(-50%, 0); }
 .pxc-host .pxc-root .pxc-conninfo .pxc-ci-from, .pxc-host .pxc-root .pxc-conninfo .pxc-ci-to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
