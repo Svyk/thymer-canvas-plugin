@@ -1,5 +1,17 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.201.0 — Nudge / resize an inferred block box (drag to fix) (2026-06-28)
+PDF-feature loop iteration 7. Inferred (dashed) block boxes are now **editable**: drag the body to move, or a corner handle to
+resize, then the corrected frac persists to the record (`inferred:false` → redraws **solid**). `_worldToImageFrac` is the
+rotation-aware inverse of `_imgRegionWorld` (un-rotate by −`el.angle` about the page centre → page-local `{fx,fy}`).
+`_nudgeBlockGrabAt(wx,wy,sp)` grabs only inferred boxes (corner within ~10 screen-px → resize that corner with the opposite
+fixed; inside the quad → move); a new `mode='nudgeblk'` flows through onDown (injected after the nub/handle checks, before the
+element hit-test, gated `!shiftKey && !editingId` so normal page-drag/Shift-select are untouched) → onMove (live frac update,
+clamped on-page) → onUp (`_persistBlockFrac` via getRecordPoll). Small corner handles drawn on every inferred box signal
+editability. **Adversarial review (code-reviewer)** confirmed the frac math, gesture priority, dblclick interaction, and
+persistence round-trip; caught + fixed a LOW `_nudge`/cursor leak on `pointercancel`/`lostpointercapture` (now cleared in
+`onPtrCancel`). `tests/pxc_*.test.js` green.
+
 ## ✅ v1.200.0 — Send a parsed block to the board (Heptabase dissect) (2026-06-28)
 PDF-feature loop iteration 6. The block popup gains a **→ Card** button that drops that single block as a real text card on
 the board beside its PDF page (`_dropExtractCard(pageEl, kind, text, 8000)`; page resolved via `_pdfPageElMap`), then closes the

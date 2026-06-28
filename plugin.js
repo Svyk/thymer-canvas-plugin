@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.200.0';
+const PLEXUS_VERSION = '1.201.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -2539,6 +2539,16 @@ class CanvasView {
     const b = this._elBBox(el); if (!b || !frac) return null;
     return { x: b.x + frac.rx * b.w, y: b.y + frac.ry * b.h, w: frac.rw * b.w, h: frac.rh * b.h };
   }
+  // Inverse (point-wise) of _imgRegionWorld: map a WORLD point into an image element's normalized [0,1] frac space,
+  // un-rotating by -el.angle about the element centre (mirrors _imgRegionQuad's forward rotation). Used to nudge/resize
+  // a parsed-block box in page-local coords (feature 7).
+  _worldToImageFrac(el, wx, wy) {
+    const b = this._elBBox(el); if (!b || !b.w || !b.h) return null;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, a = -(el.angle || 0);
+    const dx = wx - cx, dy = wy - cy, ca = Math.cos(a), sa = Math.sin(a);
+    const lx = cx + dx * ca - dy * sa, ly = cy + dx * sa + dy * ca;
+    return { fx: (lx - b.x) / b.w, fy: (ly - b.y) / b.h };
+  }
   // 4 world corners of the region (rotated by el.angle about the element centre — matches _drawImage's rotation).
   _imgRegionQuad(el, frac) {
     const r = this._imgRegionWorld(el, frac); if (!r) return null;
@@ -3777,6 +3787,9 @@ class CanvasView {
         // block so rotate/resize handles win where the top nub overlaps the rotate handle.
         const nub = this._nubAt(sp);
         if (nub && this._connHover && !this._connHover.isDeleted) { mode = 'connect'; created = makeLinear(nub.x, nub.y, 'arrow', { stroke: this.strokeColor, strokeWidth: 2 }); created.startBinding = { elementId: this._connHover.id }; this.scene.elements.push(created); this.selected.clear(); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; }
+        // FEATURE 7: grab an INFERRED (dashed) parsed-block box to nudge/resize it. The overlay sits ON the PDF image, so this
+        // must win BEFORE the image-element move/pan hit-test below. Only inferred boxes grab (correct boxes are inert → page drags normally).
+        if (!e.shiftKey && !this.editingId) { const _ng = this._nudgeBlockGrabAt(down.x, down.y, sp); if (_ng) { mode = 'nudgeblk'; _ng.moved = false; this._nudge = _ng; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.style.cursor = (_ng.type === 'corner' ? 'nwse-resize' : 'move'); this.dirty = true; return; } }
         const hit = this._hitTopAt(down.x, down.y); downRef = null;
         if (!hit && !e.shiftKey) { const ge = this._ghostEdgeAt(down.x, down.y); if (ge) { try { e.preventDefault(); } catch (_e) {} this._promoteGhost(ge); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } } // P3.4: click an inferred ghost edge in empty space → promote it to a real connector (only when no card is under the cursor)
         // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
@@ -3894,6 +3907,22 @@ class CanvasView {
         this._dropLinkTarget = null; // DRAG-TO-RESTRUCTURE: a SINGLE record card dragged so its CENTER lands on ANOTHER record card → highlight it as a link target (the actual write is gated by a confirm on release)
         if (moveEls.length === 1 && moveEls[0].el.type === 'record') { const m0 = moveEls[0].el, t = this._recordCardUnder(m0.x + m0.width / 2, m0.y + m0.height / 2, m0.id); if (t) this._dropLinkTarget = t.id; }
         this._updateBindings(); this.dirty = true; return; } // CONNECTIONS: rebind every frame — a bound endpoint/label must follow ANY moved target (card/image/text), not only rough shapes. _updateBindings early-returns when nothing is bound.
+      if (mode === 'nudgeblk' && this._nudge) { // FEATURE 7: live nudge/resize of an inferred parsed-block box in page-local frac space
+        const ng = this._nudge, sf = ng.startFrac, cur = this._worldToImageFrac(ng.pageEl, w.x, w.y);
+        if (!cur) { this.dirty = true; return; }
+        ng.moved = true;
+        if (ng.type === 'move') {
+          let nrx = sf.rx + (cur.fx - ng.grab.fx), nry = sf.ry + (cur.fy - ng.grab.fy);
+          nrx = Math.max(0, Math.min(1 - sf.rw, nrx)); nry = Math.max(0, Math.min(1 - sf.rh, nry));
+          ng.block.frac = { rx: nrx, ry: nry, rw: sf.rw, rh: sf.rh };
+        } else { // corner resize — opposite corner stays fixed; the grabbed corner follows the cursor (clamped to the page)
+          const corners = [{ fx: sf.rx, fy: sf.ry }, { fx: sf.rx + sf.rw, fy: sf.ry }, { fx: sf.rx + sf.rw, fy: sf.ry + sf.rh }, { fx: sf.rx, fy: sf.ry + sf.rh }];
+          const fixed = corners[(ng.corner + 2) % 4];
+          const dx = Math.max(0, Math.min(1, cur.fx)), dy = Math.max(0, Math.min(1, cur.fy));
+          ng.block.frac = { rx: Math.min(fixed.fx, dx), ry: Math.min(fixed.fy, dy), rw: Math.max(0.01, Math.abs(dx - fixed.fx)), rh: Math.max(0.01, Math.abs(dy - fixed.fy)) };
+        }
+        this.dirty = true; return;
+      }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
       if (mode === 'resize' && rsEl) { const pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
       if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B16: connection-point drag snaps on _snapOn() (decoupled from grid visibility), consistent with move/resize // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
@@ -3914,6 +3943,11 @@ class CanvasView {
       if (e.shiftKey && !moved && (mode === 'move' || mode === 'pan') && this.tool === 'select') {
         const _w = this._worldAt(e); const _pb = this._parsedBlockAt(_w.x, _w.y);
         if (_pb) { try { host.releasePointerCapture(e.pointerId); } catch (_e2) {} mode = null; this._toggleBlockSel(_pb.guid); return; }
+      }
+      if (mode === 'nudgeblk') { // FEATURE 7: finalize an inferred-box nudge/resize — persist the corrected frac (→ inferred:false, draws solid)
+        const ng = this._nudge; this._nudge = null; mode = null; try { host.releasePointerCapture(e.pointerId); } catch (_e2) {} this.wrap.style.cursor = '';
+        if (ng && ng.moved && ng.block) { ng.block.inferred = false; this.dirty = true; this._persistBlockFrac(ng.block).catch(() => {}); try { this.plugin.ui.addToaster({ title: 'Block box corrected.', dismissible: true }); } catch (_e3) {} }
+        return;
       }
       if (mode === 'create' && created) {
         normRect(created);
@@ -4139,7 +4173,7 @@ class CanvasView {
     };
     const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
-    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._aiExtractArm) { this._aiExtractArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
+    const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._aiExtractArm) { this._aiExtractArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } if (this._nudge) { this._nudge = null; this.wrap.style.cursor = ''; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
     host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
     this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
@@ -9364,6 +9398,12 @@ class CanvasView {
       if (!isSel && blk.inferred) { ctx.setLineDash([4 / z, 3 / z]); } else { ctx.setLineDash([]); }
       path(); ctx.stroke();
       ctx.setLineDash([]);
+      // FEATURE 7: inferred boxes are user-editable (drag a corner to resize, the body to move) — draw small corner handles
+      if (blk.inferred && !isSel) {
+        const hs = Math.max(3, 5 / z);
+        ctx.globalAlpha = 0.9; ctx.fillStyle = hex;
+        for (const c of quad) ctx.fillRect(c.x - hs / 2, c.y - hs / 2, hs, hs);
+      }
       // Tiny kind label near the top-left corner of the quad (world space)
       const lx = quad[0].x, ly = quad[0].y;
       const labelSize = Math.max(8, Math.min(13, 11 / z));
@@ -9401,6 +9441,35 @@ class CanvasView {
       if (pointInPoly(wx, wy, quad.map((p) => [p.x, p.y]))) return blk;
     }
     return null;
+  }
+  // FEATURE 7 (nudge inferred box): detect a grab on an INFERRED (dashed) parsed-block box. A press within ~10 screen-px of a
+  // quad corner = resize that corner; a press inside the (rotation-aware) quad = move the whole box. Only inferred boxes are
+  // editable — text-exact / geometry-exact boxes are already correct and stay inert. Returns a drag descriptor or null.
+  _nudgeBlockGrabAt(wx, wy, sp) {
+    if (this._pdfBlocksVisible === false) return null;
+    const blocks = this._pdfParsedBlocks; if (!blocks || !blocks.length) return null;
+    const hidden = this._pdfBlockKindHidden;
+    const pm = this._pdfPageElMap();
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const blk = blocks[i];
+      if (!blk.inferred) continue;
+      if (hidden && hidden.has(blk.kind)) continue;
+      const pageEl = pm.get(blk.docId + ':' + blk.page); if (!pageEl) continue;
+      const quad = this._imgRegionQuad(pageEl, blk.frac); if (!quad || quad.length < 4 || !isFinite(quad[0].x)) continue;
+      // Quad order (from _imgRegionQuad): 0=TL, 1=TR, 2=BR, 3=BL → frac corners (rx,ry),(rx+rw,ry),(rx+rw,ry+rh),(rx,ry+rh).
+      for (let c = 0; c < 4; c++) { const s = this.camera.worldToScreen(quad[c].x, quad[c].y); if (Math.hypot(s.x - sp.x, s.y - sp.y) < 10) return { block: blk, pageEl, type: 'corner', corner: c, startFrac: { ...blk.frac } }; }
+      if (pointInPoly(wx, wy, quad.map((p) => [p.x, p.y]))) { const grab = this._worldToImageFrac(pageEl, wx, wy); if (grab) return { block: blk, pageEl, type: 'move', startFrac: { ...blk.frac }, grab }; }
+    }
+    return null;
+  }
+  // FEATURE 7: write a user-corrected block frac back to its PDF Highlights record (inferred:false → draws solid henceforth).
+  async _persistBlockFrac(block) {
+    if (!block || !block.guid) return;
+    try {
+      const rec = await getRecordPoll(this.plugin, block.guid, 8);
+      if (!rec) return;
+      try { rec.prop('Anchor Data').set(JSON.stringify({ frac: block.frac, docId: block.docId, kind: 'block', inferred: false })); } catch (_e) {}
+    } catch (_e) {}
   }
   // PDF PARSED BLOCKS: show a small popup with the block's text content + Copy + Open Record buttons.
   _showParsedBlockPopup(block, sx, sy) {
@@ -10431,7 +10500,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeBlockKindBar(); } catch (_e) {} try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeBlockKindBar(); } catch (_e) {} this._nudge = null; try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
