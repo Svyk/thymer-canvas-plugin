@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.199.0';
+const PLEXUS_VERSION = '1.200.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9424,6 +9424,10 @@ class CanvasView {
     const copyBtn = document.createElement('button'); copyBtn.className = 'pxc-rc-btn'; copyBtn.textContent = 'Copy'; copyBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { navigator.clipboard.writeText(block.text || ''); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block text copied.', dismissible: true }); } catch (_e2) {} }); footer.appendChild(copyBtn);
     // JUMP-TO-PDF: fly the camera to this block's page region + pulse it (reuses _flashAnchor).
     const gotoBtn = document.createElement('button'); gotoBtn.className = 'pxc-rc-btn'; gotoBtn.textContent = '⤢ Go to page'; gotoBtn.title = 'Frame + flash this block on its PDF page'; gotoBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); try { this._gotoParsedBlock(block); } catch (_e) {} }); footer.appendChild(gotoBtn);
+    // SEND TO BOARD (Heptabase dissect): drop this single block as a real text card beside its PDF page.
+    const sendBtn = document.createElement('button'); sendBtn.className = 'pxc-rc-btn'; sendBtn.textContent = '→ Card'; sendBtn.title = 'Drop this block as a card on the board';
+    sendBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); let pageEl = null; try { pageEl = this._pdfPageElMap().get(block.docId + ':' + block.page); } catch (_e) {} try { this._dropExtractCard(pageEl || null, block.kind || 'text', block.text || '', 8000); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block sent to the board.', dismissible: true }); } catch (_e2) {} });
+    footer.appendChild(sendBtn);
     if (block.guid) { const openBtn = document.createElement('button'); openBtn.className = 'pxc-rc-btn'; openBtn.textContent = 'Open record'; openBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { this._openRecord(block.guid); } catch (_e) {} this._closeParsedBlockPopup(); }); footer.appendChild(openBtn); } // review HIGH: _openRecord resolves the workspace GUID + panel.navigateTo (there is no ui.openRecord on the canvas)
     box.appendChild(footer);
     this.wrap.appendChild(box);

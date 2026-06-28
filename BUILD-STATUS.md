@@ -1,5 +1,10 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.200.0 — Send a parsed block to the board (Heptabase dissect) (2026-06-28)
+PDF-feature loop iteration 6. The block popup gains a **→ Card** button that drops that single block as a real text card on
+the board beside its PDF page (`_dropExtractCard(pageEl, kind, text, 8000)`; page resolved via `_pdfPageElMap`), then closes the
+popup + toasts. Complements the multi-select bar's bulk "+ Card" (which drops the combined selection). `tests/pxc_*.test.js` green.
+
 ## ✅ v1.199.0 — Block-kind filter chips (2026-06-28)
 PDF-feature loop iteration 5. A floating **kind-filter chip bar** (bottom-left) appears when overlays are on and ≥2 block
 kinds are present: one chip per kind (table/figure/equation/text), colored + counted; click toggles that kind off/on
