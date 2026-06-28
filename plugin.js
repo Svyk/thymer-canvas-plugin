@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.195.0';
+const PLEXUS_VERSION = '1.196.0';
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9326,6 +9326,8 @@ class CanvasView {
     // Buttons
     const footer = document.createElement('div'); footer.className = 'pxc-pblock-footer';
     const copyBtn = document.createElement('button'); copyBtn.className = 'pxc-rc-btn'; copyBtn.textContent = 'Copy'; copyBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { navigator.clipboard.writeText(block.text || ''); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block text copied.', dismissible: true }); } catch (_e2) {} }); footer.appendChild(copyBtn);
+    // JUMP-TO-PDF: fly the camera to this block's page region + pulse it (reuses _flashAnchor).
+    const gotoBtn = document.createElement('button'); gotoBtn.className = 'pxc-rc-btn'; gotoBtn.textContent = '⤢ Go to page'; gotoBtn.title = 'Frame + flash this block on its PDF page'; gotoBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); try { this._gotoParsedBlock(block); } catch (_e) {} }); footer.appendChild(gotoBtn);
     if (block.guid) { const openBtn = document.createElement('button'); openBtn.className = 'pxc-rc-btn'; openBtn.textContent = 'Open record'; openBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { this._openRecord(block.guid); } catch (_e) {} this._closeParsedBlockPopup(); }); footer.appendChild(openBtn); } // review HIGH: _openRecord resolves the workspace GUID + panel.navigateTo (there is no ui.openRecord on the canvas)
     box.appendChild(footer);
     this.wrap.appendChild(box);
@@ -9342,6 +9344,24 @@ class CanvasView {
   _closeParsedBlockPopup() {
     if (this._parsedBlockPopupEl) { try { this._parsedBlockPopupEl.remove(); } catch (_e) {} this._parsedBlockPopupEl = null; }
     if (this._parsedBlockPopupKeyHandler) { try { document.removeEventListener('keydown', this._parsedBlockPopupKeyHandler, true); } catch (_e) {} this._parsedBlockPopupKeyHandler = null; }
+  }
+  // JUMP-TO-PDF: reveal + pulse a parsed block on its PDF page image. Resolves the page element via _pdfPageElMap,
+  // then hands _flashAnchor an image-region anchor ({el, inImage, frac}) so the camera flies to the block AND spotlights it.
+  _gotoParsedBlock(block) {
+    if (!block || !block.frac) return false;
+    const pm = this._pdfPageElMap();
+    const pageEl = pm && pm.get(block.docId + ':' + block.page);
+    if (!pageEl) { try { this.plugin.ui.addToaster({ title: 'Plexus: that PDF page isn’t on this canvas.', dismissible: true }); } catch (_e) {} return false; }
+    try { this._flashAnchor({ el: pageEl.id, inImage: true, frac: block.frac }); } catch (_e) { return false; }
+    return true;
+  }
+  // JUMP-TO-PDF (command): fly+flash the first selected parsed block (reading order: page, then :b<idx>).
+  _gotoSelectedBlock() {
+    const sel = this._pdfBlockSel;
+    if (!sel || !sel.size) { try { this.plugin.ui.addToaster({ title: 'No PDF block selected (Shift+click a parsed block first).', dismissible: true }); } catch (_e) {} return; }
+    const bidx = (g) => { const m = g && g.match(/:b(\d+)/); return m ? parseInt(m[1], 10) : 0; };
+    const blocks = (this._pdfParsedBlocks || []).filter((b) => sel.has(b.guid)).sort((a, b) => ((a.page || 0) - (b.page || 0)) || (bidx(a.guid) - bidx(b.guid)));
+    if (blocks[0]) this._gotoParsedBlock(blocks[0]);
   }
   // MULTI-SELECT PARSED BLOCKS: toggle a block guid in the selection set, refresh the floating bar.
   _toggleBlockSel(guid) {
@@ -10398,6 +10418,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Go to selected PDF block', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._gotoSelectedBlock(); } }); // jump-to-PDF: fly+flash the first Shift+selected parsed block on its page. ti-target = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Explode PDF highlights onto the canvas', icon: 'ti-graph', onSelected: () => { const v = this._activeView(); if (v) v._explodeHighlights(); } }); // #20: section-grouped mind-map of this PDF's highlights. ti-graph = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Assemble highlights across all PDFs (argument map)', icon: 'ti-stack', onSelected: () => { const v = this._activeView(); if (v) v._assembleAcrossPdfs(); } }); // #21: cross-PDF argument assembly — every highlight grouped by Code. ti-stack = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Synthesize this PDF\'s highlights (AI argument map)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._synthesizePdf(); } }); // #23: AI groups this PDF's highlights into themes + thesis, each point grounded in its source highlight cards. ti-sparkles = confirmed-bundled (used by AI suggest relations)

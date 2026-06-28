@@ -1,5 +1,13 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.196.0 — Jump-to-PDF: fly+flash a parsed block on its page (2026-06-28)
+PDF-feature loop iteration 2. Block popup gains a **⤢ Go to page** button; new command **Plexus: Go to selected PDF block**
+(`ti-target`). Both route through `_gotoParsedBlock(block)`: resolve the page image via `_pdfPageElMap()`, then hand
+`_flashAnchor({el: pageEl.id, inImage:true, frac})` an image-region anchor → the camera **flies to the block AND double-pulse
+spotlights it** (reuses the note⇄canvas navigate-and-flash path; no new camera/animation code). The command flies to the first
+Shift+selected block in reading order (`_gotoSelectedBlock`, page then `:b<idx>`), or toasts if nothing is selected /
+the page isn't on the canvas. `tests/pxc_*.test.js` green.
+
 ## ✅ v1.195.0 — Multi-select parsed blocks (Shift+click → Copy/Card bar) (2026-06-28)
 PDF-feature loop iteration 1. **Shift+click** a parsed block (no drag) toggles it into a selection set
 (`this._pdfBlockSel`, a Set of block guids) — intercepted at the top of `onUp` gated on `e.shiftKey && !moved &&
