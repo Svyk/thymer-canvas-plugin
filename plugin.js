@@ -10,7 +10,447 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.202.0';
+const PLEXUS_VERSION = '1.203.0';
+
+/* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
+var PBC = (function(){
+// pdf-block-cluster.js — classical document-layout-analysis block clustering for pdf.js text content.
+// No imports, no top-level await, ES5-ish (var/function), inlineable into Thymer plugins.
+// Exposes: clusterPageBlocks(items, pageW, pageH, opts)
+// CommonJS guard at bottom for node tests; harmless when inlined.
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function median(arr) {
+  if (!arr.length) return 0;
+  var s = arr.slice().sort(function(a, b) { return a - b; });
+  var m = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function mode(arr) {
+  // Mode of a numeric array; ties broken by value order.
+  if (!arr.length) return 0;
+  var counts = {};
+  var best = arr[0], bestCount = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var v = arr[i];
+    counts[v] = (counts[v] || 0) + 1;
+    if (counts[v] > bestCount) { bestCount = counts[v]; best = v; }
+  }
+  return best;
+}
+
+// Bucket a numeric value to the nearest multiple of bucket size.
+function bucket(v, size) { return Math.round(v / size) * size; }
+
+function unionRect(a, b) {
+  // Both in user-space y-up: {left, top_yUp, right, bottom_yUp}
+  return {
+    left: Math.min(a.left, b.left),
+    right: Math.max(a.right, b.right),
+    top_yUp: Math.max(a.top_yUp, b.top_yUp),   // y-up: bigger = higher = larger visual top
+    bottom_yUp: Math.min(a.bottom_yUp, b.bottom_yUp)
+  };
+}
+
+// Convert a user-space axis-aligned rect to a normalized y-down box.
+function normalizeRect(r, pageW, pageH) {
+  // r: {left, right, top_yUp, bottom_yUp}  (y-up, user space)
+  // out: {x, y, w, h}  (y-down, normalized 0..1, top-left origin)
+  var x = r.left / pageW;
+  var y = (pageH - r.top_yUp) / pageH;    // top_yUp is the HIGHEST point (most positive y-up)
+  var w = (r.right - r.left) / pageW;
+  var h = (r.top_yUp - r.bottom_yUp) / pageH;
+  return { x: x, y: y, w: Math.max(w, 0), h: Math.max(h, 0) };
+}
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
+
+/**
+ * clusterPageBlocks
+ *
+ * @param {Array}  items   - pdf.js getTextContent() items
+ * @param {number} pageW   - page width in user-space units
+ * @param {number} pageH   - page height in user-space units
+ * @param {Object} [opts]  - tuning knobs (all optional)
+ *   opts.pad            {number}  Normalized pad added around each block box. Default 0.002.
+ *   opts.gutterMin      {number}  Minimum gutter width in user-space px to split columns. Default 0.04*pageW.
+ *   opts.yTolFactor     {number}  Same-line y tolerance as a fraction of medianFontSize. Default 0.3.
+ *   opts.paraGapFactor  {number}  Multiple of modal line-spacing that triggers a paragraph break. Default 1.5.
+ *   opts.indentFactor   {number}  Multiple of medianCharWidth for indent detection. Default 1.4.
+ *   opts.shortLineFactor{number}  Fraction of strip width: if prev line's rightX is less than
+ *                                 (stripRight - factor*stripWidth), it is considered a "short line". Default 0.15.
+ *   opts.onSkew         {function} Called if page has rotated/skewed items. Default noop.
+ * @returns {Array<{box:{x,y,w,h}, lines:number, fontSize:number, strip:number}>}
+ */
+function clusterPageBlocks(items, pageW, pageH, opts) {
+  opts = opts || {};
+  var pad = (opts.pad !== undefined) ? opts.pad : 0.002;
+
+  // ------------------------------------------------------------------
+  // Step 0: parse each item into a user-space rect + metadata.
+  // ------------------------------------------------------------------
+  var parsed = [];
+  var skewed = false;
+  var fontSizes = [];
+  var charWidths = [];
+
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var t = item.transform; // [scaleX, skewX, skewY, scaleY, x, y]
+    if (!t || t.length < 6) continue;
+    // Fix 2: non-finite transform values poison stats and geometry — skip early.
+    if (!isFinite(t[3]) || !isFinite(t[4]) || !isFinite(t[5])) continue;
+
+    // Skew guard
+    if (Math.abs(t[1]) > 0.01 || Math.abs(t[2]) > 0.01) {
+      skewed = true;
+    }
+
+    var left = t[4];
+    var baseline_yUp = t[5];
+    var h = (item.height > 0 && isFinite(item.height)) ? item.height : Math.abs(t[3]);
+    if (!isFinite(h) || h <= 0) continue;
+    var w = (item.width !== undefined && isFinite(item.width)) ? item.width : 0;
+    var fs = Math.abs(t[3]) || h;
+    var str = item.str || '';
+
+    // Record for stats even if whitespace-only (for space-width estimation).
+    // Fix 2: only push finite values into stat arrays.
+    if (isFinite(fs)) fontSizes.push(fs);
+    if (str.length > 0 && isFinite(w / str.length)) {
+      charWidths.push(w / str.length);
+    }
+
+    // Drop whitespace-only items from clustering but keep for stats (already pushed above).
+    if (!str || !str.trim()) continue;
+
+    // Glyph box in y-up space: baseline is bottom of glyph, h extends upward.
+    var bottom_yUp = baseline_yUp;
+    var top_yUp = baseline_yUp + h;
+
+    parsed.push({
+      left: left,
+      right: left + w,
+      bottom_yUp: bottom_yUp,
+      top_yUp: top_yUp,
+      baseline_yUp: baseline_yUp,
+      w: w,
+      h: h,
+      fs: fs,
+      fontName: item.fontName || '',
+      str: str
+    });
+  }
+
+  if (skewed && typeof opts.onSkew === 'function') {
+    opts.onSkew();
+  }
+
+  if (!parsed.length) return [];
+
+  // ------------------------------------------------------------------
+  // Step 1: Pre-stats.
+  // ------------------------------------------------------------------
+  var medianFontSize = median(fontSizes) || 12;
+  var nonZeroCharWidths = charWidths.filter(function(v) { return v > 0; });
+  var medianCharWidth = nonZeroCharWidths.length ? median(nonZeroCharWidths) : medianFontSize * 0.5;
+  var medianSpaceWidth = 0.25 * medianFontSize;
+
+  // ------------------------------------------------------------------
+  // Step 2: Column guard (one-level X-cut).
+  // ------------------------------------------------------------------
+  // Build covered x-intervals (sorted by left).
+  // Fix 3: exclude outlier-wide items (>= 0.5*pageW) from gutter detection so a full-width
+  // header/footer cannot bridge a legitimate column gutter.  Wide items are still assigned
+  // to a strip by their center (unchanged, below).
+  var xIntervals = parsed.filter(function(p) { return (p.right - p.left) < 0.5 * pageW; })
+                         .map(function(p) { return [p.left, p.right]; });
+  xIntervals.sort(function(a, b) { return a[0] - b[0]; });
+
+  // Merge overlapping/touching intervals to find covered regions.
+  var covered = [];
+  for (var i = 0; i < xIntervals.length; i++) {
+    var iv = xIntervals[i];
+    if (!covered.length) {
+      covered.push([iv[0], iv[1]]);
+    } else {
+      var last = covered[covered.length - 1];
+      if (iv[0] <= last[1]) {
+        if (iv[1] > last[1]) last[1] = iv[1];
+      } else {
+        covered.push([iv[0], iv[1]]);
+      }
+    }
+  }
+
+  // Gaps between covered regions are candidates for gutters.
+  var gutterMinPx = (opts.gutterMin !== undefined) ? opts.gutterMin : Math.max(0.04 * pageW, 2.5 * medianSpaceWidth);
+  var gutterCenters = [];
+  for (var i = 1; i < covered.length; i++) {
+    var gapLeft = covered[i - 1][1];
+    var gapRight = covered[i][0];
+    if (gapRight - gapLeft >= gutterMinPx) {
+      gutterCenters.push((gapLeft + gapRight) / 2);
+    }
+  }
+  // Cap at 3 gutters (4 strips).
+  if (gutterCenters.length > 3) {
+    gutterCenters = gutterCenters.slice(0, 3);
+  }
+
+  // Build strip boundaries: [left_i, right_i] in user space.
+  var stripBoundaries = [];
+  var prevBound = 0;
+  for (var i = 0; i < gutterCenters.length; i++) {
+    stripBoundaries.push([prevBound, gutterCenters[i]]);
+    prevBound = gutterCenters[i];
+  }
+  stripBoundaries.push([prevBound, pageW]);
+
+  // Assign items to strips by x-center.
+  function stripIndex(p) {
+    var xc = (p.left + p.right) / 2;
+    for (var s = 0; s < stripBoundaries.length; s++) {
+      if (xc >= stripBoundaries[s][0] && xc < stripBoundaries[s][1]) return s;
+    }
+    return stripBoundaries.length - 1; // right edge fallback
+  }
+
+  var strips = [];
+  for (var s = 0; s < stripBoundaries.length; s++) strips.push([]);
+  for (var i = 0; i < parsed.length; i++) {
+    var si = stripIndex(parsed[i]);
+    strips[si].push(parsed[i]);
+  }
+
+  // ------------------------------------------------------------------
+  // Step 3 & 4: Per-strip line grouping + block detection.
+  // ------------------------------------------------------------------
+  var yTolFactor = (opts.yTolFactor !== undefined) ? opts.yTolFactor : 0.3;
+  var paraGapFactor = (opts.paraGapFactor !== undefined) ? opts.paraGapFactor : 1.5;
+  var indentFactor = (opts.indentFactor !== undefined) ? opts.indentFactor : 1.4;
+  var shortLineFactor = (opts.shortLineFactor !== undefined) ? opts.shortLineFactor : 0.15;
+  var yTol = yTolFactor * medianFontSize;
+
+  var allBlocks = [];
+
+  for (var s = 0; s < strips.length; s++) {
+    var stripItems = strips[s];
+    if (!stripItems.length) continue;
+
+    var stripLeft = stripBoundaries[s][0];
+    var stripRight = stripBoundaries[s][1];
+    var stripWidth = stripRight - stripLeft;
+
+    // Sort descending by baseline_yUp (top of page first in y-up = largest y value).
+    stripItems.sort(function(a, b) {
+      if (Math.abs(b.baseline_yUp - a.baseline_yUp) > 0.001) return b.baseline_yUp - a.baseline_yUp;
+      return a.left - b.left;
+    });
+
+    // Group into lines.
+    var lines = [];
+    var curLine = null;
+
+    for (var i = 0; i < stripItems.length; i++) {
+      var p = stripItems[i];
+      if (!curLine) {
+        curLine = startLine(p);
+      } else {
+        if (Math.abs(p.baseline_yUp - curLine.baseline) <= yTol) {
+          expandLine(curLine, p);
+        } else {
+          lines.push(curLine);
+          curLine = startLine(p);
+        }
+      }
+    }
+    if (curLine) lines.push(curLine);
+
+    // Lines are already top→bottom (baseline DESC = top-of-page first in y-up).
+
+    // Compute modal line-spacing (BASE_LS) for this strip.
+    var baselineGaps = [];
+    for (var i = 1; i < lines.length; i++) {
+      baselineGaps.push(lines[i - 1].baseline - lines[i].baseline); // positive because descending
+    }
+    var BASE_LS = 1;
+    if (baselineGaps.length) {
+      // Bucket gaps to nearest 0.5px for mode computation.
+      var bucketed = baselineGaps.map(function(g) { return bucket(g, 0.5); });
+      BASE_LS = mode(bucketed);
+      if (BASE_LS <= 0) BASE_LS = median(baselineGaps) || 1;
+    }
+
+    // Compute typical line width for this strip (used by short-line rule).
+    // A line is "short" if its width is significantly less than the typical (median) line width
+    // within this strip. This avoids false positives in single-column text where lines don't
+    // reach anywhere near the geometric strip boundary.
+    var lineWidths = lines.map(function(l) { return l.rightX - l.leftX; });
+    var medianLineWidth = median(lineWidths) || 1;
+
+    // Fix 5: Criterion 5 (short last line) only applies to JUSTIFIED text.  Ragged-right text
+    // naturally has varying line widths and the short-line rule would over-split it.
+    // A strip is considered justified when >60% of lines reach within 90% of the median line width.
+    var justifiedCount = 0;
+    for (var ji = 0; ji < lines.length; ji++) {
+      if ((lines[ji].rightX - lines[ji].leftX) >= 0.9 * medianLineWidth) justifiedCount++;
+    }
+    var justified = lines.length > 0 && (justifiedCount / lines.length) > 0.6;
+
+    // Group lines into blocks.
+    var blocks = [];
+    var curBlock = null;
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!curBlock) {
+        curBlock = startBlock(line, s);
+      } else {
+        var prevLine = curBlock.lastLine;
+        var gap = prevLine.baseline - line.baseline; // positive = going down
+        var newBlock = false;
+
+        // Criterion 1: paragraph gap.
+        if (gap > BASE_LS * paraGapFactor) newBlock = true;
+
+        // Criterion 2: font size change.
+        if (!newBlock && Math.abs(line.fsMode - prevLine.fsMode) > 1) newBlock = true;
+
+        // Criterion 3: dominant fontName change.
+        if (!newBlock && line.fontName && prevLine.fontName && line.fontName !== prevLine.fontName) newBlock = true;
+
+        // Criterion 4: indent — only break on a POSITIVE indent step beyond the block's established
+        // left margin. Fix 6: a de-indent (first-line-indent body flowing back left) must NOT break.
+        if (!newBlock) {
+          if (line.leftX - curBlock.minLeftX > indentFactor * medianCharWidth) newBlock = true;
+        }
+
+        // Criterion 5: short last line (paragraph end).
+        // Fix 5: only enabled for justified text — ragged-right text is left to Criterion 1.
+        if (!newBlock && justified) {
+          var prevLineWidth = prevLine.rightX - prevLine.leftX;
+          var prevShort = prevLineWidth < (1 - shortLineFactor) * medianLineWidth;
+          // Current line starts within shortLineFactor * medianLineWidth of the typical leftX.
+          var typicalLeft = median(lines.map(function(l) { return l.leftX; }));
+          var curNearLeft = Math.abs(line.leftX - typicalLeft) <= shortLineFactor * medianLineWidth + medianCharWidth;
+          if (prevShort && curNearLeft) newBlock = true;
+        }
+
+        if (newBlock) {
+          blocks.push(finishBlock(curBlock, pageW, pageH, pad));
+          curBlock = startBlock(line, s);
+        } else {
+          expandBlock(curBlock, line);
+        }
+      }
+    }
+    if (curBlock) blocks.push(finishBlock(curBlock, pageW, pageH, pad));
+
+    for (var bi = 0; bi < blocks.length; bi++) {
+      allBlocks.push(blocks[bi]);
+    }
+  }
+
+  return allBlocks;
+}
+
+// ---------------------------------------------------------------------------
+// Line helpers
+// ---------------------------------------------------------------------------
+
+function startLine(p) {
+  return {
+    baseline: p.baseline_yUp,
+    leftX: p.left,
+    rightX: p.right,
+    rect: { left: p.left, right: p.right, top_yUp: p.top_yUp, bottom_yUp: p.bottom_yUp },
+    fsSamples: [p.fs],
+    // Fix 7: bucket fs to 0.5 so jittered floats (11.9998 vs 12.0002) collapse to the same key.
+    fsMode: bucket(p.fs, 0.5),
+    // Fix 4: track all font name samples; recompute dominant font as items are added.
+    fontNameSamples: [p.fontName],
+    fontName: p.fontName,
+    text: p.str
+  };
+}
+
+function expandLine(line, p) {
+  if (p.left < line.leftX) line.leftX = p.left;
+  if (p.right > line.rightX) line.rightX = p.right;
+  line.rect = unionRect(line.rect, { left: p.left, right: p.right, top_yUp: p.top_yUp, bottom_yUp: p.bottom_yUp });
+  line.fsSamples.push(p.fs);
+  // Fix 7: bucket fs to 0.5 before computing mode so jittered floats collapse.
+  line.fsMode = mode(line.fsSamples.map(function(v) { return bucket(v, 0.5); }));
+  line.text += ' ' + p.str; // items within a line arrive left-to-right (strip sort) → reading order
+  // Fix 4: accumulate font name votes and set dominant font (mode) rather than keeping only the first.
+  line.fontNameSamples.push(p.fontName);
+  line.fontName = mode(line.fontNameSamples);
+}
+
+// ---------------------------------------------------------------------------
+// Block helpers
+// ---------------------------------------------------------------------------
+
+function startBlock(line, stripIdx) {
+  return {
+    strip: stripIdx,
+    lineCount: 1,
+    lastLine: line,
+    rect: { left: line.rect.left, right: line.rect.right, top_yUp: line.rect.top_yUp, bottom_yUp: line.rect.bottom_yUp },
+    fsSamples: line.fsSamples.slice(),
+    // Fix 6: track the block's established minimum left margin so Criterion 4 can distinguish
+    // a positive indent step (→ new block) from a de-indent / flush body line (→ same block).
+    minLeftX: line.leftX,
+    text: line.text || ''
+  };
+}
+
+function expandBlock(block, line) {
+  block.lineCount++;
+  block.lastLine = line;
+  block.rect = unionRect(block.rect, line.rect);
+  for (var i = 0; i < line.fsSamples.length; i++) block.fsSamples.push(line.fsSamples[i]);
+  // Fix 6: keep a running minimum so de-indented lines pull the margin leftward.
+  if (line.leftX < block.minLeftX) block.minLeftX = line.leftX;
+  block.text += '\n' + (line.text || '');
+}
+
+function finishBlock(block, pageW, pageH, pad) {
+  var box = normalizeRect(block.rect, pageW, pageH);
+  box.x -= pad; box.y -= pad;
+  box.w += 2 * pad; box.h += 2 * pad;
+  // Fix 1: clamp must TRIM (reduce w/h) not slide. Sliding produces a box that is
+  // too narrow while keeping the wrong right/bottom edge.
+  if (box.x < 0) { box.w += box.x; box.x = 0; }
+  if (box.y < 0) { box.h += box.y; box.y = 0; }
+  if (box.w < 0) box.w = 0;
+  if (box.h < 0) box.h = 0;
+  if (box.x + box.w > 1) box.w = 1 - box.x;
+  if (box.y + box.h > 1) box.h = 1 - box.y;
+  return {
+    box: box,
+    lines: block.lineCount,
+    // Fix 7: bucket fs to 0.5 before mode to collapse jittered float variants.
+    fontSize: mode(block.fsSamples.map(function(v) { return bucket(v, 0.5); })),
+    strip: block.strip,
+    text: block.text || ''
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CommonJS guard (harmless when inlined into a plugin)
+// ---------------------------------------------------------------------------
+
+return { clusterPageBlocks: clusterPageBlocks };
+})();
+/* PBC-INLINE-END */
 // Indent-Rainbow parity (Svyk fork v1.9.2 `rainbow` palette) — used to draw record-style marker dots + indent guides on
 // transcluded outline rows so a canvas transclusion matches how the flow plugin renders the same content on a record.
 const PXC_RAINBOW = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6'];
@@ -9017,6 +9457,49 @@ class CanvasView {
     }
     return cand.slice().sort((a, b) => (b.rw * b.rh) - (a.rw * a.rh))[0] || null;
   }
+  // EXACT GEOMETRY (born-digital): text-layer block clustering for a page → tight boxes from pdf.js glyph rects, no model,
+  // no LLM. Reuses the retained-blob load. Cached per (docId,page). [] until the PBC module is inlined / no text layer.
+  async _pageClusterBlocks(docId, page) {
+    if (!docId || !page) return [];
+    if (!this._clusterCache) this._clusterCache = new Map();
+    const cacheKey = docId + ':' + page;
+    if (this._clusterCache.has(cacheKey)) return this._clusterCache.get(cacheKey);
+    let blocks = [];
+    try {
+      if (typeof PBC === 'undefined' || !PBC.clusterPageBlocks) { this._clusterCache.set(cacheKey, []); return []; }
+      const meta = this.scene.appState && this.scene.appState.pdfBlobs && this.scene.appState.pdfBlobs[docId];
+      if (!meta || !meta.blobGuid) { this._clusterCache.set(cacheKey, []); return []; }
+      let url = null; try { url = await this.plugin._assetGet({ blobGuid: meta.blobGuid }); } catch (_e) {}
+      if (!url) { this._clusterCache.set(cacheKey, []); return []; }
+      let pdfjs = null; try { pdfjs = await loadLib(LIB.pdfjs); } catch (_e) {}
+      if (!pdfjs) { try { URL.revokeObjectURL(url); } catch (_e) {} this._clusterCache.set(cacheKey, []); return []; }
+      let doc = null;
+      try {
+        const hasWorker = await this._pdfSetupWorker(pdfjs);
+        const buf = await (await fetch(url)).arrayBuffer();
+        doc = await pdfjs.getDocument({ data: buf, disableWorker: !hasWorker }).promise;
+        const pg = await doc.getPage(page);
+        const vp = pg.getViewport({ scale: 1 });
+        const tc = await pg.getTextContent();
+        blocks = PBC.clusterPageBlocks(tc.items || [], vp.width || 1, vp.height || 1) || [];
+      } catch (_e) {} finally { try { doc && doc.destroy && doc.destroy(); } catch (_e) {} try { URL.revokeObjectURL(url); } catch (_e) {} }
+    } catch (_e) {}
+    this._clusterCache.set(cacheKey, blocks);
+    return blocks;
+  }
+  // Containment-union match (canvas frac keys rx/ry/rw/rh): union every clustered block whose text falls inside this LLM
+  // block → tight box; granularity-robust (LLM coarser → unions fine clusters; LLM finer → falls back to the head cluster).
+  _clusterBoxForText(clusters, llmText) {
+    if (!clusters || !clusters.length || !llmText) return null;
+    const alnum = (s) => String(s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+    const llm = alnum(llmText); if (llm.length < 6) return null;
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0, found = 0;
+    for (const c of clusters) { const ct = alnum(c.text); if (ct.length < 4) continue; const probe = ct.length > 40 ? ct.slice(0, 40) : ct; if (llm.indexOf(probe) >= 0) { const b = c.box; x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); found++; } }
+    if (found) return { rx: x0, ry: y0, rw: Math.max(0, x1 - x0), rh: Math.max(0, y1 - y0) };
+    const head = llm.slice(0, 28);
+    for (const c of clusters) { const ct = alnum(c.text); if (ct.length && ct.indexOf(head) >= 0) return { rx: c.box.x, ry: c.box.y, rw: c.box.w, rh: c.box.h }; }
+    return null;
+  }
   // AI EXTRACT (Heptabase "Parse" port): render the WHOLE page hi-DPI, segment it into ordered typed blocks via the vision LLM,
   // and write one queryable PDF Highlights record per block (Extracted Kind/Text + Block Index + Page, deduped by a deterministic
   // key so re-parse replaces). opts.cards (single-page only) also drops ONE joined Markdown "page transcript" card beside the page.
@@ -9045,6 +9528,8 @@ class CanvasView {
     // Image-XObject rects for figure / scanned-table box accuracy (geometry-exact, not the model's approximate bbox)
     let imgRects = null; try { imgRects = await this._pdfPageImageFrac(docId, page); } catch (_e) {}
     const imgClaimed = new Set();
+    // EXACT GEOMETRY: classical text-layer block clustering for this page (born-digital). [] if no PBC / no text layer.
+    let clusters = []; try { clusters = await this._pageClusterBlocks(docId, page); } catch (_e) {}
     let made = 0; const mdParts = [];
     // First pass: compute fracs for all blocks so we can layout-infer from neighbors
     const blockFracs = new Array(blocks.length).fill(null);
@@ -9052,8 +9537,12 @@ class CanvasView {
       const b = blocks[i] || {};
       const md = pxcBlockToMd(b);
       let frac = null;
-      // 1. Try text-position match using pdf.js char rects
-      if (textIndex && md) { try { frac = this._blockFracFromTextItems(textIndex, md); } catch (_e) {} }
+      // 0. EXACT GEOMETRY (primary for born-digital text/list): tight box from text-layer clustering, matched by the block's text.
+      if ((b.kind === 'text' || !b.kind) && md && clusters && clusters.length) {
+        try { const cb = this._clusterBoxForText(clusters, md); if (cb && cb.rw > 0.005 && cb.rh > 0.004) frac = cb; } catch (_e) {}
+      }
+      // 1. Try text-position match using pdf.js char rects (fallback when clustering didn't match)
+      if (!frac && textIndex && md) { try { frac = this._blockFracFromTextItems(textIndex, md); } catch (_e) {} }
       // 1.5 Figures / scanned tables (no text-layer text): snap to a pdf.js image XObject rect (geometry-exact) over the LLM bbox
       if (!frac && (b.kind === 'figure' || b.kind === 'table') && imgRects && imgRects.length) {
         try { const snap = this._matchImageRect(imgRects, b.bbox, imgClaimed); if (snap) { frac = { rx: snap.rx, ry: snap.ry, rw: snap.rw, rh: snap.rh }; imgClaimed.add(snap._id); } } catch (_e) {}

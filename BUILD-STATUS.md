@@ -1,5 +1,14 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.203.0 — Exact block boxes via text-layer clustering (beat-Heptabase, Phase 1-2) (2026-06-28)
+Headline of the exact-block-outlining plan. Parsed `text`-block geometry now comes from **classical document-layout clustering
+of the pdf.js text layer** (`var PBC` = inlined `pdf-block-cluster.js`, 47 tests, twice adversarially reviewed), not the
+vision-LLM bbox. `_pageClusterBlocks(docId,page)` reuses the retained-blob load → `PBC.clusterPageBlocks` (cached);
+`_clusterBoxForText` containment-unions every clustered block whose text falls inside an LLM block → one tight `{rx,ry,rw,rh}`
+(granularity-robust — the LLM segments coarsely, the clusterer finely). Wired as step 0 in `_parsePdfPage` (before the
+char-rect text match; figures keep image-XObject geometry; LLM bbox last). Validated live on a real SOP (born-digital).
+`tests/pxc_*.test.js` green. Module kept in sync with the highlighter copy via `scripts/inline-pbc.py`.
+
 ## ✅ v1.202.0 — Ask AI about selected blocks (2026-06-28)
 PDF-feature loop iteration 8 (final). The multi-select bar gains an **Ask AI** button: it gathers the Shift-selected blocks'
 text in reading order, prompts for a question (`_promptText` in-DOM modal — Electron-safe), sends `question + excerpts` to
