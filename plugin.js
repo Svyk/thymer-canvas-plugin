@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.205.0';
+const PLEXUS_VERSION = '1.206.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -8750,7 +8750,12 @@ class CanvasView {
       const pass = await this._promptText('Passphrase to unlock your saved API keys:', '');
       if (!pass) return null;
       try { plug._secrets = JSON.parse(await pxDecryptSecret(blob, pass)); plug._secretPass = pass; }
-      catch (_e) { try { plug.ui.addToaster({ title: 'Plexus: wrong passphrase.', dismissible: true }); } catch (_e2) {} return null; }
+      catch (_e) {
+        // Recovery path: a wrong/forgotten passphrase otherwise locks out re-adding (also resettable in AI settings → Clear keys).
+        const r = await this._promptText('Wrong passphrase. Type RESET to erase the saved key and add a new one, or leave blank to cancel:', '');
+        if (r && r.trim().toUpperCase() === 'RESET') { try { localStorage.removeItem(PLEXUS_SECRET_LS); } catch (_e2) {} plug._secrets = null; plug._secretPass = null; return this._aiKey(provider); }
+        return null;
+      }
       if (plug._secrets[provider]) return plug._secrets[provider];
     }
     // Need a key for this provider — collect it (migrate a legacy plaintext OpenAI key) and (re)encrypt the blob.
