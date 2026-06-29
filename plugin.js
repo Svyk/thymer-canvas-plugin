@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.204.0';
+const PLEXUS_VERSION = '1.205.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -9622,6 +9622,13 @@ class CanvasView {
     const est = (todo.length * 0.02).toFixed(2);
     const go = await this._promptText('Parse ' + todo.length + ' page(s) with AI — roughly $' + est + ' (' + (pages.length - todo.length) + ' already done). Type "go" to proceed:', 'go');
     if (go !== 'go') { try { this.plugin.ui.addToaster({ title: 'Plexus: PDF parse cancelled.', dismissible: true }); } catch (_e) {} return; }
+    // Unlock the AI key ONCE upfront — a reload clears the in-memory passphrase, so the saved key can't decrypt and every page
+    // would silently return nothing. _aiKey prompts + caches; abort clearly if it can't be unlocked.
+    try {
+      const _prov = (this.plugin._settings && this.plugin._settings.aiProvider) || 'openai';
+      const _key = await this._aiKey(_prov);
+      if (!_key) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI key is locked or not set — enter your passphrase (or add a key in AI settings), then Parse again.', dismissible: true }); } catch (_e) {} return; }
+    } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t unlock the AI key — re-enter your passphrase and retry.', dismissible: true }); } catch (_e2) {} return; }
     this._parsing = true; this._parseCancel = false;
     let done = 0, blocks = 0;
     for (const p of todo) {
