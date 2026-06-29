@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.204.0 — Tight TABLE boxes via clustering (Phase 3) (2026-06-28)
+Extended the text-layer clustering geometry from text/list to **table/equation** blocks (gate `kind !== 'figure'`). A
+born-digital table is one LLM `table` block (CSV/markdown); the containment-union of its cell clusters is the tight table box
+(the "cell-weld" is correct for a per-block overlay). Figures keep image-XObject geometry; table falls back to image-XObject
+(raster) then LLM bbox. Validated live on a real SOP header table → tight full-width box. Per-cell ruling-line geometry
+(getOperatorList vector grid) DEFERRED — adds nothing to a per-block overlay. `tests/pxc_*.test.js` green.
+
 ## ✅ v1.203.0 — Exact block boxes via text-layer clustering (beat-Heptabase, Phase 1-2) (2026-06-28)
 Headline of the exact-block-outlining plan. Parsed `text`-block geometry now comes from **classical document-layout clustering
 of the pdf.js text layer** (`var PBC` = inlined `pdf-block-cluster.js`, 47 tests, twice adversarially reviewed), not the

@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.203.0';
+const PLEXUS_VERSION = '1.204.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -9537,8 +9537,10 @@ class CanvasView {
       const b = blocks[i] || {};
       const md = pxcBlockToMd(b);
       let frac = null;
-      // 0. EXACT GEOMETRY (primary for born-digital text/list): tight box from text-layer clustering, matched by the block's text.
-      if ((b.kind === 'text' || !b.kind) && md && clusters && clusters.length) {
+      // 0. EXACT GEOMETRY (primary for born-digital text/list/TABLE/equation): tight box from text-layer clustering, matched by
+      // the block's text. Skips figures (image-XObject is better for raster figures). For a TABLE the containment-union of its
+      // cell clusters IS the tight table box (Phase 3 — the cell-weld is correct here; we overlay per block).
+      if (b.kind !== 'figure' && md && clusters && clusters.length) {
         try { const cb = this._clusterBoxForText(clusters, md); if (cb && cb.rw > 0.005 && cb.rh > 0.004) frac = cb; } catch (_e) {}
       }
       // 1. Try text-position match using pdf.js char rects (fallback when clustering didn't match)
