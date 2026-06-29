@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.206.0';
+const PLEXUS_VERSION = '1.207.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -6411,7 +6411,7 @@ class CanvasView {
     mk('✦ Highlight', 'Highlight a region of this page (colour → box)', () => this._startPdfRegionHighlight()); // #32: region highlight → translucent overlay + queryable area record
     mk('✂ Figure', 'Extract a region (chart/figure) of this page as an image', () => this._startPdfFigureExtract()); // #32: surface the existing extract-region command on the page toolbar
     mk('✨ Extract', 'AI-extract a snipped region → table (Markdown+CSV) / equation (LaTeX) / figure / text', () => this._startAiExtract()); // Heptabase-parser port: vision-LLM on the region → typed, page-anchored, queryable
-    mk('🧠 Parse', 'AI-parse this whole page → ordered typed blocks (queryable records + a Markdown transcript card)', () => this._parsePdfPage(this._byId(this._pdfNavId) || page, { cards: true })); // Heptabase "Parse" port (single page; whole-PDF via the command palette)
+    mk('🧠 Blocks', 'Show selectable text blocks for this PDF (instant, from the text layer — no AI, no records, no clutter). Click a block → → Card; Shift+click to multi-select. Scanned PDFs: the “Parse entire PDF (AI)” command.', () => { const p = this._byId(this._pdfNavId) || page; this._showPdfClusterBlocks(p.pdf && p.pdf.docId); }); // Phase 4 parity: cluster-first selectable overlays, pull-on-demand (AI parse stays in the command palette so neither path auto-clutters)
     mk('🖼 Evidence', 'Gallery of every figure + highlight — click to cycle group by page → code → colour', () => { const order = ['page', 'code', 'color']; const cur = order[(order.indexOf(this._lightboxBy || '') + 1) % 3] || 'page'; this._lightboxBy = cur; this._pdfLightbox(page.pdf.docId, { by: cur }); }); // F4: evidence/figure lightbox; repeated clicks regroup in place
     this.wrap.appendChild(box); this.dirty = true; // one correcting frame so the offsetWidth-based clamp uses the real width, not the 180 estimate
   }
@@ -9623,7 +9623,7 @@ class CanvasView {
     const fp = pages[0].pdf.fingerprint || '';
     const ix = await this._parseRecIndex(col, fp);
     const todo = pages.filter((p) => !ix.pages.has(p.pdf.page));
-    if (!todo.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: all ' + pages.length + ' page(s) already parsed.', dismissible: true }); } catch (_e) {} return; }
+    if (!todo.length) { this._pdfBlocksFromCluster = false; try { this._loadPdfParsedBlocks().catch(() => {}); } catch (_e) {} try { this.plugin.ui.addToaster({ title: 'Plexus: all ' + pages.length + ' page(s) already parsed — showing the record blocks.', dismissible: true }); } catch (_e) {} return; } // clear the cluster latch so the user gets the record overlays back
     const est = (todo.length * 0.02).toFixed(2);
     const go = await this._promptText('Parse ' + todo.length + ' page(s) with AI — roughly $' + est + ' (' + (pages.length - todo.length) + ' already done). Type "go" to proceed:', 'go');
     if (go !== 'go') { try { this.plugin.ui.addToaster({ title: 'Plexus: PDF parse cancelled.', dismissible: true }); } catch (_e) {} return; }
@@ -9634,6 +9634,7 @@ class CanvasView {
       const _key = await this._aiKey(_prov);
       if (!_key) { try { this.plugin.ui.addToaster({ title: 'Plexus: AI key is locked or not set — enter your passphrase (or add a key in AI settings), then Parse again.', dismissible: true }); } catch (_e) {} return; }
     } catch (_e) { try { this.plugin.ui.addToaster({ title: 'Plexus: couldn’t unlock the AI key — re-enter your passphrase and retry.', dismissible: true }); } catch (_e2) {} return; }
+    this._pdfBlocksFromCluster = false; // AI parse is committing (past every abort guard) → record-backed blocks reload after, cluster overlays give way
     this._parsing = true; this._parseCancel = false;
     let done = 0, blocks = 0;
     for (const p of todo) {
@@ -9646,6 +9647,41 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title: '🧠 PDF parse ' + (this._parseCancel ? 'stopped' : 'complete') + ': ' + done + '/' + todo.length + ' page(s), ' + blocks + ' block(s).', dismissible: true }); } catch (_e) {}
     // Reload all parsed-block overlays once after the full parse
     try { this._loadPdfParsedBlocks().catch(() => {}); } catch (_e) {}
+  }
+  // CLUSTER-FIRST (Phase 4 parity with the Highlighter): build EPHEMERAL selectable block overlays for every page of the active
+  // PDF straight from the text-layer clusterer — NO AI, NO records, NO note links. Pull on demand via the popup "→ Card" /
+  // multi-select "+ Card". Synthetic guids (cluster:<fp>:p<page>:b<idx>) keep multi-select + reading-order sort working;
+  // _ephemeral flags them so the popup hides "Open record" and the nudge/persist path never touches a real record. Scanned
+  // pages (no text layer) are reported for the explicit AI parse command.
+  async _showPdfClusterBlocks(docId) {
+    docId = docId || this._activePdfDocId();
+    const pages = docId ? this._pdfPagesOf(docId) : [];
+    if (!pages.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no PDF on this canvas — import one first.', dismissible: true }); } catch (_e) {} return; }
+    const fp = (pages[0].pdf && pages[0].pdf.fingerprint) || '';
+    const out = []; let scanned = 0;
+    for (const pEl of pages) {
+      if (this.destroyed) return;
+      const page = pEl.pdf.page;
+      let cb = []; try { cb = await this._pageClusterBlocks(docId, page); } catch (_e) {}
+      if (!cb || !cb.length) { scanned++; continue; }
+      cb.forEach((c, idx) => out.push({
+        guid: 'cluster:' + fp + ':p' + page + ':b' + idx, _ephemeral: true,
+        docId, page, frac: { rx: c.box.x, ry: c.box.y, rw: c.box.w, rh: c.box.h },
+        kind: 'text', text: c.text || '', inferred: false,
+      }));
+    }
+    if (this.destroyed) return;
+    // No text layer on ANY page (scanned PDF) → DON'T claim cluster state: latching _pdfBlocksFromCluster=true with zero blocks
+    // would permanently block _loadPdfParsedBlocks for the session. Bail before mutating, point the user at the AI parse command.
+    if (!out.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: no text layer on this PDF — use “Parse entire PDF (AI → typed blocks)” for scanned pages.', dismissible: true }); } catch (_e) {} return; }
+    this._pdfParsedBlocks = out;
+    this._pdfBlocksFromCluster = true; // these are ephemeral cluster overlays, NOT record-backed
+    this._pdfBlocksVisible = true;
+    if (this._pdfBlockSel) this._pdfBlockSel.clear();
+    try { this._closeBlockSelBar(); } catch (_e) {}
+    this.dirty = true;
+    try { this._refreshBlockKindBar(); } catch (_e) {}
+    try { this.plugin.ui.addToaster({ title: '🧠 ' + out.length + ' selectable block(s)' + (scanned ? ' · ' + scanned + ' scanned page(s) (use the AI parse command)' : '') + '. Click a block → → Card, or Shift+click to multi-select.', dismissible: true }); } catch (_e) {}
   }
   // Copy an image element's pixels to the system clipboard as PNG (best-effort; needs a recent user gesture + clipboard perm).
   async _snipToClipboard(el) {
@@ -10000,7 +10036,7 @@ class CanvasView {
     const sendBtn = document.createElement('button'); sendBtn.className = 'pxc-rc-btn'; sendBtn.textContent = '→ Card'; sendBtn.title = 'Drop this block as a card on the board';
     sendBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); let pageEl = null; try { pageEl = this._pdfPageElMap().get(block.docId + ':' + block.page); } catch (_e) {} try { this._dropExtractCard(pageEl || null, block.kind || 'text', block.text || '', 8000); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block sent to the board.', dismissible: true }); } catch (_e2) {} });
     footer.appendChild(sendBtn);
-    if (block.guid) { const openBtn = document.createElement('button'); openBtn.className = 'pxc-rc-btn'; openBtn.textContent = 'Open record'; openBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { this._openRecord(block.guid); } catch (_e) {} this._closeParsedBlockPopup(); }); footer.appendChild(openBtn); } // review HIGH: _openRecord resolves the workspace GUID + panel.navigateTo (there is no ui.openRecord on the canvas)
+    if (block.guid && !block._ephemeral) { const openBtn = document.createElement('button'); openBtn.className = 'pxc-rc-btn'; openBtn.textContent = 'Open record'; openBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { this._openRecord(block.guid); } catch (_e) {} this._closeParsedBlockPopup(); }); footer.appendChild(openBtn); } // review HIGH: _openRecord resolves the workspace GUID + panel.navigateTo (there is no ui.openRecord on the canvas). Ephemeral cluster blocks have no record → no Open-record button.
     box.appendChild(footer);
     this.wrap.appendChild(box);
     // Position: keep in viewport
@@ -10414,7 +10450,7 @@ class CanvasView {
     try { setTimeout(() => { if (!this.destroyed) this._reconcileComments().catch(() => {}); }, 1200); } catch (_e) {} // C1: rejoin/seed comment mirrors a moment after load (deferred, non-blocking; backing + scene settled by then)
     try { setTimeout(() => { if (!this.destroyed) this._reconcilePdfFigures().catch(() => {}); }, 1300); } catch (_e) {} // A2: rejoin/seed PDF-figure mirrors (staggered after comments so the two reconciles don't contend on getAllRecords)
     try { setTimeout(() => { if (!this.destroyed) this._loadPdfRegionHighlights().catch(() => {}); }, 1500); } catch (_e) {} // A3: re-show region highlights for the PDFs on this canvas (staggered after the figure reconcile)
-    try { setTimeout(() => { if (!this.destroyed) this._loadPdfParsedBlocks().catch(() => {}); }, 1700); } catch (_e) {} // A4: load parsed-block overlays (Heptabase-style) from the PDF Highlights collection
+    try { setTimeout(() => { if (!this.destroyed && !this._pdfBlocksFromCluster) this._loadPdfParsedBlocks().catch(() => {}); }, 1700); } catch (_e) {} // A4: load parsed-block overlays (Heptabase-style) from the PDF Highlights collection — skip if the user already showed cluster blocks within the open window (don't clobber them)
     this.dirty = true;
     // DATA-LOSS GUARD (2026-06-19): only auto-seed the empty default for a genuinely NEW record. If a scene STORE
     // exists (Scene-property blob OR a body plexus-scene.json line) but failed to LOAD (transient blob/line sync
@@ -11161,6 +11197,7 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: PDF outline (table of contents)', icon: 'ti-list-tree', onSelected: () => { const v = this._activeView(); if (v) v._showPdfOutline(); } }); // C26: the PDF's bookmark tree → clickable TOC, jump to a page. ti-list-tree = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Extract PDF region as figure', icon: 'ti-photo', onSelected: () => { const v = this._activeView(); if (v) v._startPdfFigureExtract(); } }); // A1: lasso a chart/figure region of a PDF page → standalone cropped image element. ti-photo = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: AI-extract PDF region (table / equation / figure)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) v._startAiExtract(); } }); // Heptabase-parser port: vision-LLM on a snipped region → typed Markdown/CSV/LaTeX, page-anchored + queryable. ti-sparkles = confirmed-bundled
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Show PDF blocks (selectable, no AI)', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._showPdfClusterBlocks(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Phase 4 parity: instant text-layer cluster overlays, pull-on-demand (→ Card). No records, no clutter. ti-eye = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Parse entire PDF (AI → typed blocks)', icon: 'ti-sparkles', onSelected: () => { const v = this._activeView(); if (v) { const d = v._activePdfDocId(); if (d) v._parsePdfAll(d); else { try { this.ui.addToaster({ title: 'No PDF on this canvas.', dismissible: true }); } catch (_e) {} } } } }); // Heptabase "Parse" port: segment every page into queryable typed-block records (skips already-parsed, Esc to stop). ti-sparkles = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Toggle PDF parsed-block overlays', icon: 'ti-eye', onSelected: () => { const v = this._activeView(); if (!v) return; v._pdfBlocksVisible = (v._pdfBlocksVisible === false) ? true : false; v.dirty = true; try { v._refreshBlockKindBar(); } catch (_e) {} try { this.ui.addToaster({ title: 'PDF parsed-block overlays: ' + (v._pdfBlocksVisible === false ? 'off' : 'on'), dismissible: true }); } catch (_e) {} } }); // A4: show/hide Heptabase-style parsed-block tinted boxes on PDF page images. ti-eye = confirmed-bundled
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Go to selected PDF block', icon: 'ti-target', onSelected: () => { const v = this._activeView(); if (v) v._gotoSelectedBlock(); } }); // jump-to-PDF: fly+flash the first Shift+selected parsed block on its page. ti-target = confirmed-bundled
