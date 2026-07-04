@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.209.0';
+const PLEXUS_VERSION = '1.210.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1279,8 +1279,23 @@ function pxcParseNaturalDate(query) {
   }
   return null;
 }
-// Display text for ONE line-item segment: plain text, a ref's title, or a datetime's formatted/derived date. Previously a
-// datetime (and any non-text/non-titled segment) returned '' → dates VANISHED from cards + the card editor (the bug).
+// NATIVE-TRANSCLUSION FIDELITY (ported from reference-extravaganza `_cleanDisplayText`): a bare
+// `{type:'ref',text:{guid}}` inside a transcluded body must display the target's LIVE name — not blank, not the
+// literal word "ref". Thymer's own chips resolve this way and re-title on rename; hand-drawn cards should match.
+// `pxcNameIndex` is a guid→name cache stamped as record/line cards resolve (see _recFor/_lineFor). `pxcRefName`
+// consults it first, then the refx cross-plugin bridge (`window.__refx.recordName`) which carries the WHOLE
+// workspace's names incl. cold/deleted records — so with refx installed, ANY ref target resolves; without it,
+// targets you've placed on the board still resolve. Unknown → '' (caller shows a ↗ placeholder, never blank).
+const pxcNameIndex = new Map();
+function pxcRefName(guid) {
+  if (!guid) return '';
+  const n = pxcNameIndex.get(guid); if (n) return n;
+  try { if (typeof window !== 'undefined' && window.__refx && window.__refx.recordName) { const r = window.__refx.recordName(guid); if (r) { pxcNameIndex.set(guid, r); return r; } } } catch (_e) {}
+  return '';
+}
+// Display text for ONE line-item segment: plain text, a ref's title/live-name, or a datetime's formatted/derived date.
+// Previously a datetime (and any non-text/non-titled segment) returned '' → dates VANISHED from cards + the card
+// editor (the bug); a title-less ref ALSO returned '' → transcluded links rendered blank. Both now resolve.
 function pxcSegText(s) {
   if (!s) return '';
   if (typeof s.text === 'string') return s.text;
@@ -1288,9 +1303,10 @@ function pxcSegText(s) {
   if (v.title) return String(v.title);
   if (v.formatted) return String(v.formatted);
   if (v.d != null || v.date != null) return pxcFmtThymerDate(v.d != null ? v.d : v.date);
+  if (v.guid || s.type === 'ref') { const g = v.guid || (typeof s.text === 'string' ? s.text : ''); return pxcRefName(g) || '↗'; } // ref w/o alias → live target name (native), else a dead-ref marker
   return '';
 }
-function runDisplay(run) { if (!run) return ''; if (run.t === 'ref') return String(run.alias || run.label || 'ref'); if (run.t === 'datetime') return run.formatted ? String(run.formatted) : pxcFmtThymerDate(run.d != null ? run.d : run.date); return String(run.s == null ? '' : run.s); }
+function runDisplay(run) { if (!run) return ''; if (run.t === 'ref') return String(run.alias || run.label || pxcRefName(run.guid || run.lineGuid) || '↗'); if (run.t === 'datetime') return run.formatted ? String(run.formatted) : pxcFmtThymerDate(run.d != null ? run.d : run.date); return String(run.s == null ? '' : run.s); }
 function runsOf(el) { return (el && el.runs && el.runs.length) ? el.runs : [{ t: 'text', s: (el && el.text) || '' }]; }
 function flattenRuns(runs) { let o = ''; for (const r of runs) o += runDisplay(r); return o; }
 function hasRefRun(runs) { for (const r of runs) if (r.t === 'ref') return true; return false; }
@@ -5272,6 +5288,7 @@ class CanvasView {
         const rec = await this.plugin.data.getRecord(guid);
         if (!rec) { entry.title = '(record not found)'; entry.ready = true; this.dirty = true; return; }
         entry.title = (rec.getName && rec.getName()) || 'Untitled';
+        try { if (entry.title && entry.title[0] !== '(') pxcNameIndex.set(guid, entry.title); } catch (_e) {} // native-ref fidelity: title-less refs to THIS record now resolve to its live name
         try { const props = (rec.getAllProperties && rec.getAllProperties()) || []; for (const pr of props) { try { const lbl = pr.choiceLabel && pr.choiceLabel(); if (lbl) { entry.tag = lbl; break; } } catch (_e) {} } } catch (_e) {} // Phase 9 E11: encode by a choice property
         try { entry.skin = recordSkin(rec); } catch (_e) {} // CS-8: property-conditional style (Status/Priority/Due)
         try { const items = await rec.getLineItems(); const cap = (this._hlCardGuids && this._hlCardGuids.has(guid)) ? 40 : 10; entry.lines = pxcOutlineRows(items, null, cap, false, false).map((r) => ({ text: r.text, depth: r.depth, lineGuid: r.li && r.li.guid })); } catch (_e) {} // F1: highlight cards load up to 40 body lines (comments), others 10. [{text, depth, lineGuid}] — depth from parent_guid chain; lineGuid → line-level targeting
@@ -7471,7 +7488,7 @@ class CanvasView {
     (async () => {
       try {
         const rec = await this.plugin.data.getRecord(el.recordGuid); if (!rec) { entry.text = '(record gone)'; entry.ready = true; this.dirty = true; return; }
-        try { entry.title = (rec.getName && rec.getName()) || ''; } catch (_e) {}
+        try { entry.title = (rec.getName && rec.getName()) || ''; if (entry.title) pxcNameIndex.set(el.recordGuid, entry.title); } catch (_e) {}
         const items = (await rec.getLineItems()) || [];
         const li = items.find((x) => x.guid === key);
         if (!li) { entry.text = '(line gone)'; entry.ready = true; this.dirty = true; return; }
