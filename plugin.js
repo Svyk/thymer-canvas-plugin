@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.207.0';
+const PLEXUS_VERSION = '1.208.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -2843,7 +2843,16 @@ class CanvasView {
   // Flip back to the plain note. UX-3: open IN PLACE (navigate THIS panel to the note editor), not a side panel.
   async _flipToNote() {
     const ws = (this.plugin.getWorkspaceGuid && this.plugin.getWorkspaceGuid()) || this.plugin.workspaceGuid;
-    const noteGuid = this.hostGuid || this.recordGuid; // flip back to the HOST note, not the backing drawing
+    let noteGuid = this.hostGuid || this.recordGuid; // flip back to the HOST note, not the backing drawing
+    // ROBUST: never land on the Plexus Drawing itself. If the flip target IS a drawing record (host opened
+    // directly on a drawing, or hostGuid drifted to the backing after a re-flip), redirect to its Source Note
+    // so "Note" ALWAYS opens the real note. A truly standalone drawing (no Source Note) stays put.
+    try {
+      if (await this.plugin._isDrawingRecord(noteGuid)) {
+        const src = await this.plugin._sourceNoteOf(noteGuid);
+        if (src && src !== noteGuid) { noteGuid = src; this.hostGuid = src; } // heal hostGuid so subsequent flips are correct too
+      }
+    } catch (_e) {}
     try { await this.panel.navigateTo({ type: 'edit_panel', rootId: noteGuid, workspaceGuid: ws }); return; } catch (_e) {}
     // Fallback: if in-place nav fails, open in a side panel.
     let panel = null; try { panel = await this.plugin.ui.createPanel({ afterPanel: this.panel }); } catch (_e) {}
@@ -11419,17 +11428,26 @@ class Plugin extends AppPlugin {
   async _scanDrawings(force) {
     if (this._drawingScan && !force) return this._drawingScan;
     let recs = []; try { const col = await this._drawingsCollection(); if (col) recs = await col.getAllRecords() || []; } catch (_e) {}
-    const drawingGuids = new Set(), srcMap = new Map();
+    const drawingGuids = new Set(), srcMap = new Map(), drawingSrc = new Map();
     for (const r of recs) {
       const g = r && r.guid; if (!g) continue; drawingGuids.add(g);
-      try { const p = r.prop('Source Note'); if (p) for (const ng of pxcRelValues(p)) if (ng && !srcMap.has(ng)) srcMap.set(ng, g); } catch (_e) {}
+      try { const p = r.prop('Source Note'); if (p) { const ngs = pxcRelValues(p); if (ngs && ngs.length) { drawingSrc.set(g, ngs[0]); for (const ng of ngs) if (ng && !srcMap.has(ng)) srcMap.set(ng, g); } } } catch (_e) {}
     }
-    this._drawingScan = { drawingGuids, srcMap };
+    this._drawingScan = { drawingGuids, srcMap, drawingSrc };
     return this._drawingScan;
   }
   async _isDrawingRecord(guid) { try { return (await this._scanDrawings()).drawingGuids.has(guid); } catch (_e) { return false; } }
   async _findBackingDrawing(hostGuid) { try { return (await this._scanDrawings()).srcMap.get(hostGuid) || null; } catch (_e) { return null; } }
-  _noteBacking(hostGuid, drawingGuid) { try { const s = this._drawingScan; if (s) { s.drawingGuids.add(drawingGuid); s.srcMap.set(hostGuid, drawingGuid); } } catch (_e) {} } // keep the cache fresh after creating a backing
+  // Inverse of _findBackingDrawing: given a Plexus Drawings guid, return the Source Note it backs (or null).
+  // Reads the cached scan first (fast), then falls back to the live `Source Note` property in case the drawing
+  // was created after the last scan. Used by flip-to-note so we NEVER strand the user on the drawing record.
+  async _sourceNoteOf(drawingGuid) {
+    if (!drawingGuid) return null;
+    try { const s = await this._scanDrawings(); const hit = s.drawingSrc && s.drawingSrc.get(drawingGuid); if (hit) return hit; } catch (_e) {}
+    try { const rec = await getRecordPoll(this, drawingGuid); if (rec) { const vals = pxcRelValues(rec.prop('Source Note')); if (vals && vals.length) { try { const s = this._drawingScan; if (s && s.drawingSrc) s.drawingSrc.set(drawingGuid, vals[0]); } catch (_e2) {} return vals[0]; } } } catch (_e) {}
+    return null;
+  }
+  _noteBacking(hostGuid, drawingGuid) { try { const s = this._drawingScan; if (s) { s.drawingGuids.add(drawingGuid); s.srcMap.set(hostGuid, drawingGuid); if (s.drawingSrc) s.drawingSrc.set(drawingGuid, hostGuid); } } catch (_e) {} } // keep the cache fresh after creating a backing
   async _newDrawing() {
     const col = await this._drawingsCollection(); if (!col) return null;
     let guid = null; try { guid = col.createRecord('Untitled drawing'); } catch (e) { console.error('[Plexus] createRecord', e); }
@@ -11484,13 +11502,24 @@ class Plugin extends AppPlugin {
     if (!clip) { try { this.ui.addToaster({ title: 'Plexus: no image reference copied yet — use “Cite” in a drawing first.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'no clip' }; }
     let rec = null;
     if (targetGuid) rec = await getRecordPoll(this, targetGuid);
-    else { const panel = this.ui.getActivePanel(); try { rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) {} }
+    else {
+      // RELIABILITY: getActivePanel()/getActiveRecord() can momentarily return null right after the command palette
+      // runs (panel focus / lazy record resolution). Poll a few times before giving up — this was the intermittent
+      // "paste didn't work" (the record just wasn't resolved yet on the first synchronous read).
+      for (let i = 0; i < 6 && (!rec || !rec.guid); i++) {
+        try { const panel = this.ui.getActivePanel(); rec = panel && panel.getActiveRecord ? panel.getActiveRecord() : null; } catch (_e) { rec = null; }
+        if (!rec || !rec.guid) await sleep(120);
+      }
+    }
     if (!rec || !rec.guid) { try { this.ui.addToaster({ title: 'Plexus: open a note (editor panel) first, then paste.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'no record' }; }
     // Encode the whole cross-reference into the image's BLOB FILENAME (synced metadata that travels to every
     // client — web AND desktop), so the ↗ chip + navigation reconstruct anywhere, not just where it was made.
     const chipLabel = (clip.label && String(clip.label).trim()) || (clip.crop ? 'region' : 'drawing');
     const refFilename = this._encodeRefFilename({ drawing: clip.sourceRecordGuid, el: clip.elementId || '', region: clip.region || null, label: chipLabel, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra, sec: clip.sec });
-    let blob = null; try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {}
+    // RELIABILITY: retry the blob upload — a single transient failure produced an EMPTY image line ("paste worked but no image").
+    // Abort BEFORE creating the line if the blob never uploads, so we never strand an empty image node in the note.
+    let blob = null; for (let i = 0; i < 3 && !blob; i++) { try { blob = await this.data.uploadBlob(new File([clip.png], refFilename, { type: 'image/png' })); } catch (_e) {} if (!blob) await sleep(160); }
+    if (!blob) { try { this.ui.addToaster({ title: 'Plexus: couldn’t upload the image reference — nothing pasted. Try “Cite” again, then paste.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'blob upload failed' }; }
     // Nest the image UNDER the line the cursor is on (a CHILD), not at the record's top level. Resolve the
     // cursor line from the active editor (the thread-target marker) → the matching line item → use as parent.
     let parentLine = null;
