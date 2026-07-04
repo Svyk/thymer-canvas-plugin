@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.208.0';
+const PLEXUS_VERSION = '1.209.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -11529,15 +11529,21 @@ class Plugin extends AppPlugin {
       const cur = root.querySelector('.flowythymer-thread-target') || root.querySelector('.listitem.has-focus, .listitem.is-target, .listitem.selected');
       const li = cur ? (cur.getAttribute && cur.getAttribute('data-guid') ? cur : (cur.closest && cur.closest('.listitem[data-guid]'))) : null;
       const g = li && li.getAttribute ? li.getAttribute('data-guid') : null;
+      // Only adopt the cursor line as parent if it actually belongs to THIS record (a stray thread-target in another
+      // panel resolves to no match → parentLine stays null → paste at the record root, never onto the wrong record).
       if (g) { const items = await rec.getLineItems(); parentLine = (items || []).find((x) => x && x.guid === g) || null; }
     } catch (_e) {}
     let imgLine = null; for (let i = 0; i < 5 && !imgLine; i++) { try { imgLine = await rec.createLineItem(parentLine, null, 'image', null, null); } catch (_e) {} if (!imgLine) await sleep(150); }
-    if (imgLine && blob) { try { await imgLine.setBlob(blob); } catch (_e) {} }
+    if (!imgLine) { try { this.ui.addToaster({ title: 'Plexus: couldn’t add the image to the note — try paste again.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'createLineItem failed' }; }
+    // Attach the blob, with retry. A created-but-blobless line is a blank image node → clean it up rather than leave it
+    // (this is the "third path": setBlob can throw transiently even after a good upload). Retries fire ONLY on failure.
+    let blobSet = false; for (let i = 0; i < 3 && !blobSet; i++) { try { await imgLine.setBlob(blob); blobSet = true; } catch (_e) {} if (!blobSet) await sleep(150); }
+    if (!blobSet) { try { await imgLine.delete(); } catch (_e) {} try { this.ui.addToaster({ title: 'Plexus: couldn’t attach the image — nothing pasted. Try paste again.', dismissible: true }); } catch (_e) {} return { ok: false, reason: 'setBlob failed' }; }
     // Clean inline reference: a small ↗ chip attached DIRECTLY to the pasted image (no separate label line).
-    if (imgLine && imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra, sec: clip.sec || null, secName: clip.secName || null }); } catch (_e) {} }
+    if (imgLine.guid) { try { this._registerXref(imgLine.guid, { drawing: clip.sourceRecordGuid, el: clip.elementId || null, region: clip.region || null, label: chipLabel, image: true, inImage: clip.inImage, frac: clip.frac, fracPoly: clip.fracPoly, extra: clip.extra, sec: clip.sec || null, secName: clip.secName || null }); } catch (_e) {} }
     setTimeout(() => { try { this._scanImageBadges(); } catch (_e) {} }, 400);
     try { this.ui.addToaster({ title: 'Image reference added — the ↗ on it flies to the drawing and zooms to “' + chipLabel + '”.', dismissible: true }); } catch (_e) {}
-    return { ok: !!imgLine, imgLineGuid: imgLine ? imgLine.guid : null, recordGuid: rec.guid };
+    return { ok: true, imgLineGuid: imgLine.guid, recordGuid: rec.guid };
   }
   async _openPanelFor(recordGuid, opts) {
     if (recordGuid) this._pendingQueue.push({ guid: recordGuid, at: Date.now(), blank: !!(opts && opts.blank) });
