@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.212.0';
+const PLEXUS_VERSION = '1.213.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1877,6 +1877,34 @@ function drawLinear(ctx, el) {
   if (el.startArrowhead) { const a = pts[1], b = pts[0]; drawArrowhead(ctx, a[0], a[1], b[0], b[1], ah, el.startArrowhead); }
   ctx.restore();
 }
+// WaveC: draw a callout/speech-bubble element. Points are ABSOLUTE world coords (closed polygon).
+// Fills the polygon with el.backgroundColor then strokes it, then draws el.text centered inside.
+function drawCallout(ctx, el) {
+  const pts = el.points; if (!pts || pts.length < 3) return;
+  ctx.save();
+  ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
+  // Fill polygon background
+  if (el.backgroundColor && el.backgroundColor !== 'transparent') {
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath(); ctx.fillStyle = el.backgroundColor; ctx.fill();
+  }
+  // Stroke outline
+  ctx.strokeStyle = el.strokeColor || '#1e1e1e'; ctx.lineWidth = el.strokeWidth || 2;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath(); ctx.stroke();
+  // Draw centered text
+  const txt = String(el.text || ''); if (!txt) { ctx.restore(); return; }
+  const fs = el.fontSize || 16;
+  ctx.font = fs + 'px ' + (el.fontFamily || PLEXUS_DEFAULT_FONT);
+  ctx.fillStyle = el.strokeColor || '#1e1e1e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const cx = (el.x + (el.x + el.width)) / 2, cy = (el.y + (el.y + el.height)) / 2;
+  const lines = txt.split('\n'); const lh = fs * 1.25; const top = cy - (lines.length - 1) * lh / 2;
+  for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], cx, top + i * lh);
+  ctx.restore();
+}
 function drawElement(ctx, el) {
   if (el.type === 'comment') return; // C0: comments render only as overlay pins (in the interactive pass), never as a shape -- inert in static/export/minimap
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity, lineStyle: el.lineStyle };
@@ -1903,6 +1931,7 @@ function drawElement(ctx, el) {
   else if (el.type === 'text') drawText(ctx, el);
   else if (el.type === 'icon') drawIcon(ctx, el);
   else if (el.type === 'arrow' || el.type === 'line') drawLinear(ctx, el);
+  else if (el.type === 'callout') drawCallout(ctx, el);
   if (rotated) ctx.restore();
 }
 
@@ -1973,6 +2002,194 @@ function linearBBox(el) {
 }
 let _fileIdC = 0;
 function newFileId() { return 'f' + Date.now().toString(36) + (_fileIdC++).toString(36); }
+
+// ── WaveC: Callout/speech-bubble geometry (pure functions, top-level, pxcCo* prefix) ──────────────
+// All generators return [{x,y}] in a centered coordinate system (cx=0,cy=0). The caller maps to world.
+// N = number of polygon points; all shapes are closed (last pt != first pt; caller closes on draw).
+function pxcCoOval(rx, ry, N) {
+  N = N || 48; const pts = [];
+  for (let i = 0; i < N; i++) { const t = (i / N) * Math.PI * 2; pts.push({ x: rx * Math.cos(t), y: ry * Math.sin(t) }); }
+  return pts;
+}
+function pxcCoCloud(rx, ry, depth, count, N) {
+  N = N || 48; depth = Math.max(0.01, Math.min(0.6, depth || 0.18)); count = Math.max(3, Math.round(count || 8));
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    const r = 1 + depth * Math.abs(Math.sin(count * t / 2));
+    pts.push({ x: rx * r * Math.cos(t) / (1 + depth), y: ry * r * Math.sin(t) / (1 + depth) });
+  }
+  return pts;
+}
+function pxcCoSpiky(rx, ry, depth, count) {
+  count = Math.max(3, Math.round(count || 8)); depth = Math.max(0.1, Math.min(0.9, depth || 0.4));
+  const pts = []; const N = count * 2;
+  for (let i = 0; i < N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    const outer = (i % 2 === 0);
+    const r = outer ? 1 : (1 - depth);
+    pts.push({ x: rx * r * Math.cos(t), y: ry * r * Math.sin(t) });
+  }
+  return pts;
+}
+function pxcCoBox(rx, ry, cornerR) {
+  cornerR = Math.max(0, Math.min(Math.min(rx, ry) * 0.9, cornerR == null ? 10 : cornerR));
+  const pts = []; const arc = (cx, cy, startA, endA) => {
+    const steps = 6;
+    for (let i = 0; i <= steps; i++) { const a = startA + (endA - startA) * (i / steps); pts.push({ x: cx + cornerR * Math.cos(a), y: cy + cornerR * Math.sin(a) }); }
+  };
+  arc(rx - cornerR, -ry + cornerR, -Math.PI / 2, 0);
+  arc(rx - cornerR, ry - cornerR, 0, Math.PI / 2);
+  arc(-rx + cornerR, ry - cornerR, Math.PI / 2, Math.PI);
+  arc(-rx + cornerR, -ry + cornerR, Math.PI, 3 * Math.PI / 2);
+  return pts;
+}
+function pxcCoRibbon(rx, ry) {
+  const notchX = rx * 0.15; const pts = [
+    { x: -rx * 0.8, y: 0 }, { x: rx, y: -ry }, { x: -rx, y: -ry },
+    { x: -rx * 0.8, y: 0 }, { x: -rx, y: ry }, { x: rx, y: ry },
+  ];
+  return pts;
+}
+function pxcCoPolygon(rx, ry, sides) {
+  sides = Math.max(3, Math.round(sides || 6)); const pts = [];
+  for (let i = 0; i < sides; i++) { const t = (i / sides) * Math.PI * 2 - Math.PI / 2; pts.push({ x: rx * Math.cos(t), y: ry * Math.sin(t) }); }
+  return pts;
+}
+function pxcCoHeart(rx, ry) {
+  const N = 64; const pts = [];
+  for (let i = 0; i < N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) - 2;
+    pts.push({ x: rx * x / 17, y: ry * y / 17 });
+  }
+  return pts;
+}
+// Inject a stem (tail) into an existing closed polygon point list.
+// Returns {pts:[{x,y}], extras:[el]} — extras are additional elements (for 'bubbles' stem).
+// stemPos: 0-100 (position around perimeter), stemLen: world length, depth/count: for shape params.
+function pxcCoInjectStem(pts, stemKind, stemPos, stemLen) {
+  if (!pts || pts.length < 3) return { pts: pts.slice(), extras: [] };
+  if (stemKind === 'none') return { pts: pts.slice(), extras: [] };
+  const N = pts.length;
+  const centerIdx = Math.floor(stemPos / 100 * N) % N;
+  const pt = pts[centerIdx];
+  const dirAng = Math.atan2(pt.y, pt.x);
+  const tip = { x: pt.x + Math.cos(dirAng) * stemLen, y: pt.y + Math.sin(dirAng) * stemLen };
+  if (stemKind === 'bubbles') {
+    // Detached: 3 shrinking ellipses toward tip (no splice into polygon)
+    const extras = [];
+    for (let i = 0; i < 3; i++) {
+      const t = (i + 1) / 4; const r = 9 * Math.pow(0.72, i);
+      extras.push({ kind: 'bubble', cx: pt.x + (tip.x - pt.x) * t, cy: pt.y + (tip.y - pt.y) * t, rx: r, ry: r * 0.85 });
+    }
+    return { pts: pts.slice(), extras };
+  }
+  const gap = Math.max(2, Math.floor(N * 0.08));
+  const i1 = ((centerIdx - Math.floor(gap / 2)) + N) % N;
+  const i2 = (centerIdx + Math.ceil(gap / 2)) % N;
+  const p1 = pts[i1], p2 = pts[i2];
+  let stemPts;
+  if (stemKind === 'v') {
+    stemPts = [p1, tip, p2];
+  } else if (stemKind === 'curvy') {
+    const bow = Math.max(15, stemLen * 0.4);
+    const perp = { x: -Math.sin(dirAng) * bow, y: Math.cos(dirAng) * bow };
+    // 8-sample quadratic bezier p1->tip (biased left), then tip->p2 (biased right)
+    const bezier = (A, C, B, steps) => { const out = []; for (let i = 1; i <= steps; i++) { const t = i / steps; out.push({ x: (1-t)*(1-t)*A.x + 2*(1-t)*t*C.x + t*t*B.x, y: (1-t)*(1-t)*A.y + 2*(1-t)*t*C.y + t*t*B.y }); } return out; };
+    const ctl1 = { x: tip.x + perp.x, y: tip.y + perp.y };
+    const ctl2 = { x: tip.x - perp.x, y: tip.y - perp.y };
+    stemPts = [p1, ...bezier(p1, ctl1, tip, 8), ...bezier(tip, ctl2, p2, 8)];
+  } else if (stemKind === 'lightning') {
+    const lat = stemLen * 0.18; const perp = { x: -Math.sin(dirAng) * lat, y: Math.cos(dirAng) * lat };
+    const mid1 = { x: (p1.x + tip.x) / 2 + perp.x, y: (p1.y + tip.y) / 2 + perp.y };
+    const mid2 = { x: (tip.x + p2.x) / 2 - perp.x, y: (tip.y + p2.y) / 2 - perp.y };
+    stemPts = [p1, mid1, tip, mid2, p2];
+  } else if (stemKind === 'line') {
+    // Open polyline — returned as an extra; polygon stays intact
+    return { pts: pts.slice(), extras: [{ kind: 'lineStem', pts: [p1, tip, p2] }] };
+  } else {
+    stemPts = [p1, tip, p2];
+  }
+  // Splice: extract the gap, insert the stem points
+  const before = []; for (let i = 0; i <= i1; i++) before.push(pts[i]);
+  const after = []; for (let i = i2; i < N; i++) after.push(pts[i]);
+  // Handle wraparound
+  if (i1 <= i2) {
+    return { pts: [...before, ...stemPts, ...after], extras: [] };
+  } else {
+    return { pts: [...stemPts, ...after.slice(1), ...before.slice(0, -1)], extras: [] };
+  }
+}
+// Map centered [{x,y}] pts to absolute world coords given top-left (ox,oy) and half-dims (rx,ry).
+// Returns [[wx,wy], ...] (ABSOLUTE world coord pairs, matching makeLinear's convention).
+function pxcCoToWorld(pts, cx, cy) {
+  return pts.map((p) => [cx + p.x, cy + p.y]);
+}
+// Factory: create a callout element from geometry params. Returns the element + any extra elements (bubbles).
+function pxcCoMakeCallout(cx, cy, rx, ry, shapeType, stemKind, stemPos, stemLen, depth, count, text, strokeColor, scale) {
+  scale = scale || 1;
+  let basePts;
+  if (shapeType === 'oval') basePts = pxcCoOval(rx, ry);
+  else if (shapeType === 'cloud') basePts = pxcCoCloud(rx, ry, depth, count);
+  else if (shapeType === 'spiky') basePts = pxcCoSpiky(rx, ry, depth, count);
+  else if (shapeType === 'box') basePts = pxcCoBox(rx, ry);
+  else if (shapeType === 'ribbon') basePts = pxcCoRibbon(rx, ry);
+  else if (shapeType === 'polygon') basePts = pxcCoPolygon(rx, ry, count);
+  else if (shapeType === 'heart') basePts = pxcCoHeart(rx, ry);
+  else basePts = pxcCoOval(rx, ry);
+  const { pts: stemmedPts, extras } = pxcCoInjectStem(basePts, stemKind, stemPos, stemLen);
+  const worldPts = pxcCoToWorld(stemmedPts, cx, cy);
+  // Compute a tight bbox from the world points (for el.x/y/width/height)
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const [px, py] of worldPts) { minx = Math.min(minx, px); miny = Math.min(miny, py); maxx = Math.max(maxx, px); maxy = Math.max(maxy, py); }
+  const el = { id: newId(), type: 'callout', x: minx, y: miny, width: maxx - minx, height: maxy - miny, angle: 0,
+    points: worldPts, text: text || '', fontSize: 16, fontFamily: PLEXUS_DEFAULT_FONT,
+    strokeColor: strokeColor || '#1e1e1e', backgroundColor: '#ffffff', fillStyle: 'solid',
+    strokeWidth: 2, roughness: 0, opacity: 1, seed: newSeed(), index: 'a0', isDeleted: false, groupIds: [],
+    calloutParams: { shapeType, stemKind, stemPos, stemLen, depth, count, cx, cy, rx, ry } };
+  const extraEls = [];
+  for (const ex of extras) {
+    if (ex.kind === 'bubble') {
+      const bel = makeRect(cx + ex.cx - ex.rx, cy + ex.cy - ex.ry, ex.rx * 2, ex.ry * 2,
+        { type: 'ellipse', stroke: strokeColor || '#1e1e1e', fill: '#ffffff', fillStyle: 'solid', strokeWidth: 2 });
+      extraEls.push(bel);
+    } else if (ex.kind === 'lineStem') {
+      const lel = makeLinear(0, 0, 'line', { stroke: strokeColor || '#1e1e1e', strokeWidth: 2 });
+      lel.points = ex.pts.map((p) => [cx + p.x, cy + p.y]); lel.endArrowhead = null; linearBBox(lel);
+      extraEls.push(lel);
+    }
+  }
+  return { el, extraEls };
+}
+
+// ── WaveC: Comic panel layout presets ─────────────────────────────────────────────────────────────
+// Each preset = [{x,y,w,h}] normalized to [0..1] page; caller maps to world coords with gutters.
+const PXC_PANEL_PRESETS = [
+  { id: 'grid-2x2',  label: '2×2 Grid', cells: [{x:0,y:0,w:.5,h:.5},{x:.5,y:0,w:.5,h:.5},{x:0,y:.5,w:.5,h:.5},{x:.5,y:.5,w:.5,h:.5}] },
+  { id: 'grid-3x3',  label: '3×3 Grid', cells: [{x:0,y:0,w:1/3,h:1/3},{x:1/3,y:0,w:1/3,h:1/3},{x:2/3,y:0,w:1/3,h:1/3},{x:0,y:1/3,w:1/3,h:1/3},{x:1/3,y:1/3,w:1/3,h:1/3},{x:2/3,y:1/3,w:1/3,h:1/3},{x:0,y:2/3,w:1/3,h:1/3},{x:1/3,y:2/3,w:1/3,h:1/3},{x:2/3,y:2/3,w:1/3,h:1/3}] },
+  { id: 'strip-3',   label: 'Strip (1×3)', cells: [{x:0,y:0,w:1/3,h:1},{x:1/3,y:0,w:1/3,h:1},{x:2/3,y:0,w:1/3,h:1}] },
+  { id: 'rows-2',    label: '2 Full Rows', cells: [{x:0,y:0,w:1,h:.5},{x:0,y:.5,w:1,h:.5}] },
+  { id: 'hero-212',  label: 'Hero 2-1-2', cells: [{x:0,y:0,w:.5,h:.35},{x:.5,y:0,w:.5,h:.35},{x:0,y:.35,w:1,h:.3},{x:0,y:.65,w:.5,h:.35},{x:.5,y:.65,w:.5,h:.35}] },
+  { id: 'splash',    label: 'Splash (full page)', cells: [{x:0,y:0,w:1,h:1}] },
+  { id: 'l-left',    label: 'L-Left (tall+2 stacked)', cells: [{x:0,y:0,w:.55,h:1},{x:.55,y:0,w:.45,h:.5},{x:.55,y:.5,w:.45,h:.5}] },
+  { id: 'zigzag',    label: 'Zigzag (3 staggered)', cells: [{x:0,y:0,w:.6,h:.36},{x:.3,y:.32,w:.7,h:.36},{x:0,y:.64,w:.65,h:.36}] },
+];
+// Instantiate a panel preset into world-coord frames at (originX,originY) on a 1200×1600 page with 4% gutters.
+function pxcCoInstantiatePanels(preset, originX, originY) {
+  const PW = 1200, PH = 1600, GUTTER_FRAC = 0.04;
+  const gx = PW * GUTTER_FRAC, gy = PH * GUTTER_FRAC;
+  const frames = [];
+  preset.cells.forEach((c, i) => {
+    const wx = originX + c.x * PW + gx / 2, wy = originY + c.y * PH + gy / 2;
+    const ww = c.w * PW - gx, wh = c.h * PH - gy;
+    const fr = makeFrame(Math.round(wx), Math.round(wy), Math.round(ww), Math.round(wh));
+    fr.name = 'Panel ' + (i + 1);
+    frames.push(fr);
+  });
+  return frames;
+}
 // C0: relative time for comment bubbles/rail ("just now", "5m", "3h", "2d").
 function pxcRelTime(ts) { if (!ts) return ''; const s = Math.max(0, (Date.now() - ts) / 1000); if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm'; if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd'; }
 // C1: local-Pacific today as YYYY-MM-DD (for DateTime.parseDateTimeString — never hand-build a datetime with empty `formatted`).
@@ -2204,7 +2421,7 @@ function hitElement(el, wx, wy, tol) {
   const minx = Math.min(el.x, el.x + el.width), maxx = Math.max(el.x, el.x + el.width);
   const miny = Math.min(el.y, el.y + el.height), maxy = Math.max(el.y, el.y + el.height);
   if (wx < minx - tol || wx > maxx + tol || wy < miny - tol || wy > maxy + tol) return false;
-  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'rollup' || el.type === 'table' || el.type === 'board' || el.type === 'task') return true; // within bbox is good enough for selection
+  if (el.type === 'freedraw' || el.type === 'text' || el.type === 'icon' || el.type === 'image' || el.type === 'record' || el.type === 'linecard' || el.type === 'query' || el.type === 'rollup' || el.type === 'table' || el.type === 'board' || el.type === 'task' || el.type === 'callout') return true; // within bbox is good enough for selection
   const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
   if (el.type === 'ellipse') {
     const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2, rx = (maxx - minx) / 2 || 1, ry = (maxy - miny) / 2 || 1;
@@ -2404,6 +2621,7 @@ function exportSvg(scene, cardImg) {
       if (el.curved && rp.length >= 3) { let d = 'M' + f(rp[0][0]) + ',' + f(rp[0][1]); for (let i = 1; i < rp.length - 2; i++) d += ' Q' + f(rp[i][0]) + ',' + f(rp[i][1]) + ' ' + f((rp[i][0] + rp[i + 1][0]) / 2) + ',' + f((rp[i][1] + rp[i + 1][1]) / 2); d += ' Q' + f(rp[rp.length - 2][0]) + ',' + f(rp[rp.length - 2][1]) + ' ' + f(rp[rp.length - 1][0]) + ',' + f(rp[rp.length - 1][1]); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); }
       else { const pts = rp.map((q) => q.map((n) => f(n)).join(',')).join(' '); p.push(`<polyline points="${pts}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`); } }
     else if (el.type === 'freedraw') { const pts = el.points || []; if (pts.length) { const d = 'M' + pts.map((q) => q.map((n) => n.toFixed(1)).join(' ')).join(' L'); p.push(`<path d="${d}" fill="none" stroke="${sc}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" opacity="${op}"/>`); } }
+    else if (el.type === 'callout') { const cpts = el.points || []; if (cpts.length >= 3) { const cptsStr = cpts.map((q) => q.map((n) => n.toFixed(1)).join(',')).join(' '); p.push(`<polygon points="${cptsStr}" fill="${fillc}" stroke="${sc}" stroke-width="${sw}" stroke-linejoin="round" opacity="${op}"/>`); const ctxt = String(el.text || ''); if (ctxt) { const cfs = el.fontSize || 16; const ccx = ((el.x + el.x + el.width) / 2).toFixed(1); const ccy = ((el.y + el.y + el.height) / 2).toFixed(1); p.push(`<text x="${ccx}" y="${ccy}" text-anchor="middle" dominant-baseline="middle" font-size="${cfs}" fill="${sc}" opacity="${op}">${svgEsc(ctxt)}</text>`); } } }
     else if (el.type === 'image') { const f = scene.files && scene.files[el.fileId]; if (f && f.dataURL) p.push(`<image x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" href="${svgEsc(f.dataURL)}" opacity="${op}" preserveAspectRatio="none"/>`); }
     else if (PXC_CARD_TYPES.has(el.type)) { const c = cardImg && cardImg[el.id]; if (c && c.url) p.push(`<image x="${c.x.toFixed(2)}" y="${c.y.toFixed(2)}" width="${c.w.toFixed(2)}" height="${c.h.toFixed(2)}" href="${svgEsc(c.url)}" preserveAspectRatio="none"/>`); } // A1: live card → its pre-rasterized image at the rotated-AABB box. Rotation AND el.opacity are already baked into the raster (the draw method sets globalAlpha=el.opacity), so NO rot transform and NO opacity attr (double-applying would square it)
   }
@@ -4961,6 +5179,7 @@ class CanvasView {
         if (k === 'f') { e.preventDefault(); e.stopPropagation(); this._openSearch(); return; }
         // WaveA: Cmd+Shift+L = lock/unlock toggle; zoom keys Cmd+0/=/-
         if (k === 'l' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); this._lockToggle(); return; }
+        if (k === 'i' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); this.plugin._openIconLibrarySearch(); return; } // WaveC: Cmd/Ctrl+Shift+I = search-first icon library
         if (k === '0') { e.preventDefault(); e.stopPropagation(); this.camera.zoom = 1; this.dirty = true; this._saveCamera(); return; }
         if (k === '=' || k === '+') { e.preventDefault(); e.stopPropagation(); this.camera.zoomAt(this.cssW / 2, this.cssH / 2, 1.2); this.dirty = true; this._saveCamera(); return; }
         if (k === '-') { e.preventDefault(); e.stopPropagation(); this.camera.zoomAt(this.cssW / 2, this.cssH / 2, 1 / 1.2); this.dirty = true; this._saveCamera(); return; }
@@ -11663,6 +11882,10 @@ class Plugin extends AppPlugin {
     this.ui.addCommandPaletteCommand({ label: 'Plexus: New Datacore card (here)', icon: 'ti-table', onSelected: () => { const v = this._activeView(); if (v) { const c = v.camera.screenToWorld(v.cssW / 2, v.cssH / 2); v._insertQueryNode('dc: @task', c.x, c.y); } } }); // EDIT-4
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Settings', icon: 'ti-settings', onSelected: () => this._openSettings() });
     this.ui.addCommandPaletteCommand({ label: 'Plexus: Flip to note (back to text)', icon: 'ti-arrow-back-up', onSelected: () => { const v = this._activeView(); if (v) v._flipToNote(); } });
+    // WaveC: three new features
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Icon library (search)', icon: 'ti-search', onSelected: () => this._openIconLibrarySearch() }); // WaveC F1: search-first icon palette with attach-to-node
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Speech bubble / callout...', icon: 'ti-message-circle', onSelected: () => { const v = this._activeView(); if (v) this._openCalloutEditor(v); } }); // WaveC F2: callout designer
+    this.ui.addCommandPaletteCommand({ label: 'Plexus: Panel layout (frames)...', icon: 'ti-layout-board', onSelected: () => { const v = this._activeView(); if (v) this._openPanelLayout(v); } }); // WaveC F3: comic panel layout presets
     // Phase 9 E1: track the last-focused record (the card-insert target) + keep cards LIVE.
     this._lastRecordGuid = null;
     const trackFocus = (e) => { try { const r = e.panel && e.panel.getActiveRecord && e.panel.getActiveRecord(); if (r && r.guid) this._lastRecordGuid = r.guid; } catch (_e) {} };
@@ -12621,6 +12844,247 @@ class Plugin extends AppPlugin {
       (async () => { try { const fv = rec.getBanner && rec.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); thumb.style.backgroundImage = 'url(' + url + ')'; return; } } } thumb.classList.add('pxc-gempty'); } catch (_e) { thumb.classList.add('pxc-gempty'); } })();
     }
   }
+
+  // WaveC F1: search-first icon library — merged glyph + #icon records, keyboard-navigable, Zsolt one-click flow.
+  // Stays OPEN for rapid-fire inserts; Enter inserts highlighted; Escape closes.
+  async _openIconLibrarySearch() {
+    const v0 = this._activeView();
+    if (!v0) { try { this.ui.addToaster({ title: 'Plexus: open a drawing first.', dismissible: true }); } catch (_e) {} return; }
+    if (this._iconLibSearchOverlay && document.body.contains(this._iconLibSearchOverlay)) { this._iconLibSearchOverlay.remove(); this._iconLibSearchOverlay = null; return; }
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay pxc-icl-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-icl-box';
+    overlay.appendChild(box);
+    // Title + close
+    const hdr = document.createElement('div'); hdr.className = 'pxc-icl-hdr';
+    const ttl = document.createElement('div'); ttl.className = 'pxc-settings-title'; ttl.textContent = 'Icon library';
+    const xbtn = document.createElement('button'); xbtn.className = 'pxc-icl-xbtn'; xbtn.innerHTML = '<span class="ti ti-x"></span>';
+    xbtn.addEventListener('click', () => overlay.remove()); hdr.appendChild(ttl); hdr.appendChild(xbtn); box.appendChild(hdr);
+    // Search input (autofocus)
+    const search = document.createElement('input'); search.className = 'pxc-il-search pxc-icl-srch'; search.placeholder = 'Search icons…'; box.appendChild(search);
+    // Grid
+    const grid = document.createElement('div'); grid.className = 'pxc-icl-grid'; box.appendChild(grid);
+    // Hint line
+    const hint = document.createElement('div'); hint.className = 'pxc-icl-hint2'; hint.textContent = 'Enter to insert · Esc to close · attaches to selected node'; box.appendChild(hint);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay); this._iconLibSearchOverlay = overlay;
+    setTimeout(() => { try { search.focus(); } catch (_e) {} }, 30);
+    // Collect all items: glyphs + record icons
+    const allItems = []; // {kind:'glyph', name} | {kind:'rec', name, rec}
+    for (const cat of ICON_CATALOG) for (const n of cat.names) allItems.push({ kind: 'glyph', name: n, label: n.replace('ti-', '') });
+    let recs = []; try { const res = await this.data.searchByQuery('#icon', 200); recs = (res && res.records) || []; } catch (_e) {}
+    for (const rec of recs) allItems.push({ kind: 'rec', name: (rec.getName && rec.getName()) || 'icon', label: (rec.getName && rec.getName()) || 'icon', rec });
+    let hilightIdx = -1;
+    const getCells = () => [...grid.querySelectorAll('.pxc-icl-cell')];
+    // Drop an icon onto the active view, optionally attaching to a selected node
+    const drop = (item) => {
+      const view = this._activeView() || v0; if (!view) return;
+      const c = view.camera.screenToWorld(view.cssW / 2, view.cssH / 2);
+      const selEl = view.selected.size === 1 ? view._byId([...view.selected][0]) : null;
+      let ix = c.x - 22, iy = c.y - 22, isize = 44;
+      const gid = selEl ? ('g' + newId()) : null;
+      if (selEl && (selEl.type === 'text' || selEl.type === 'record' || selEl.type === 'rectangle' || selEl.type === 'ellipse' || selEl.type === 'roundrect')) {
+        // attach at right edge, vertically centered
+        const bb = view._elBBox(selEl); if (bb) { ix = bb.x + bb.w + 16; iy = bb.y + bb.h / 2 - 14; isize = 28; }
+      }
+      if (item.kind === 'glyph') {
+        const el = makeIcon(view._snap(ix), view._snap(iy), isize, item.name, { stroke: view.strokeColor });
+        if (!el.glyph) { try { this.ui.addToaster({ title: 'Plexus: icon not available.', dismissible: true }); } catch (_e) {} return; }
+        if (gid) { if (!selEl.groupIds) selEl.groupIds = []; selEl.groupIds.push(gid); el.groupIds = [gid]; }
+        view.scene.elements.push(el); view.selected.clear(); view.selected.add(el.id);
+      } else {
+        const card = makeBoardCard(view._snap(ix), view._snap(iy), isize * 2.5, isize * 2.5, item.rec.guid);
+        if (gid) { if (!selEl.groupIds) selEl.groupIds = []; selEl.groupIds.push(gid); card.groupIds = [gid]; }
+        view.scene.elements.push(card); view.selected.clear(); view.selected.add(card.id);
+      }
+      view.dirty = true; view.scheduleSave();
+      // keep overlay open for rapid inserts
+    };
+    // Render the grid from a query
+    const render = (q) => {
+      grid.innerHTML = ''; hilightIdx = -1;
+      q = (q || '').trim().toLowerCase();
+      const filtered = q ? allItems.filter((it) => it.label.toLowerCase().includes(q)) : allItems;
+      const cap60 = filtered.slice(0, 60);
+      for (const item of cap60) {
+        const cell = document.createElement('button'); cell.className = 'pxc-icl-cell';
+        cell.title = item.label;
+        if (item.kind === 'glyph') {
+          cell.innerHTML = '<span class="ti ' + item.name + ' pxc-il-glyph"></span><span class="pxc-il-cap">' + item.label + '</span>';
+        } else {
+          const th = document.createElement('div'); th.className = 'pxc-il-thumb pxc-gempty';
+          const cp = document.createElement('span'); cp.className = 'pxc-il-cap'; cp.textContent = item.label;
+          cell.appendChild(th); cell.appendChild(cp);
+          (async () => { try { const fv = item.rec.getBanner && item.rec.getBanner(); if (fv) { const blob = await this.data.getBlobFromPropertyFileValue(fv); if (blob) { const ab = await blob.download(); if (ab) { const url = URL.createObjectURL(new Blob([ab], { type: blob.contentType || 'image/png' })); th.style.backgroundImage = 'url(' + url + ')'; th.classList.remove('pxc-gempty'); } } } } catch (_e) {} })();
+        }
+        cell.addEventListener('click', () => { drop(item); });
+        cell.dataset.idx = grid.children.length;
+        grid.appendChild(cell);
+      }
+    };
+    let st; search.addEventListener('input', () => { clearTimeout(st); st = setTimeout(() => { render(search.value); }, 80); });
+    // Keyboard navigation
+    search.addEventListener('keydown', (e) => {
+      const cells = getCells(); const N = cells.length;
+      if (e.key === 'Escape') { e.preventDefault(); overlay.remove(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'Tab') { e.preventDefault(); hilightIdx = (hilightIdx + 1) % N; cells.forEach((c, i) => c.classList.toggle('pxc-icl-hi', i === hilightIdx)); if (cells[hilightIdx]) cells[hilightIdx].scrollIntoView({ block: 'nearest' }); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); hilightIdx = (hilightIdx - 1 + N) % N; cells.forEach((c, i) => c.classList.toggle('pxc-icl-hi', i === hilightIdx)); if (cells[hilightIdx]) cells[hilightIdx].scrollIntoView({ block: 'nearest' }); return; }
+      if (e.key === 'Enter') { e.preventDefault(); const target = hilightIdx >= 0 ? cells[hilightIdx] : cells[0]; if (target) target.click(); return; }
+    });
+    render('');
+  }
+
+  // WaveC F2: Speech bubble / callout designer.
+  // Opens a compact overlay with live preview canvas + shape/stem/text controls. Inserts a 'callout' element.
+  _openCalloutEditor(view, editEl) {
+    if (this._calloutEditorOverlay && document.body.contains(this._calloutEditorOverlay)) { this._calloutEditorOverlay.remove(); this._calloutEditorOverlay = null; }
+    if (!editEl && view) { const s = view._singleSel && view._singleSel(); if (s && s.calloutParams) editEl = s; } // selected callout → the command RE-EDITS it (matches the insert toast)
+    const palette = loadToolbarConfig().palette || PALETTE;
+    // State
+    const st = editEl && editEl.calloutParams ? Object.assign({ shapeType:'oval', stemKind:'v', stemPos:25, stemLen:80, depth:0.2, count:8, text:'', strokeColor:'#1e1e1e' }, editEl.calloutParams, { text: editEl.text || '', strokeColor: editEl.strokeColor || '#1e1e1e' })
+      : { shapeType:'oval', stemKind:'v', stemPos:25, stemLen:80, depth:0.2, count:8, text:'Hello!', strokeColor:'#1e1e1e' };
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-co-box';
+    overlay.appendChild(box);
+    this._calloutEditorOverlay = overlay;
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Speech bubble / callout'; box.appendChild(title);
+    // Layout: left = preview, right = controls
+    const layout = document.createElement('div'); layout.className = 'pxc-co-layout'; box.appendChild(layout);
+    const previewWrap = document.createElement('div'); previewWrap.className = 'pxc-co-preview-wrap';
+    const cv = document.createElement('canvas'); cv.width = 260; cv.height = 200; cv.className = 'pxc-co-preview'; previewWrap.appendChild(cv);
+    layout.appendChild(previewWrap);
+    const controls = document.createElement('div'); controls.className = 'pxc-co-controls'; layout.appendChild(controls);
+    // Helper: section header
+    const secH = (t) => { const d = document.createElement('div'); d.className = 'pxc-co-sh'; d.textContent = t; controls.appendChild(d); };
+    // Helper: button group
+    const btnGroup = (label, options, getter, setter) => {
+      secH(label);
+      const row = document.createElement('div'); row.className = 'pxc-co-btnrow'; controls.appendChild(row);
+      const btns = {};
+      for (const { id, icon } of options) {
+        const b = document.createElement('button'); b.className = 'pxc-co-btn' + (getter() === id ? ' active' : ''); b.innerHTML = icon || id; b.title = id;
+        b.addEventListener('click', () => { setter(id); Object.values(btns).forEach((x) => x.classList.remove('active')); b.classList.add('active'); renderPreview(); }); btns[id] = b; row.appendChild(b);
+      }
+    };
+    // Helper: slider row
+    const sliderRow = (label, min, max, step, getter, setter) => {
+      const row = document.createElement('div'); row.className = 'pxc-co-srow'; controls.appendChild(row);
+      const lbl = document.createElement('span'); lbl.className = 'pxc-co-slbl'; lbl.textContent = label;
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = getter();
+      inp.className = 'pxc-co-slider';
+      inp.addEventListener('input', () => { setter(+inp.value); renderPreview(); }); row.appendChild(lbl); row.appendChild(inp);
+    };
+    // Shape buttons
+    btnGroup('Shape', [
+      { id: 'oval', icon: '<svg viewBox="0 0 32 22" width="28" height="20"><ellipse cx="16" cy="11" rx="13" ry="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>' },
+      { id: 'cloud', icon: '<svg viewBox="0 0 32 22" width="28" height="20"><path d="M8 14 a5 5 0 0 1 4-5 a7 7 0 0 1 12 2 a5 5 0 0 1 3 7 a5 5 0 0 1 -5 5 l-10 0 a5 5 0 0 1 -4-9z" fill="none" stroke="currentColor" stroke-width="2"/></svg>' },
+      { id: 'spiky', icon: '<svg viewBox="0 0 32 32" width="28" height="28"><polygon points="16,2 20,12 30,10 22,18 28,28 16,22 4,28 10,18 2,10 12,12" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>' },
+      { id: 'box', icon: '<svg viewBox="0 0 32 24" width="28" height="20"><rect x="3" y="3" width="26" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>' },
+      { id: 'ribbon', icon: '<svg viewBox="0 0 32 22" width="28" height="20"><polygon points="3,4 28,4 22,11 28,18 3,18 9,11" fill="none" stroke="currentColor" stroke-width="2"/></svg>' },
+      { id: 'polygon', icon: '<svg viewBox="0 0 32 32" width="28" height="28"><polygon points="16,2 29,11 24,27 8,27 3,11" fill="none" stroke="currentColor" stroke-width="2"/></svg>' },
+      { id: 'heart', icon: '<svg viewBox="0 0 32 32" width="28" height="28"><path d="M16 28 C16 28 4 18 4 11 C4 6 8 4 12 8 C16 12 16 12 16 12 C16 12 16 12 20 8 C24 4 28 6 28 11 C28 18 16 28 16 28z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>' },
+    ], () => st.shapeType, (v) => { st.shapeType = v; });
+    // Stem buttons
+    btnGroup('Stem', [
+      { id: 'none', icon: '✕' }, { id: 'v', icon: 'V' }, { id: 'curvy', icon: '~' },
+      { id: 'lightning', icon: '⚡' }, { id: 'bubbles', icon: 'oo' }, { id: 'line', icon: '—' },
+    ], () => st.stemKind, (v) => { st.stemKind = v; });
+    // Sliders
+    sliderRow('Stem position', 0, 100, 1, () => st.stemPos, (v) => { st.stemPos = v; });
+    sliderRow('Stem length', 20, 160, 4, () => st.stemLen, (v) => { st.stemLen = v; });
+    sliderRow('Bump depth', 5, 50, 1, () => Math.round(st.depth * 100), (v) => { st.depth = v / 100; });
+    sliderRow('Bump count', 3, 24, 1, () => st.count, (v) => { st.count = v; });
+    // Color row
+    secH('Stroke color');
+    const colRow = document.createElement('div'); colRow.className = 'pxc-co-colrow'; controls.appendChild(colRow);
+    for (const c of palette.slice(0, 8)) {
+      const sw = document.createElement('button'); sw.className = 'pxc-swatch' + (c === st.strokeColor ? ' active' : ''); sw.style.background = c; sw.title = c;
+      sw.addEventListener('click', () => { st.strokeColor = c; colRow.querySelectorAll('.pxc-swatch').forEach((s) => s.classList.remove('active')); sw.classList.add('active'); renderPreview(); }); colRow.appendChild(sw);
+    }
+    // Text area
+    secH('Text');
+    const ta = document.createElement('textarea'); ta.className = 'pxc-co-ta'; ta.rows = 3; ta.value = st.text;
+    ta.addEventListener('input', () => { st.text = ta.value; renderPreview(); }); controls.appendChild(ta);
+    // Insert / Cancel buttons
+    const foot = document.createElement('div'); foot.className = 'pxc-co-foot'; box.appendChild(foot);
+    const cancelBtn = document.createElement('button'); cancelBtn.className = 'pxc-prop-btn'; cancelBtn.textContent = 'Cancel'; cancelBtn.addEventListener('click', () => overlay.remove()); foot.appendChild(cancelBtn);
+    const insertBtn = document.createElement('button'); insertBtn.className = 'pxc-settings-close'; insertBtn.style.marginTop = '0'; insertBtn.textContent = editEl ? 'Update' : 'Insert'; foot.appendChild(insertBtn);
+    insertBtn.addEventListener('click', () => {
+      const c = view.camera.screenToWorld(view.cssW / 2, view.cssH / 2);
+      // Measure text to determine rx
+      let rxMeasure = 80; if (st.text) { if (!measureText._c) measureText._c = document.createElement('canvas').getContext('2d'); const mc = measureText._c; mc.font = '16px ' + PLEXUS_DEFAULT_FONT; rxMeasure = mc.measureText(st.text.split('\n').reduce((a, b) => a.length >= b.length ? a : b, '')).width / 2 + 28; } const rx = Math.max(60, rxMeasure); const ry = rx * 0.62;
+      const { el, extraEls } = pxcCoMakeCallout(c.x, c.y, rx, ry, st.shapeType, st.stemKind, st.stemPos, st.stemLen * (1 / view.camera.zoom * 0.5 + 0.5), st.depth, st.count, st.text, st.strokeColor);
+      // If re-editing, remove old elements first
+      if (editEl) {
+        const oldGid = editEl.groupIds && editEl.groupIds[0];
+        for (const e of view.scene.elements) { if (e.id === editEl.id || (oldGid && e.groupIds && e.groupIds.includes(oldGid))) e.isDeleted = true; }
+        el.x = editEl.x; el.y = editEl.y; // keep position
+      }
+      view.selected.clear();
+      if (extraEls.length) {
+        const gid = 'g' + newId(); el.groupIds = [gid];
+        for (const xe of extraEls) { xe.groupIds = [gid]; view.scene.elements.push(xe); view.selected.add(xe.id); }
+      }
+      view.scene.elements.push(el); view.selected.add(el.id);
+      view.dirty = true; view.scheduleSave();
+      overlay.remove();
+      try { this.ui.addToaster({ title: 'Callout inserted. Select it and run "Speech bubble / callout..." to edit.', dismissible: true }); } catch (_e) {}
+    });
+    // Live preview on canvas
+    const renderPreview = () => {
+      const ctx = cv.getContext('2d'); ctx.clearRect(0, 0, 260, 200);
+      const prx = 90, pry = Math.round(prx * 0.62);
+      const { el: pel, extraEls: pex } = pxcCoMakeCallout(130, 100, prx, pry, st.shapeType, st.stemKind, st.stemPos, st.stemLen * 0.42, st.depth, st.count, st.text, st.strokeColor);
+      // Draw extra ellipses (bubbles)
+      for (const xe of pex) { if (xe.type === 'ellipse') { ctx.save(); ctx.globalAlpha = 0.95; ctx.strokeStyle = st.strokeColor || '#1e1e1e'; ctx.lineWidth = 2; ctx.fillStyle = '#ffffff'; const bx = xe.x + xe.width / 2, by = xe.y + xe.height / 2; ctx.beginPath(); ctx.ellipse(bx, by, xe.width / 2, xe.height / 2, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); } else if (xe.type === 'line' && xe.points) { ctx.save(); ctx.strokeStyle = st.strokeColor || '#1e1e1e'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(xe.points[0][0], xe.points[0][1]); for (let ii = 1; ii < xe.points.length; ii++) ctx.lineTo(xe.points[ii][0], xe.points[ii][1]); ctx.stroke(); ctx.restore(); } }
+      // Draw callout polygon
+      const pts = pel.points; if (!pts || pts.length < 3) return;
+      ctx.save(); ctx.fillStyle = '#ffffff'; ctx.strokeStyle = st.strokeColor || '#1e1e1e'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath(); ctx.fill(); ctx.stroke();
+      // Draw text centered in preview
+      if (st.text) { ctx.fillStyle = st.strokeColor || '#1e1e1e'; ctx.font = '13px ' + PLEXUS_DEFAULT_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; const lines = st.text.split('\n'); const lh = 16; const top = 100 - (lines.length - 1) * lh / 2; for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 130, top + i * lh); }
+      ctx.restore();
+    };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    renderPreview();
+  }
+
+  // WaveC F3: Comic panel layout picker — drop frame presets onto the canvas.
+  _openPanelLayout(view) {
+    if (this._panelLayoutOverlay && document.body.contains(this._panelLayoutOverlay)) { this._panelLayoutOverlay.remove(); this._panelLayoutOverlay = null; return; }
+    const overlay = document.createElement('div'); overlay.className = 'pxc-settings-overlay';
+    const box = document.createElement('div'); box.className = 'pxc-settings-box pxc-pl-box';
+    this._panelLayoutOverlay = overlay;
+    const title = document.createElement('div'); title.className = 'pxc-settings-title'; title.textContent = 'Panel layout (frames)'; box.appendChild(title);
+    const hint = document.createElement('div'); hint.className = 'pxc-il-hint'; hint.textContent = 'Each panel becomes a frame — also usable as a presentation slide.'; box.appendChild(hint);
+    const grid = document.createElement('div'); grid.className = 'pxc-pl-grid'; box.appendChild(grid);
+    for (const preset of PXC_PANEL_PRESETS) {
+      const cell = document.createElement('button'); cell.className = 'pxc-pl-cell'; cell.title = preset.label;
+      // Mini SVG preview of the layout
+      const svgW = 60, svgH = 80, gutter = 0.04;
+      let svgInner = '';
+      for (const c of preset.cells) {
+        const px = c.x * svgW + svgW * gutter / 2, py = c.y * svgH + svgH * gutter / 2;
+        const pw = c.w * svgW - svgW * gutter, ph = c.h * svgH - svgH * gutter;
+        svgInner += '<rect x="' + px.toFixed(1) + '" y="' + py.toFixed(1) + '" width="' + pw.toFixed(1) + '" height="' + ph.toFixed(1) + '" rx="2" fill="var(--sidebar-bg-hover)" stroke="var(--cards-border-color)" stroke-width="1"/>';
+      }
+      cell.innerHTML = '<svg width="' + svgW + '" height="' + svgH + '" viewBox="0 0 ' + svgW + ' ' + svgH + '">' + svgInner + '</svg><div class="pxc-pl-lab">' + preset.label + '</div>';
+      cell.addEventListener('click', () => {
+        const c = view.camera.screenToWorld(view.cssW / 2, view.cssH / 2);
+        const frames = pxcCoInstantiatePanels(preset, c.x - 600, c.y - 800);
+        view.selected.clear();
+        for (const fr of frames) { view.scene.elements.push(fr); view.selected.add(fr.id); }
+        view.dirty = true; view.scheduleSave();
+        overlay.remove();
+        try { this.ui.addToaster({ title: frames.length + ' panel' + (frames.length !== 1 ? 's' : '') + ' dropped — they are also presentation slides.', dismissible: true }); } catch (_e) {}
+      });
+      grid.appendChild(cell);
+    }
+    const close = document.createElement('button'); close.className = 'pxc-settings-close'; close.textContent = 'Cancel'; close.addEventListener('click', () => overlay.remove()); box.appendChild(close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
+
   // P1.1: PlexusAutomate — a native scripting API (no eval) exposed on window.__plexusCanvas.automate.
   // Scripts/power-users build elements with the factories and add them to the active drawing.
   _installAutomate() {
@@ -13443,6 +13907,39 @@ const BASE_CSS = `
 .pxc-il-cat { grid-column: 1 / -1; font-size: 11px; font-weight: 600; color: var(--color-text-600); margin-top: 8px; letter-spacing: .02em; }
 .pxc-il-glyph { font-size: 28px; color: var(--color-text-400); line-height: 1; }
 .pxc-il-search { width: 100%; box-sizing: border-box; padding: 7px 9px; margin-bottom: 10px; background: var(--input-bg-color); color: var(--color-text-400); border: 1px solid var(--cards-border-color); border-radius: 6px; font-size: 13px; }
+/* WaveC F1: Search-first icon library (pxc-icl-*) */
+.pxc-icl-overlay { display: flex; align-items: flex-start; padding-top: 6vh; }
+.pxc-icl-box { min-width: 420px; max-width: 520px; max-height: 80vh; display: flex; flex-direction: column; }
+.pxc-icl-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.pxc-icl-xbtn { background: none; border: none; cursor: pointer; color: var(--color-text-600); font-size: 18px; padding: 2px 6px; border-radius: 5px; }
+.pxc-icl-xbtn:hover { background: var(--sidebar-bg-hover); }
+.pxc-icl-srch { width: 100%; box-sizing: border-box; padding: 7px 9px; margin-bottom: 10px; background: var(--input-bg-color); color: var(--color-text-400); border: 1px solid var(--cards-border-color); border-radius: 6px; font-size: 13px; flex-shrink: 0; }
+.pxc-icl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px; overflow-y: auto; flex: 1 1 0; min-height: 120px; max-height: 52vh; }
+.pxc-icl-cell { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px; border: 1px solid var(--cards-border-color); border-radius: 8px; background: var(--cards-bg); color: var(--color-text-400); cursor: pointer; }
+.pxc-icl-cell:hover, .pxc-icl-cell.pxc-icl-hi { border-color: var(--button-primary-bg-color, #7c5cff); background: var(--sidebar-bg-hover); }
+.pxc-icl-hint2 { font-size: 11px; color: var(--color-text-600); margin-top: 10px; text-align: center; flex-shrink: 0; }
+/* WaveC F2: Callout designer (pxc-co-*) */
+.pxc-co-box { min-width: 540px; max-width: 640px; }
+.pxc-co-layout { display: flex; gap: 18px; margin: 12px 0; }
+.pxc-co-preview-wrap { flex-shrink: 0; }
+.pxc-co-preview { border: 1px solid var(--cards-border-color); border-radius: 8px; background: var(--input-bg-color); display: block; }
+.pxc-co-controls { flex: 1 1 0; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 50vh; }
+.pxc-co-sh { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--color-text-600); margin: 6px 0 2px; }
+.pxc-co-btnrow { display: flex; flex-wrap: wrap; gap: 5px; }
+.pxc-co-btn { background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 6px; color: var(--color-text-400); cursor: pointer; padding: 5px 8px; font-size: 12px; line-height: 1; }
+.pxc-co-btn:hover, .pxc-co-btn.active { border-color: var(--button-primary-bg-color, #7c5cff); background: var(--sidebar-bg-hover); }
+.pxc-co-srow { display: flex; align-items: center; gap: 8px; }
+.pxc-co-slbl { font-size: 11px; color: var(--color-text-600); min-width: 88px; }
+.pxc-co-slider { flex: 1 1 0; accent-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-co-colrow { display: flex; flex-wrap: wrap; gap: 5px; }
+.pxc-co-ta { width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--input-bg-color); color: var(--color-text-400); border: 1px solid var(--cards-border-color); border-radius: 6px; font-size: 13px; resize: vertical; font-family: system-ui, sans-serif; }
+.pxc-co-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+/* WaveC F3: Panel layout picker (pxc-pl-*) */
+.pxc-pl-box { min-width: 380px; max-width: 480px; }
+.pxc-pl-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 14px 0; }
+.pxc-pl-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; border: 1px solid var(--cards-border-color); border-radius: 8px; padding: 10px 6px; background: var(--cards-bg); color: var(--color-text-400); cursor: pointer; }
+.pxc-pl-cell:hover { border-color: var(--button-primary-bg-color, #7c5cff); background: var(--sidebar-bg-hover); }
+.pxc-pl-lab { font-size: 10px; text-align: center; color: var(--color-text-600); }
 /* Shape-picker flyout */
 .pxc-host .pxc-root .pxc-shape-wrap { position: relative; display: inline-flex; }
 .pxc-host .pxc-root .pxc-shape-flyout { position: absolute; top: 100%; left: 0; margin-top: 4px; display: flex; gap: 3px; padding: 5px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.18); z-index: 20; }
