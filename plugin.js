@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.210.0';
+const PLEXUS_VERSION = '1.211.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1865,10 +1865,18 @@ function drawLinear(ctx, el) {
   ctx.restore();
 }
 function drawElement(ctx, el) {
-  if (el.type === 'comment') return; // C0: comments render only as overlay pins (in the interactive pass), never as a shape — inert in static/export/minimap
+  if (el.type === 'comment') return; // C0: comments render only as overlay pins (in the interactive pass), never as a shape -- inert in static/export/minimap
   const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
-  const rotated = !!el.angle && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'freedraw';
-  if (rotated) { ctx.save(); const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+  // WaveA: apply rotation and/or flip transform for non-point-based elements
+  const rotated = (!!el.angle || el.flipX || el.flipY) && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'freedraw';
+  if (rotated) {
+    ctx.save();
+    const cx = el.x + el.width / 2, cy = el.y + el.height / 2;
+    ctx.translate(cx, cy);
+    if (el.angle) ctx.rotate(el.angle);
+    if (el.flipX || el.flipY) ctx.scale(el.flipX ? -1 : 1, el.flipY ? -1 : 1);
+    ctx.translate(-cx, -cy);
+  }
   if (el.type === 'rectangle') roughRect(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'ellipse') roughEllipse(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
   else if (el.type === 'diamond') roughDiamond(ctx, el.x, el.y, el.width, el.height, opts, el.seed);
@@ -3359,7 +3367,7 @@ class CanvasView {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of poly) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
     for (const el of this.scene.elements) {
-      if (el.isDeleted || el.secHidden || el.type === 'frame' || el.type === 'comment' || el.id === excludeId) continue; // SECTIONS: lasso/marquee skips collapsed-section children (this path scans the full scene, not the grid); C0: skip comment pins (overlay-only)
+      if (el.isDeleted || el.secHidden || el.type === 'frame' || el.type === 'comment' || el.id === excludeId || el.locked) continue; // SECTIONS: lasso/marquee skips collapsed-section children (this path scans the full scene, not the grid); C0: skip comment pins; WaveA: skip locked
       if (skipConnectors && (el.type === 'arrow' || el.type === 'line')) continue; // group-lasso skips connectors; the lasso SELECT tool keeps them (parity with the old grid path)
       if (el.type === 'text') { try { measureRuns(el); } catch (_e) {} } // ensure width/height are current → correct bbox (was the bug)
       let bb = this._elBBox(el); if (!bb || !isFinite(bb.x)) continue;
@@ -3990,6 +3998,218 @@ class CanvasView {
   }
   _bringForward() { this._stepZ(1); }
   _sendBackward() { this._stepZ(-1); }
+  // WaveA: LOCK — toggle el.locked on selection; locked elements skip pointer-down move/resize/rotate and lasso selection.
+  _lockToggle() {
+    if (!this.selected.size) return;
+    const els = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+    if (!els.length) return;
+    const allLocked = els.every((e) => e.locked);
+    for (const el of els) { if (allLocked) delete el.locked; else el.locked = true; }
+    this.dirty = true; this.scheduleSave();
+    try { this.plugin.ui.addToaster({ title: allLocked ? 'Unlocked.' : 'Locked.', dismissible: true }); } catch (_e) {}
+  }
+  // WaveA: FLIP H/V — mirror selection within its union bounding box. Positions mirror across bbox axis.
+  // For point-based elements (freedraw, arrow, line), mirror each point. For images, toggle flipX/flipY flags.
+  // For text and cards, mirror position only (never mirror glyph content).
+  _selBBox() {
+    const els = [...this.selected].map((id) => this._byId(id)).filter((e) => e && !e.isDeleted);
+    if (!els.length) return null;
+    let bx = Infinity, by = Infinity, bx2 = -Infinity, by2 = -Infinity;
+    for (const el of els) {
+      const bb = this._elBBox(el); if (!bb) continue;
+      bx = Math.min(bx, bb.x); by = Math.min(by, bb.y); bx2 = Math.max(bx2, bb.x + bb.w); by2 = Math.max(by2, bb.y + bb.h);
+    }
+    return isFinite(bx) ? { x: bx, y: by, w: bx2 - bx, h: by2 - by } : null;
+  }
+  _flipH() {
+    if (!this.selected.size) return;
+    const bb = this._selBBox(); if (!bb) return;
+    const bx = bb.x, bw = bb.w;
+    for (const id of this.selected) {
+      const el = this._byId(id); if (!el || el.isDeleted) continue;
+      if (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') {
+        el.points = el.points.map(([px, py]) => [bx + bw - (px - bx), py]);
+        if (el.type === 'arrow' || el.type === 'line') linearBBox(el); else freedrawBBox(el);
+      } else if (el.type === 'image') {
+        el.flipX = !el.flipX;
+        el.x = bx + bw - (el.x - bx) - el.width;
+      } else {
+        // mirror the x position within the bbox
+        el.x = bx + bw - (el.x - bx) - (el.width || 0);
+      }
+    }
+    try { this._updateBindings(); } catch (_e) {} this.dirty = true; this.scheduleSave();
+  }
+  _flipV() {
+    if (!this.selected.size) return;
+    const bb = this._selBBox(); if (!bb) return;
+    const by = bb.y, bh = bb.h;
+    for (const id of this.selected) {
+      const el = this._byId(id); if (!el || el.isDeleted) continue;
+      if (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') {
+        el.points = el.points.map(([px, py]) => [px, by + bh - (py - by)]);
+        if (el.type === 'arrow' || el.type === 'line') linearBBox(el); else freedrawBBox(el);
+      } else if (el.type === 'image') {
+        el.flipY = !el.flipY;
+        el.y = by + bh - (el.y - by) - el.height;
+      } else {
+        el.y = by + bh - (el.y - by) - (el.height || 0);
+      }
+    }
+    try { this._updateBindings(); } catch (_e) {} this.dirty = true; this.scheduleSave();
+  }
+  // WaveA: CONTEXT MENU — floating positioned menu with submenus.
+  _closeCtxMenu() {
+    if (this._ctxMenu) { try { this._ctxMenu.remove(); } catch (_e) {} this._ctxMenu = null; }
+    if (this._ctxDismiss) { try { document.removeEventListener('pointerdown', this._ctxDismiss); document.removeEventListener('wheel', this._ctxDismiss); } catch (_e) {} this._ctxDismiss = null; }
+    if (this._ctxEscDismiss) { try { this.iCv && this.iCv.removeEventListener('keydown', this._ctxEscDismiss); } catch (_e) {} this._ctxEscDismiss = null; }
+  }
+  _showCtxMenu(sx, sy, hitEl, worldPt) {
+    this._closeCtxMenu();
+    const sel = [...this.selected].map((id) => this._byId(id)).filter((e) => e && !e.isDeleted);
+    const isCard = (e) => PXC_CARD_TYPES.has(e && e.type);
+    const hasClip = !!(this.plugin._clipboard && this.plugin._clipboard.length);
+    const singleHit = hitEl && !hitEl.isDeleted ? hitEl : null;
+    const singleCard = sel.length === 1 && isCard(sel[0]) ? sel[0] : null;
+    const twoCards = sel.length === 2 && sel.every(isCard) ? sel : null;
+    const anyCard = sel.some(isCard);
+    const isShapel = (e) => e && (isRoughShape(e.type) || e.type === 'rectangle' || e.type === 'ellipse' || e.type === 'diamond');
+    const isLinear = (e) => e && (e.type === 'arrow' || e.type === 'line');
+    const isSingleImg = sel.length === 1 && sel[0].type === 'image';
+    const allLocked = sel.length > 0 && sel.every((e) => e.locked);
+    const anyLocked = sel.some((e) => e.locked);
+    const anyLockedScene = this.scene.elements.some((e) => !e.isDeleted && e.locked);
+    const menu = document.createElement('div'); menu.className = 'pxc-ctx';
+    const mkSep = () => { const d = document.createElement('div'); d.className = 'pxc-ctx-sep'; menu.appendChild(d); };
+    const mkItem = (label, hint, fn, disabled, danger) => {
+      const r = document.createElement('div'); r.className = 'pxc-ctx-item' + (disabled ? ' pxc-ctx-dim' : '') + (danger ? ' pxc-ctx-danger' : '');
+      const lspan = document.createElement('span'); lspan.textContent = label; r.appendChild(lspan);
+      if (hint) { const hspan = document.createElement('span'); hspan.className = 'pxc-ctx-hint'; hspan.textContent = hint; r.appendChild(hspan); }
+      if (!disabled && fn) r.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); this._closeCtxMenu(); fn(); });
+      menu.appendChild(r); return r;
+    };
+    const mkSub = (label, items) => {
+      const r = document.createElement('div'); r.className = 'pxc-ctx-item pxc-ctx-has-sub';
+      const lspan = document.createElement('span'); lspan.textContent = label; r.appendChild(lspan);
+      const arr = document.createElement('span'); arr.className = 'pxc-ctx-arrow'; arr.textContent = 'v'; r.appendChild(arr);
+      const sub = document.createElement('div'); sub.className = 'pxc-ctx-sub';
+      for (const it of items) {
+        if (it === null) { const d = document.createElement('div'); d.className = 'pxc-ctx-sep'; sub.appendChild(d); continue; }
+        const sr = document.createElement('div'); sr.className = 'pxc-ctx-item' + (it.disabled ? ' pxc-ctx-dim' : '');
+        const sl = document.createElement('span'); sl.textContent = it.label; sr.appendChild(sl);
+        if (it.hint) { const sh = document.createElement('span'); sh.className = 'pxc-ctx-hint'; sh.textContent = it.hint; sr.appendChild(sh); }
+        if (!it.disabled && it.fn) sr.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); this._closeCtxMenu(); it.fn(); });
+        sub.appendChild(sr);
+      }
+      r.appendChild(sub);
+      r.addEventListener('pointerenter', () => {
+        // position sub to the side
+        const rb = r.getBoundingClientRect(), mb = menu.getBoundingClientRect(), ww = window.innerWidth;
+        const leftSide = (rb.right + 160 > ww) ? (rb.left - 160) : rb.right;
+        sub.style.left = (leftSide - mb.left) + 'px'; sub.style.top = (rb.top - mb.top) + 'px'; sub.style.display = 'flex';
+      });
+      r.addEventListener('pointerleave', (ev) => { if (!sub.contains(ev.relatedTarget)) sub.style.display = 'none'; });
+      sub.addEventListener('pointerleave', (ev) => { if (!r.contains(ev.relatedTarget)) sub.style.display = 'none'; });
+      menu.appendChild(r); return r;
+    };
+    // --- CARD-SPECIFIC TOP SECTION ---
+    if (singleCard) {
+      mkItem('Open record', '', () => this._openCard(singleCard));
+      mkItem('Schedule / re-date', '', () => this._scheduleCard());
+      mkItem('Backlinks', '', () => this._showBacklinks());
+      mkItem('Set property on selection', '', () => this._bulkBrush(), !anyCard);
+      if (twoCards) mkItem('Trace connection', '', () => this._traceConnection());
+      mkSep();
+    } else if (anyCard) {
+      mkItem('Set property on selection', '', () => this._bulkBrush());
+      if (twoCards) mkItem('Trace connection', '', () => this._traceConnection());
+      mkSep();
+    }
+    if (sel.length === 0) {
+      // canvas background (no selection)
+      mkItem('Paste', 'Cmd+V', () => this._paste(), !hasClip);
+      mkItem('Select all', 'Cmd+A', () => this._selectAll());
+      mkSep();
+      mkItem('New record card here', '', () => { const w = worldPt || this.camera.screenToWorld(sx, sy); this._quickCapture(w.x, w.y); }); // full create flow (title prompt + real record) at the click point — never a guid-less card
+      mkItem('Insert icon...', '', () => this.plugin._openIconGlyphLibrary());
+      mkSep();
+      mkItem('Toggle grid', "Ctrl+'", () => this._toggleGrid());
+      mkItem('Toggle snap', '', () => this._toggleSnap());
+      mkSep();
+      mkItem('Zoom to fit', 'Shift+1', () => this._fitToScene());
+      if (anyLockedScene) mkItem('Unlock all elements', '', () => { for (const e of this.scene.elements) { if (!e.isDeleted && e.locked) delete e.locked; } this.dirty = true; this.scheduleSave(); });
+      mkItem('Canvas settings', '', () => { try { this.plugin._openSettings(); } catch (_e) {} });
+    } else {
+      // element / selection menu
+      mkItem('Cut', '', () => { this._copy(); for (const id of this.selected) { const el = this._byId(id); if (el && !el.locked) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); });
+      mkItem('Copy', 'Cmd+C', () => this._copy());
+      mkItem('Duplicate', 'Cmd+D', () => this._duplicate());
+      mkSep();
+      mkItem('Copy style', 'Cmd+Alt+C', () => this._copyStyles());
+      mkItem('Paste style', 'Cmd+Alt+V', () => this._pasteStyles(), !this.plugin._styleClip);
+      mkSep();
+      mkItem('Group', 'Cmd+G', () => this._group(), sel.length < 2);
+      mkItem('Ungroup', 'Cmd+Shift+G', () => this._ungroup(), !sel.some((e) => e.groupIds && e.groupIds.length));
+      mkSep();
+      mkSub('Arrange', [
+        { label: 'Bring to front', hint: 'Cmd+Shift+]', fn: () => this._bringToFront() },
+        { label: 'Bring forward', hint: 'Cmd+]', fn: () => this._bringForward() },
+        { label: 'Send backward', hint: 'Cmd+[', fn: () => this._sendBackward() },
+        { label: 'Send to back', hint: 'Cmd+Shift+[', fn: () => this._sendToBack() },
+      ]);
+      const alignItems = [
+        { label: 'Align left', fn: () => this._align('left'), disabled: sel.length < 2 },
+        { label: 'Align center', fn: () => this._align('hcenter'), disabled: sel.length < 2 },
+        { label: 'Align right', fn: () => this._align('right'), disabled: sel.length < 2 },
+        { label: 'Align top', fn: () => this._align('top'), disabled: sel.length < 2 },
+        { label: 'Align middle', fn: () => this._align('vmiddle'), disabled: sel.length < 2 },
+        { label: 'Align bottom', fn: () => this._align('bottom'), disabled: sel.length < 2 },
+        null,
+        { label: 'Distribute horizontally', fn: () => this._align('disth'), disabled: sel.length < 3 },
+        { label: 'Distribute vertically', fn: () => this._align('distv'), disabled: sel.length < 3 },
+      ];
+      mkSub('Align', alignItems);
+      mkSep();
+      mkItem('Flip horizontal', 'Shift+H', () => this._flipH());
+      mkItem('Flip vertical', 'Shift+V', () => this._flipV());
+      mkSep();
+      mkItem(anyLocked ? 'Unlock' : 'Lock', 'Cmd+Shift+L', () => this._lockToggle());
+      mkItem('Add link...', '', () => this._setLink());
+      mkItem('Cite (copy reference)', '', () => this._copyImageRefToClip(singleHit));
+      mkItem('Comment', '', () => { this.tool = 'comment'; this._syncToolbar(); });
+      mkSep();
+      if (isSingleImg) mkItem('Crop image', '', () => this._startCropInPlace());
+      // Convert to submenu for shapes and arrows/lines
+      if (sel.length === 1 && singleHit) {
+        const ct = singleHit.type;
+        const SHAPE_TYPES = ['rectangle', 'roundrect', 'ellipse', 'diamond', 'triangle', 'parallelogram', 'hexagon', 'cloud', 'cylinder'];
+        if (SHAPE_TYPES.indexOf(ct) >= 0) {
+          mkSub('Convert to...', SHAPE_TYPES.filter((s) => s !== ct).map((s) => ({ label: s.charAt(0).toUpperCase() + s.slice(1), fn: () => { singleHit.type = s; this.dirty = true; this.scheduleSave(); } })));
+        } else if (ct === 'arrow' || ct === 'line') {
+          mkSub('Convert to...', [
+            { label: 'Straight', fn: () => this._setConnRouting('straight') },
+            { label: 'Curved', fn: () => this._setConnRouting('curved') },
+            { label: 'Elbow', fn: () => this._setConnRouting('elbow') },
+            null,
+            { label: ct === 'arrow' ? 'Remove arrowhead' : 'Add arrowhead', fn: () => { singleHit.endArrowhead = singleHit.endArrowhead ? null : 'arrow'; this.dirty = true; this.scheduleSave(); } },
+          ]);
+        }
+      }
+      mkSep();
+      mkItem('Delete', '', () => { for (const id of this.selected) { const el = this._byId(id); if (el && !el.locked) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); }, false, true);
+    }
+    this.wrap.appendChild(menu);
+    // clamp to panel bounds
+    const ww = this.wrap.clientWidth || 800, wh = this.wrap.clientHeight || 600;
+    const mw = menu.offsetWidth || 180, mh = menu.offsetHeight || 80;
+    menu.style.left = Math.max(4, Math.min(ww - mw - 4, sx)) + 'px';
+    menu.style.top = Math.max(4, Math.min(wh - mh - 4, sy)) + 'px';
+    this._ctxMenu = menu;
+    const dismiss = (ev) => { if (menu.contains(ev.target)) return; this._closeCtxMenu(); };
+    document.addEventListener('pointerdown', dismiss); document.addEventListener('wheel', dismiss, { passive: true }); this._ctxDismiss = dismiss; // wheel: a pan/zoom under the menu would strand it at a stale position
+    const escDismiss = (ev) => { if (ev.key === 'Escape') this._closeCtxMenu(); };
+    this.iCv && this.iCv.addEventListener('keydown', escDismiss); this._ctxEscDismiss = escDismiss;
+  }
   _nudge(dx, dy) { if (!this.selected.size) return; for (const id of this.selected) { const el = this._byId(id); if (!el) continue; el.x += dx; el.y += dy; if (el.points) el.points = el.points.map(([px, py]) => [px + dx, py + dy]); } this._updateBindings(); this.dirty = true; this.scheduleSave(); } // CONNECTIONS: rebind any bound target (not just rough shapes); _updateBindings early-returns when nothing is bound
   // CP-4: align / distribute the selection to its bounding box (Excalidraw parity precision tools).
   _align(mode) {
@@ -4203,6 +4423,24 @@ class CanvasView {
       }
       if (this._present) { if (e.button === 0 && this._slides && this._slides.length) this._gotoSlide((this._slideIdx || 0) + 1); return; } // P0.5: click advances slides
       const stp = this.plugin._settings || {};
+      // WaveA: alt+left-drag ON an element → duplicate + drag clones; alt+left-drag on EMPTY canvas → pan (existing behaviour)
+      if (e.button === 0 && e.altKey && this.tool === 'select') {
+        const _adw = this._worldAt(e); const _adHit = this._hitTopAt(_adw.x, _adw.y);
+        if (_adHit && !_adHit.locked) {
+          // select the hit element (or keep existing multi-selection if it's already part of it)
+          if (!this.selected.has(_adHit.id)) { this.selected.clear(); const _adGid = this._topGroup(_adHit); if (_adGid) { for (const _adMid of this._groupMembers(_adGid)) this.selected.add(_adMid); } else this.selected.add(_adHit.id); }
+          // clone selection at zero offset; then move the originals back and drag the clones
+          const _adSrcEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean);
+          const _adClones = this._cloneBatch(_adSrcEls, 0, 0);
+          for (const _adC of _adClones) this.scene.elements.push(_adC);
+          // keep originals selected (they stay in place); switch selection to clones
+          this.selected.clear(); for (const _adC of _adClones) this.selected.add(_adC.id);
+          const _adMk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
+          moved = false; down = _adw; mode = 'move'; moveEls = _adClones.map(_adMk);
+          this._elDrag = true; this._dragLayerValid = false;
+          try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.dirty = true; return;
+        }
+      }
       if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 2 && stp.panRightMouse)) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; try { host.setPointerCapture(e.pointerId); } catch (_e) {} this.wrap.classList.add('pxc-panning'); return; } // S3: right-mouse pan
       if (e.button !== 0) return;
       { const rct = this.wrap.getBoundingClientRect(), mpx = e.clientX - rct.left, mpy = e.clientY - rct.top; if (this._miniHit(mpx, mpy)) { this._miniDragging = true; this._miniTeleport(mpx, mpy); try { host.setPointerCapture(e.pointerId); } catch (_e) {} return; } } // MINIMAP teleport
@@ -4259,11 +4497,12 @@ class CanvasView {
         if (!hit && !e.shiftKey) { const ge = this._ghostEdgeAt(down.x, down.y); if (ge) { try { e.preventDefault(); } catch (_e) {} this._promoteGhost(ge); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } } // P3.4: click an inferred ghost edge in empty space → promote it to a real connector (only when no card is under the cursor)
         // IO-1: a click on a task node's checkbox toggles its status (and does NOT start a move/select).
         if (hit && hit.type === 'task') { const cb = this._taskCheckboxRect(hit); if (down.x >= cb.x && down.x <= cb.x + cb.w && down.y >= cb.y && down.y <= cb.y + cb.h) { this._toggleTaskNode(hit); try { host.setPointerCapture(e.pointerId); } catch (_e) {} mode = null; return; } }
-        if (hit) {
+        if (hit && hit.locked) { mode = 'pan'; sx = e.clientX; sy = e.clientY; cx0 = this.camera.x; cy0 = this.camera.y; if (!e.shiftKey) this.selected.clear(); this.wrap.classList.add('pxc-panning'); } // WaveA: locked elements don't move/select on left-click
+        else if (hit) {
           if (hit.type === 'text' && hit.runs && hit.runs.length) downRef = { id: hit.id, wasSelected: this.selected.has(hit.id) }; // CANVAS-SEG: capture pre-selection state for click-again navigate
           if (!this.selected.has(hit.id)) { if (!e.shiftKey) this.selected.clear(); const gid = this._topGroup(hit); if (gid) { for (const id of this._groupMembers(gid)) this.selected.add(id); } else this.selected.add(hit.id); }
           const mk = (el) => ({ el, x0: el.x, y0: el.y, pts0: (el.type === 'freedraw' || el.type === 'arrow' || el.type === 'line') ? el.points.map((p) => [p[0], p[1]]) : null });
-          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).map(mk);
+          mode = 'move'; moveEls = [...this.selected].map((id) => this._byId(id)).filter(Boolean).filter((el) => !el.locked).map(mk); // WaveA: skip locked in move
           this._elDrag = true; this._dragLayerValid = false; // PERF: drag a static-layer cache (build once, then blit + draw only the movers)
           // P1.0: moving a frame carries the elements inside it.
           const seen = new Set(this.selected);
@@ -4363,7 +4602,7 @@ class CanvasView {
         if (ces && ces.length) { for (const ce of ces) { const cw = this._worldAt(ce); push(cw.x, cw.y); } } else push(w.x, w.y);
         freedrawBBox(created); this.dirty = true; return;
       }
-      if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
+      if (mode === 'erase') { const hit = this._hitTopAt(w.x, w.y); if (hit && !hit.isDeleted && !hit.locked) { hit.isDeleted = true; this.dirty = true; this.scheduleSave(); } return; }
       if ((mode === 'linear' || mode === 'connect') && created) { created.points[1] = [w.x, w.y]; linearBBox(created); const startElId = created.startBinding && created.startBinding.elementId; const bh = this._bindableAt(w.x, w.y, created.id, startElId) || this._nearestBindable(w.x, w.y, 44, created.id, startElId); this._bindHover = bh; this._bindHoverSub = bh ? this._bindingFor(bh, w.x, w.y) : null; this.dirty = true; return; } // CP-5: dashed focus indicator on the shape the end will bind to — forgiving (snaps to a nearby target), EXCLUDING the source (B2). Phase 4: _bindHoverSub carries the line/region the indicator should outline. 'connect' = a nub-drag.
       if (mode === 'create' && created) { const x0 = this._snap(down.x), y0 = this._snap(down.y), x1 = this._snap(w.x), y1 = this._snap(w.y); created.x = x0; created.y = y0; created.width = x1 - x0; created.height = y1 - y0; this.dirty = true; return; }
       if (mode === 'crop' || mode === 'regionmark' || mode === 'cmtregion') { this._cropRect = { x: Math.min(down.x, w.x), y: Math.min(down.y, w.y), w: Math.abs(w.x - down.x), h: Math.abs(w.y - down.y) }; this.dirty = true; return; } // F2: region-mark reuses the crop marquee; D-D: comment-on-region too
@@ -4389,7 +4628,7 @@ class CanvasView {
         this.dirty = true; return;
       }
       if (mode === 'rotate' && rotEl) { const ang = Math.atan2(w.y - rotCenter.y, w.x - rotCenter.x); let na = rotStart + (ang - rotPtr0); if (e.shiftKey) na = Math.round(na / (Math.PI / 12)) * (Math.PI / 12); rotEl.angle = na; this._updateBindings(); this.dirty = true; return; }
-      if (mode === 'resize' && rsEl) { const pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw); this._updateBindings(); this.dirty = true; return; }
+      if (mode === 'resize' && rsEl) { const pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; this._applyResize(rsEl, rsHandle, rs0, pw, e.shiftKey, e.altKey); this._updateBindings(); this.dirty = true; return; }
       if (mode === 'editpt' && this._editPt) { const ep = this._editPt, pw = this._snapOn() ? { x: this._snap(w.x), y: this._snap(w.y) } : w; ep.el.points[ep.i] = [pw.x, pw.y]; linearBBox(ep.el); this._updateBindings(); this.dirty = true; return; } // B16: connection-point drag snaps on _snapOn() (decoupled from grid visibility), consistent with move/resize // B: drag a connection point (the detached endpoint moves freely; a still-bound OTHER end re-aims via _updateBindings)
     };
     const onUp = (e) => {
@@ -4586,8 +4825,24 @@ class CanvasView {
         if (k === ']') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._bringToFront(); else this._bringForward(); return; } // CP-1: ⌘] forward, ⌘⇧] front
         if (k === '[') { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) this._sendToBack(); else this._sendBackward(); return; } // CP-1: ⌘[ backward, ⌘⇧[ back
         if (k === 'f') { e.preventDefault(); e.stopPropagation(); this._openSearch(); return; }
+        // WaveA: Cmd+Shift+L = lock/unlock toggle; zoom keys Cmd+0/=/-
+        if (k === 'l' && e.shiftKey) { e.preventDefault(); e.stopPropagation(); this._lockToggle(); return; }
+        if (k === '0') { e.preventDefault(); e.stopPropagation(); this.camera.zoom = 1; this.dirty = true; this._saveCamera(); return; }
+        if (k === '=' || k === '+') { e.preventDefault(); e.stopPropagation(); this.camera.zoomAt(this.cssW / 2, this.cssH / 2, 1.2); this.dirty = true; this._saveCamera(); return; }
+        if (k === '-') { e.preventDefault(); e.stopPropagation(); this.camera.zoomAt(this.cssW / 2, this.cssH / 2, 1 / 1.2); this.dirty = true; this._saveCamera(); return; }
       }
-      if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
+      // WaveA: Shift+H = flip horizontal, Shift+V = flip vertical (selection only, not in text edit)
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && this.selected.size && !this.editingId) {
+        if (e.key === 'H' || e.key === 'h') { e.preventDefault(); this._flipH(); return; }
+        if (e.key === 'V' || e.key === 'v') { e.preventDefault(); this._flipV(); return; }
+        // WaveA: Shift+1 = fit to scene, Shift+2 = fit to selection
+        if (e.key === '1') { e.preventDefault(); this._fitToScene(); return; }
+        if (e.key === '2') { e.preventDefault(); this.selected.size ? this._fitToSelection() : this._fitToScene(); return; }
+      } else if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !this.editingId) {
+        if (e.key === '1') { e.preventDefault(); this._fitToScene(); return; }
+        if (e.key === '2') { e.preventDefault(); this.selected.size ? this._fitToSelection() : this._fitToScene(); return; }
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') { if (this.selected.size) { e.preventDefault(); for (const id of this.selected) { const el = this._byId(id); if (el && !el.locked) el.isDeleted = true; } this.selected.clear(); this.dirty = true; this.scheduleSave(); } return; }
       const mmSel = this._singleSel(); const _mmArrow = (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight'); const _isMM = !!(mmSel && mmSel.mmRoot && mmSel.type === 'text'); // P0.2/nav: a mind-map node gets Tab/Enter grow + ARROWS jump between nodes
       if (_isMM && _mmArrow) { e.preventDefault(); this._mmNav(mmSel, e.key.replace('Arrow', '').toLowerCase(), e.ctrlKey || e.metaKey); return; } // arrows JUMP between mind-map nodes (Ctrl/Cmd also auto-centers); the nudge below stays for non-mind-map selections
       if (this.selected.size && _mmArrow) { e.preventDefault(); const step = e.shiftKey ? 10 : 1; const dx = (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0); const dy = (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0); this._nudge(dx, dy); return; }
@@ -4608,7 +4863,7 @@ class CanvasView {
       { const se = this._singleSel(); if (se && se.type === 'text' && !se.isRef && !se.mmRoot && (e.key === 'Enter' || e.key === 'F2')) { e.preventDefault(); e.stopPropagation(); this._editText(se); return; } }
       const map = { v: 'select', r: 'rectangle', o: 'ellipse', d: 'diamond', a: 'arrow', p: 'pen', t: 'text', e: 'eraser', c: 'crop', f: 'frame', l: 'laser', s: 'lasso' };
       if (map[e.key]) { this.tool = map[e.key]; this._syncToolbar(); this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._connHover) { this._connHover = null; this.dirty = true; } if (this._pendingRegionLink) { this._pendingRegionLink = null; this._closeRegionChoice(); this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._pendingSourceRegion) { this._pendingSourceRegion = null; this.dirty = true; } } // tool switch → drop a stale connect-hover / pending region-link / group-link / region-draw / source-region / in-place-crop (round-5 F · B1)
-      if (e.key === 'Escape') { this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._parsing) { this._parseCancel = true; } if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
+      if (e.key === 'Escape') { this._closeCtxMenu(); this.selected.clear(); this._pendingImgRegion = null; this._pendingRegionLink = null; this._pendingGroupLink = null; this._pendingRegionDraw = null; this._pendingSourceRegion = null; this._cropInPlaceTarget = null; this._pdfFigureArm = null; this._pdfHlArm = null; this._aiExtractArm = false; if (this._parsing) { this._parseCancel = true; } if (this._tracedPath) { this._tracedPath = null; } if (this._spotlightId) { this._spotlightId = null; } if (this._cmtFocus) { this._cmtFocus = false; } if (this._pdfOutlineEl) { this._closePdfOutline(); } this._closeRegionChoice(); this.tool = 'select'; this._syncToolbar(); this.dirty = true; } // F2/C3/round-5 B/D/F · B1: Esc keeps the whole-element link + disarms a pending group-lasso / region-draw / source-region / in-place-crop / connection trace / spotlight / comment-focus / PDF outline
     };
     const onDblClick = (e) => {
       if (this._pendingNav) { clearTimeout(this._pendingNav); this._pendingNav = null; } // CANVAS-SEG: dblclick = edit, cancel the pending single-click navigate
@@ -4636,7 +4891,21 @@ class CanvasView {
       else if (hit && hit.type === 'frame') { this._promptText('Section name:', hit.name || 'Section').then((n) => { if (n != null) { hit.name = n; this.dirty = true; this.scheduleSave(); } }); } // P1.0 rename
       else if (!hit && dblText) { const el = makeText(w.x, w.y, { stroke: this.strokeColor, fontSize: 24 }); this.scene.elements.push(el); this.selected.clear(); this.selected.add(el.id); this._editText(el); }
     };
-    const onContextMenu = (e) => { if (this.plugin._settings && this.plugin._settings.panRightMouse) e.preventDefault(); }; // S3: suppress menu when right-drag pans
+    // WaveA: right-click context menu. Track pointer movement to distinguish right-DRAG (pan) from right-CLICK (menu).
+    let cmRightDown = null; // {x,y} screen coords of right-button down
+    host.addEventListener('pointerdown', (e) => { if (e.button === 2) cmRightDown = { x: e.clientX, y: e.clientY }; });
+    const onContextMenu = (e) => {
+      e.preventDefault(); // always suppress the browser default
+      const stp = this.plugin._settings || {};
+      // if right-drag pan is on and the pointer moved >4px treat as a pan, not a menu
+      if (stp.panRightMouse && cmRightDown && Math.hypot(e.clientX - cmRightDown.x, e.clientY - cmRightDown.y) > 4) { cmRightDown = null; return; }
+      cmRightDown = null;
+      const rct = this.wrap.getBoundingClientRect(); const sx2 = e.clientX - rct.left, sy2 = e.clientY - rct.top;
+      const w2 = this.camera.screenToWorld(sx2, sy2);
+      const hit2 = this._hitTopAt(w2.x, w2.y);
+      if (hit2 && !hit2.locked && !this.selected.has(hit2.id)) { this.selected.clear(); const gid2 = this._topGroup(hit2); if (gid2) { for (const mid of this._groupMembers(gid2)) this.selected.add(mid); } else this.selected.add(hit2.id); this.dirty = true; }
+      this._showCtxMenu(sx2, sy2, hit2, w2);
+    };
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
     const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._aiExtractArm) { this._aiExtractArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } if (this._nudge) { this._nudge = null; this.wrap.style.cursor = ''; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
@@ -4693,20 +4962,23 @@ class CanvasView {
     this._localDisposers.push(() => { this.wrap.removeEventListener('dragover', onDragOver); this.wrap.removeEventListener('drop', onDrop); document.removeEventListener('paste', onPaste); });
   }
   // OBB resize in the element's local frame — works for rotated elements (keeps the opposite handle fixed).
-  _applyResize(el, handle, rs0, ptr) {
+  _applyResize(el, handle, rs0, ptr, shiftKey, altKey) {
     const a = rs0.a, ux = Math.cos(a), uy = Math.sin(a), vx = -Math.sin(a), vy = Math.cos(a);
     const cx0 = rs0.x + rs0.w / 2, cy0 = rs0.y + rs0.h / 2, HW = rs0.w / 2, HH = rs0.h / 2;
     const OFF = { nw: [-HW, -HH], n: [0, -HH], ne: [HW, -HH], e: [HW, 0], se: [HW, HH], s: [0, HH], sw: [-HW, HH], w: [-HW, 0] };
-    const ao = OFF[OPP[handle]];
+    // WaveA Alt=resize-from-center: anchor at center instead of opposite handle
+    const ao = altKey ? [0, 0] : OFF[OPP[handle]];
     const anchor = { x: cx0 + ao[0] * ux + ao[1] * vx, y: cy0 + ao[0] * uy + ao[1] * vy };
     const dx = ptr.x - anchor.x, dy = ptr.y - anchor.y;
     const along = dx * ux + dy * uy, perp = dx * vx + dy * vy;
     const movesX = handle !== 'n' && handle !== 's', movesY = handle !== 'e' && handle !== 'w';
-    const nw = movesX ? Math.max(6, Math.abs(along)) : rs0.w;
-    const nh = movesY ? Math.max(6, Math.abs(perp)) : rs0.h;
-    const sgnX = movesX ? Math.sign(along) || 1 : 0, sgnY = movesY ? Math.sign(perp) || 1 : 0;
-    const ncx = anchor.x + sgnX * (nw / 2) * ux + sgnY * (nh / 2) * vx;
-    const ncy = anchor.y + sgnX * (nw / 2) * uy + sgnY * (nh / 2) * vy;
+    let nw = movesX ? Math.max(6, Math.abs(altKey ? along * 2 : along)) : rs0.w;
+    let nh = movesY ? Math.max(6, Math.abs(altKey ? perp * 2 : perp)) : rs0.h;
+    // WaveA Shift=aspect-ratio: scale both axes by the dominant factor (corner handles only)
+    if (shiftKey && movesX && movesY && rs0.w > 0 && rs0.h > 0) { const rat = rs0.w / rs0.h; if (nw / rs0.w >= nh / rs0.h) nh = nw / rat; else nw = nh * rat; nw = Math.max(6, nw); nh = Math.max(6, nh); }
+    const sgnX = movesX ? Math.sign(altKey ? along : (along)) || 1 : 0, sgnY = movesY ? Math.sign(altKey ? perp : (perp)) || 1 : 0;
+    const ncx = altKey ? cx0 : anchor.x + sgnX * (nw / 2) * ux + sgnY * (nh / 2) * vx;
+    const ncy = altKey ? cy0 : anchor.y + sgnX * (nw / 2) * uy + sgnY * (nh / 2) * vy;
     if (el.type === 'text' && movesX) { // TEXT WRAP: a horizontal resize sets the wrap width; height follows the wrapped line count
       el.wrapW = Math.max(24, nw);
       if (el.runs && el.runs.length) measureRuns(el); else measureText(el); // sets el.width = wrapW + el.height
@@ -5074,11 +5346,18 @@ class CanvasView {
   _drawImage(ctx, el) {
     const img = this._imgFor(el.fileId);
     ctx.save(); ctx.globalAlpha = el.opacity == null ? 1 : el.opacity;
-    if (el.angle) { const cx = el.x + el.width / 2, cy = el.y + el.height / 2; ctx.translate(cx, cy); ctx.rotate(el.angle); ctx.translate(-cx, -cy); }
+    const cx2 = el.x + el.width / 2, cy2 = el.y + el.height / 2;
+    if (el.angle || el.flipX || el.flipY) {
+      ctx.translate(cx2, cy2);
+      if (el.angle) ctx.rotate(el.angle);
+      // WaveA: flip via scale around the element center
+      if (el.flipX || el.flipY) ctx.scale(el.flipX ? -1 : 1, el.flipY ? -1 : 1);
+      ctx.translate(-cx2, -cy2);
+    }
     if (img) {
       try {
         // UX-6 (zsviczian dark mode): invert raster/SVG images on a dark canvas so figures/diagrams read. Per-image
-        // opt-out (el.noInvert — for photos/logos, via "Plexus: Toggle image dark-invert") + a global setting.
+        // opt-out (el.noInvert -- for photos/logos, via "Plexus: Toggle image dark-invert") + a global setting.
         if (PXC_DARK && !el.noInvert && !(this.plugin._settings && this.plugin._settings.invertImagesDark === false)) ctx.filter = 'invert(0.93) hue-rotate(180deg)';
         const c = el.crop;
         if (c && c.w > 0 && c.h > 0) ctx.drawImage(img, c.x, c.y, c.w, c.h, el.x, el.y, el.width, el.height);
@@ -6709,7 +6988,7 @@ class CanvasView {
   }
   // QUICK-CAPTURE: type a title → create a typed record + drop a live card at the viewport centre. Reuses the
   // last-used collection (localStorage) for a true one-step capture; falls back to the collection picker the first time.
-  async _quickCapture() {
+  async _quickCapture(wx, wy) {
     const title = await this._promptText('Quick-capture — new record title:', '');
     if (!title) return;
     let col = null, lastGuid = null;
@@ -6720,7 +6999,7 @@ class CanvasView {
     let guid = null; try { guid = col.createRecord(title); } catch (_e) {}
     if (typeof guid !== 'string') { try { this.plugin.ui.addToaster({ title: 'Plexus: could not create the record.', dismissible: true }); } catch (_e) {} return; }
     await getRecordPoll(this.plugin, guid, 8);
-    const c = this.camera.screenToWorld(this.cssW / 2, this.cssH / 2);
+    const c = (wx != null && wy != null) ? { x: wx, y: wy } : this.camera.screenToWorld(this.cssW / 2, this.cssH / 2); // ctx-menu passes the click point; palette falls back to viewport centre
     this._invalidateRec(guid); this._insertRecordCard(guid, c.x, c.y); // inserts + selects + saves; card pulls title/lines live
     try { this.plugin.ui.addToaster({ title: 'Captured “' + title + '” — a live record card.', dismissible: true }); } catch (_e) {}
   }
@@ -11088,7 +11367,7 @@ class CanvasView {
       if (this._pendingSave) { this._pendingSave = false; this.scheduleSave(); } // a save coalesced while we ran → run it now
     }
   }
-  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeBlockKindBar(); } catch (_e) {} this._nudge = null; try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
+  destroy() { this.destroyed = true; this._camAnim = null; if (this._saveTimer) clearTimeout(this._saveTimer); if (this._reindexT) clearTimeout(this._reindexT); if (this._cmtMirrorT) clearTimeout(this._cmtMirrorT); if (this._pdfHlMirrorT) clearTimeout(this._pdfHlMirrorT); if (this._settleT) clearTimeout(this._settleT); if (this._btTimer) clearTimeout(this._btTimer); if (this._pendingNav) clearTimeout(this._pendingNav); if (this._marginT) clearTimeout(this._marginT); if (this._panEndT) clearTimeout(this._panEndT); if (this.renderer && this.renderer.dispose) { try { this.renderer.dispose(); } catch (_e) {} } this._cacheCv = null; this._marginCv = null; this._marginValid = false; this._tracedPath = null; this._spotlightId = null; if (this._ta) { try { this._ta.remove(); } catch (_e) {} } if (this._cardEdit) { try { this._cardEdit.abort && this._cardEdit.abort(); } catch (_e) {} try { this._cardEdit.ta.remove(); } catch (_e) {} this._cardEdit = null; } if (this._cellInp) { try { this._cellInp.remove(); } catch (_e) {} } if (this._refBarEl) { try { this._refBarEl.remove(); } catch (_e) {} this._refBarEl = null; } if (this._connInfoEl) { try { this._connInfoEl.remove(); } catch (_e) {} this._connInfoEl = null; } if (this._tipEl) { try { this._tipEl.remove(); } catch (_e) {} this._tipEl = null; } /* v1.117: drop the hover-tooltip node so a hot-reload-leaked wrap doesn't keep a detached .pxc-tip */ try { this._closeCtxMenu(); } catch (_e) {} try { this._closeRegionChoice(); } catch (_e) {} try { this._hideRefPreview(); } catch (_e) {} try { this._closeRecPanel(); } catch (_e) {} try { this._closeDcOverlay(); } catch (_e) {} try { this._closeCommentPopover(); } catch (_e) {} try { this._closeCommentRail(); } catch (_e) {} try { this._hideCommentPreview(); } catch (_e) {} try { this._closePdfNav(); } catch (_e) {} try { this._closePdfOutline(); } catch (_e) {} try { this._closeParsedBlockPopup(); } catch (_e) {} try { this._closeBlockSelBar(); } catch (_e) {} if (this._pdfBlockSel) { this._pdfBlockSel.clear(); this._pdfBlockSel = null; } try { this._closeBlockKindBar(); } catch (_e) {} this._nudge = null; try { this._closeReview && this._closeReview(); } catch (_e) {} /* round-3 C / round-4 / EDIT-1 / EDIT-4 / C0 / C3 / D-C / C26 / #25: symmetric overlay teardown */ if (this._toolbarDisposers) for (const d of this._toolbarDisposers.splice(0)) { try { d(); } catch (_e) {} } for (const d of this._localDisposers.splice(0)) { try { d(); } catch (_e) {} } }
 }
 
 /* ─────────────────────────────────── plugin ─────────────────────────────────── */
@@ -13210,4 +13489,16 @@ const BASE_CSS = `
 .pxc-host .pxc-gthumb { height: 118px; background-color: #f4f4f6; background-position: center; background-size: cover; background-repeat: no-repeat; }
 .pxc-host .pxc-gthumb.pxc-gempty { background-image: repeating-linear-gradient(45deg, #ececf0, #ececf0 8px, #f6f6f9 8px, #f6f6f9 16px); }
 .pxc-host .pxc-gcap { padding: 7px 9px; font-size: 12px; color: var(--color-text-400); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* WaveA: right-click context menu */
+.pxc-host .pxc-root .pxc-ctx { position: absolute; z-index: 30; display: flex; flex-direction: column; min-width: 190px; padding: 4px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 9px; box-shadow: 0 10px 28px rgba(0,0,0,.42); font: 12px/1.3 system-ui, sans-serif; color: var(--color-text-400, #e6e8ee); user-select: none; }
+.pxc-host .pxc-root .pxc-ctx-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; position: relative; }
+.pxc-host .pxc-root .pxc-ctx-item:hover { background: var(--sidebar-bg-hover, rgba(255,255,255,.07)); }
+.pxc-host .pxc-root .pxc-ctx-item.pxc-ctx-dim { opacity: .4; cursor: default; pointer-events: none; }
+.pxc-host .pxc-root .pxc-ctx-item.pxc-ctx-danger { color: #f87171; }
+.pxc-host .pxc-root .pxc-ctx-item.pxc-ctx-danger:hover { background: rgba(248,113,113,.12); }
+.pxc-host .pxc-root .pxc-ctx-hint { font-size: 10px; opacity: .5; white-space: nowrap; }
+.pxc-host .pxc-root .pxc-ctx-sep { height: 1px; background: var(--cards-border-color, #333a4a); margin: 3px 4px; }
+.pxc-host .pxc-root .pxc-ctx-arrow { font-size: 10px; opacity: .5; transform: rotate(-90deg); display: inline-block; }
+.pxc-host .pxc-root .pxc-ctx-has-sub { position: relative; }
+.pxc-host .pxc-root .pxc-ctx-sub { display: none; position: absolute; flex-direction: column; min-width: 160px; padding: 4px; background: var(--cards-bg, #1b1f2a); border: 1px solid var(--cards-border-color, #333a4a); border-radius: 9px; box-shadow: 0 10px 28px rgba(0,0,0,.42); z-index: 31; }
 `;
