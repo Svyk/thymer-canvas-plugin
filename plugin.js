@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.211.0';
+const PLEXUS_VERSION = '1.212.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1066,23 +1066,30 @@ function applyStroke(ctx, opts) {
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.globalAlpha = opts.opacity == null ? 1 : opts.opacity;
 }
+// WaveB: apply lineDash for shape stroke-style rows (dashed/dotted). Call after applyStroke, before roughSeg/stroke calls.
+function applyShapeLineDash(ctx, opts) {
+  const sw = opts.strokeWidth || 2, ls = opts.lineStyle;
+  if (ls === 'dashed')       ctx.setLineDash([sw * 4 + 6, sw * 3 + 4]);
+  else if (ls === 'dotted')  ctx.setLineDash([Math.max(0.5, sw * 0.2), sw * 2 + 3]);
+  else                       ctx.setLineDash([]);
+}
 function roughRect(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1);
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') {
     if (opts.fillStyle === 'solid') { ctx.save(); ctx.globalAlpha = (opts.opacity == null ? 1 : opts.opacity); ctx.fillStyle = opts.fill; ctx.fillRect(x, y, w, h); ctx.restore(); }
     else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch');
   }
   roughSeg(ctx, x, y, x + w, y, rng, r); roughSeg(ctx, x + w, y, x + w, y + h, rng, r);
   roughSeg(ctx, x + w, y + h, x, y + h, rng, r); roughSeg(ctx, x, y + h, x, y, rng, r);
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughEllipse(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1);
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
   const cx = x + w / 2, cy = y + h / 2, rx = w / 2, ry = h / 2;
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, 7); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   const N = 18; let started = false; ctx.beginPath();
   for (let i = 0; i <= N; i++) {
@@ -1090,17 +1097,17 @@ function roughEllipse(ctx, x, y, w, h, opts, seed) {
     const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * ry + (rng() * 2 - 1) * r;
     if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
   }
-  ctx.stroke(); ctx.restore();
+  ctx.stroke(); ctx.setLineDash([]); ctx.restore();
 }
 function roughDiamond(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1);
   const r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const mx = x + w / 2, my = y + h / 2;
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(x + w, my); ctx.lineTo(mx, y + h); ctx.lineTo(x, my); ctx.closePath(); ctx.clip(); hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   roughSeg(ctx, mx, y, x + w, my, rng, r); roughSeg(ctx, x + w, my, mx, y + h, rng, r);
   roughSeg(ctx, mx, y + h, x, my, rng, r); roughSeg(ctx, x, my, mx, y, rng, r);
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 // ── Visual-thinking shapes (hand-drawn, reuse roughSeg/hachure; same jitter language as rect/diamond) ──
 function _roughFillPoly(ctx, x, y, w, h, pts, opts, rng) { // shared: clip to a polygon path + hachure (or solid)
@@ -1113,54 +1120,54 @@ function _roughFillPoly(ctx, x, y, w, h, pts, opts, rng) { // shared: clip to a 
 function roughTriangle(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const A = [x + w / 2, y], B = [x + w, y + h], C = [x, y + h];
-  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, [A, B, C], opts, rng);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts); _roughFillPoly(ctx, x, y, w, h, [A, B, C], opts, rng);
   roughSeg(ctx, A[0], A[1], B[0], B[1], rng, r); roughSeg(ctx, B[0], B[1], C[0], C[1], rng, r); roughSeg(ctx, C[0], C[1], A[0], A[1], rng, r);
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughParallelogram(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4, s = Math.abs(w) * 0.22;
   const P = [[x + s, y], [x + w, y], [x + w - s, y + h], [x, y + h]];
-  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
   for (let k = 0; k < P.length; k++) { const a = P[k], b = P[(k + 1) % P.length]; roughSeg(ctx, a[0], a[1], b[0], b[1], rng, r); }
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughHexagon(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4, i = Math.abs(w) * 0.25;
   const P = [[x + i, y], [x + w - i, y], [x + w, y + h / 2], [x + w - i, y + h], [x + i, y + h], [x, y + h / 2]];
-  ctx.save(); applyStroke(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts); _roughFillPoly(ctx, x, y, w, h, P, opts, rng);
   for (let k = 0; k < P.length; k++) { const a = P[k], b = P[(k + 1) % P.length]; roughSeg(ctx, a[0], a[1], b[0], b[1], rng, r); }
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughRoundRect(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.4;
   const k = Math.min(Math.min(Math.abs(w), Math.abs(h)) * 0.18, 24);
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, k); else ctx.rect(x, y, w, h); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   roughSeg(ctx, x + k, y, x + w - k, y, rng, r); roughSeg(ctx, x + w, y + k, x + w, y + h - k, rng, r);
   roughSeg(ctx, x + w - k, y + h, x + k, y + h, rng, r); roughSeg(ctx, x, y + h - k, x, y + k, rng, r);
   const corner = (cx, cy, a0) => { ctx.beginPath(); for (let j = 0; j <= 4; j++) { const a = a0 + (j / 4) * (Math.PI / 2); const px = cx + Math.cos(a) * k + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * k + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
   corner(x + k, y + k, Math.PI); corner(x + w - k, y + k, -Math.PI / 2); corner(x + w - k, y + h - k, 0); corner(x + k, y + h - k, Math.PI / 2);
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughCylinder(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1), r = (opts.roughness == null ? 1 : opts.roughness) * 1.2;
   const e = Math.min(Math.abs(h) * 0.18, 18), rx = w / 2, cx = x + w / 2;
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); ctx.beginPath(); ctx.rect(x, y + e / 2, w, h - e); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
   const arc = (cy, a0, a1) => { ctx.beginPath(); const N = 18; for (let j = 0; j <= N; j++) { const a = a0 + (j / N) * (a1 - a0); const px = cx + Math.cos(a) * rx + (rng() * 2 - 1) * r, py = cy + Math.sin(a) * (e / 2) + (rng() * 2 - 1) * r; j ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); };
   roughSeg(ctx, x, y + e / 2, x, y + h - e / 2, rng, r); roughSeg(ctx, x + w, y + e / 2, x + w, y + h - e / 2, rng, r);
   arc(y + h - e / 2, 0, Math.PI);          // bottom front lip
   arc(y + e / 2, 0, Math.PI * 2);          // top cap ellipse
-  ctx.restore();
+  ctx.setLineDash([]); ctx.restore();
 }
 function roughCloud(ctx, x, y, w, h, opts, seed) {
   const rng = mulberry32((seed | 0) || 1);
   const cx = x + w / 2, cy = y + h / 2, ax = w * 0.40, ay = h * 0.34, N = 9, bump = Math.min(Math.abs(w), Math.abs(h)) * 0.18;
   const base = []; for (let k = 0; k < N; k++) { const a = (k / N) * Math.PI * 2 - Math.PI / 2; base.push([cx + Math.cos(a) * ax, cy + Math.sin(a) * ay, a]); }
   const path = () => { ctx.beginPath(); for (let k = 0; k < N; k++) { const p0 = base[k], p1 = base[(k + 1) % N]; let a1 = p1[2]; if (a1 < p0[2]) a1 += Math.PI * 2; const ma = (p0[2] + a1) / 2; const b = bump + (rng() * 2 - 1) * 2; const mx = cx + Math.cos(ma) * (ax + b), my = cy + Math.sin(ma) * (ay + b); if (k === 0) ctx.moveTo(p0[0], p0[1]); ctx.quadraticCurveTo(mx, my, p1[0], p1[1]); } ctx.closePath(); };
-  ctx.save(); applyStroke(ctx, opts);
+  ctx.save(); applyStroke(ctx, opts); applyShapeLineDash(ctx, opts);
   if (opts.fill && opts.fill !== 'transparent') { ctx.save(); path(); ctx.clip(); if (opts.fillStyle === 'solid') { ctx.fillStyle = opts.fill; ctx.fill(); } else hachure(ctx, x, y, w, h, opts.fill, opts.strokeWidth || 2, rng, opts.fillStyle === 'cross-hatch'); ctx.restore(); }
-  path(); ctx.stroke();
+  path(); ctx.stroke(); ctx.setLineDash([]);
   ctx.restore();
 }
 // Per-point stroke radius from local speed (point spacing): slow strokes go THICK, fast strokes go THIN —
@@ -1784,7 +1791,13 @@ function drawText(ctx, el) {
   ctx.fillStyle = adaptInk(el.strokeColor || '#1e1e1e'); ctx.globalAlpha = (el.opacity == null ? 1 : el.opacity) * (el.isRef ? _pxcLinkAlpha() : 1); // S10: dim @@ ref nodes
   ctx.font = textFont(el); ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   const fs = el.fontSize || 24, lh = fs * 1.25, lines = (el.wrapW > 0) ? pxcWrapLines(ctx, el.text, el.wrapW) : String(el.text).split('\n'); // TEXT WRAP
-  for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], el.x, el.y + i * lh);
+  // WaveB: honour el.textAlign (left/center/right) by computing per-line x offset
+  const ta = el.textAlign;
+  for (let i = 0; i < lines.length; i++) {
+    let tx = el.x;
+    if (ta === 'center' || ta === 'right') { const lw = ctx.measureText(lines[i]).width; tx = ta === 'center' ? el.x + (el.width - lw) / 2 : el.x + el.width - lw; }
+    ctx.fillText(lines[i], tx, el.y + i * lh);
+  }
   ctx.restore();
 }
 // Icon = one Tabler glyph drawn in the `tabler-icons` font, scaled to the element box (resize "just works"). Coloured
@@ -1866,7 +1879,7 @@ function drawLinear(ctx, el) {
 }
 function drawElement(ctx, el) {
   if (el.type === 'comment') return; // C0: comments render only as overlay pins (in the interactive pass), never as a shape -- inert in static/export/minimap
-  const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity };
+  const opts = { stroke: el.strokeColor, strokeWidth: el.strokeWidth, fill: el.backgroundColor, fillStyle: el.fillStyle, roughness: el.roughness, opacity: el.opacity, lineStyle: el.lineStyle };
   // WaveA: apply rotation and/or flip transform for non-point-based elements
   const rotated = (!!el.angle || el.flipX || el.flipY) && el.type !== 'arrow' && el.type !== 'line' && el.type !== 'freedraw';
   if (rotated) {
@@ -3751,32 +3764,153 @@ class CanvasView {
     this.selected.clear(); for (const el of els) { this.scene.elements.push(el); this.selected.add(el.id); }
     this.dirty = true; this.scheduleSave(); return els.length;
   }
-  // Phase 8: contextual property panel — stroke width / opacity / fill style for the selection.
+  // Phase 8 / WaveB: contextual property panel — Excalidraw-parity style controls shown by selection type.
   _buildPropPanel() {
-    const p = document.createElement('div'); p.className = 'pxc-props'; this._propEl = p;
+    const p = document.createElement('div'); p.className = 'pxc-props pxc-props-col'; this._propEl = p;
     p.addEventListener('pointerdown', (e) => e.stopPropagation());
-    const lab = (t) => { const s = document.createElement('span'); s.className = 'pxc-prop-label'; s.textContent = t; return s; };
-    const sep = () => { const s = document.createElement('span'); s.className = 'pxc-prop-sep'; return s; };
-    p.appendChild(lab('Width')); this._swBtns = {};
-    for (const [t, v] of [['S', 1], ['M', 2], ['L', 4], ['XL', 8]]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyProp('strokeWidth', v)); p.appendChild(b); this._swBtns[v] = b; }
-    p.appendChild(sep()); p.appendChild(lab('Opacity'));
+    // helpers
+    const row = () => { const r = document.createElement('div'); r.className = 'pxc-pp-row'; p.appendChild(r); return r; };
+    const lab = (parent, t) => { const s = document.createElement('span'); s.className = 'pxc-prop-label pxc-pp-lbl'; s.textContent = t; parent.appendChild(s); };
+    const hsep = () => { const s = document.createElement('div'); s.className = 'pxc-pp-hsep'; p.appendChild(s); };
+    const btn = (parent, text, onclick) => { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = text; b.addEventListener('click', onclick); parent.appendChild(b); return b; };
+
+    // ── Stroke width (always) ──────────────────────────────────────────────────
+    const swRow = row(); lab(swRow, 'Width'); this._swBtns = {};
+    for (const [t, v] of [['S', 1], ['M', 2], ['L', 4], ['XL', 8]]) { this._swBtns[v] = btn(swRow, t, () => this._applyProp('strokeWidth', v)); }
+
+    // ── Opacity (always) ──────────────────────────────────────────────────────
+    const opRow = row(); lab(opRow, 'Opacity');
     const op = document.createElement('input'); op.type = 'range'; op.min = '10'; op.max = '100'; op.value = '100'; op.className = 'pxc-prop-range'; this._opRange = op;
-    op.addEventListener('input', () => this._applyProp('opacity', Math.round(+op.value) / 100)); p.appendChild(op);
-    p.appendChild(sep()); p.appendChild(lab('Fill')); this._fillBtns = {};
-    for (const [t, v] of [['Solid', 'solid'], ['Hachure', 'hachure'], ['Cross', 'cross-hatch'], ['None', 'none']]) { const b = document.createElement('button'); b.className = 'pxc-prop-btn'; b.textContent = t; b.addEventListener('click', () => this._applyFill(v)); p.appendChild(b); this._fillBtns[v] = b; }
+    op.addEventListener('input', () => this._applyProp('opacity', Math.round(+op.value) / 100)); opRow.appendChild(op);
+
+    hsep();
+
+    // ── Stroke style (shapes + freedraw + arrows) ─────────────────────────────
+    this._strokeStyleRow = row(); lab(this._strokeStyleRow, 'Stroke'); this._lsBtns = {};
+    for (const [t, v] of [['—', 'solid'], ['- -', 'dashed'], ['···', 'dotted']]) {
+      this._lsBtns[v] = btn(this._strokeStyleRow, t, () => this._applyProp('lineStyle', v));
+    }
+
+    // ── Sloppiness (shapes only) ──────────────────────────────────────────────
+    this._sloppinessRow = row(); lab(this._sloppinessRow, 'Style'); this._roughBtns = {};
+    for (const [t, v] of [['Arch', 0], ['Artist', 1], ['Cartoon', 2]]) {
+      this._roughBtns[v] = btn(this._sloppinessRow, t, () => this._applyProp('roughness', v));
+    }
+
+    hsep();
+
+    // ── Fill (shapes with fill) ───────────────────────────────────────────────
+    this._fillRow = row(); lab(this._fillRow, 'Fill'); this._fillBtns = {};
+    for (const [t, v] of [['Solid', 'solid'], ['Hatch', 'hachure'], ['Cross', 'cross-hatch'], ['None', 'none']]) {
+      this._fillBtns[v] = btn(this._fillRow, t, () => this._applyFill(v));
+    }
+
+    // ── Edges (rect/roundrect only) ───────────────────────────────────────────
+    this._edgesRow = row(); lab(this._edgesRow, 'Edges'); this._edgeBtns = {};
+    this._edgeBtns['sharp'] = btn(this._edgesRow, 'Sharp', () => this._applyEdges('sharp'));
+    this._edgeBtns['round'] = btn(this._edgesRow, 'Round', () => this._applyEdges('round'));
+
+    hsep();
+
+    // ── Font size (text only) ─────────────────────────────────────────────────
+    this._fontSizeRow = row(); lab(this._fontSizeRow, 'Size'); this._fsBtns = {};
+    for (const [t, v] of [['S', 16], ['M', 24], ['L', 32], ['XL', 48]]) {
+      this._fsBtns[v] = btn(this._fontSizeRow, t, () => this._applyTextProp('fontSize', v));
+    }
+
+    // ── Font family (text only) ───────────────────────────────────────────────
+    this._fontFamilyRow = row(); lab(this._fontFamilyRow, 'Font');
+    const ffSel = document.createElement('select'); ffSel.className = 'pxc-pp-select'; this._ffSel = ffSel;
+    const FONTS = [
+      ['system-ui, sans-serif', 'System'],
+      ['Helvetica, Arial, sans-serif', 'Sans'],
+      ['Georgia, "Times New Roman", serif', 'Serif'],
+      ['ui-monospace, Menlo, Consolas, monospace', 'Mono'],
+      ['"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive', 'Writing 1'],
+      ['"Bradley Hand", "Segoe Print", cursive', 'Writing 2'],
+    ];
+    for (const [v, l] of FONTS) { const o = document.createElement('option'); o.value = v; o.textContent = l; ffSel.appendChild(o); }
+    ffSel.addEventListener('change', () => this._applyTextProp('fontFamily', ffSel.value));
+    this._fontFamilyRow.appendChild(ffSel);
+
+    // ── Text align (text only) ────────────────────────────────────────────────
+    this._textAlignRow = row(); lab(this._textAlignRow, 'Align'); this._taBtns = {};
+    for (const [t, v] of [['L', 'left'], ['C', 'center'], ['R', 'right']]) {
+      this._taBtns[v] = btn(this._textAlignRow, t, () => this._applyTextProp('textAlign', v));
+    }
+
     return p;
   }
   _applyProp(key, val) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { el[key] = val; ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
+  _applyTextProp(key, val) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el && el.type === 'text') { el[key] = val; if (key === 'fontSize' || key === 'fontFamily') measureText(el); ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
   _applyFill(style) { let ch = false; for (const id of this.selected) { const el = this._byId(id); if (el) { if (style === 'none') el.backgroundColor = 'transparent'; else { el.backgroundColor = FILLS[el.strokeColor] || '#efeaff'; el.fillStyle = style; } ch = true; } } this.dirty = true; if (ch) { this.scheduleSave(); this._syncPropPanel(true); } }
+  _applyEdges(target) {
+    let ch = false;
+    for (const id of this.selected) {
+      const el = this._byId(id);
+      if (el && (el.type === 'rectangle' || el.type === 'roundrect')) {
+        const nt = target === 'round' ? 'roundrect' : 'rectangle';
+        if (el.type !== nt) { el.type = nt; ch = true; }
+      }
+    }
+    if (ch) { this.dirty = true; this.scheduleSave(); this._syncPropPanel(true); }
+  }
   _syncPropPanel(force) {
     if (!this._propEl) return;
     const has = this.selected.size > 0; this._propEl.classList.toggle('show', has);
     const sig = [...this.selected].join(','); if (!force && sig === this._propSig) return; this._propSig = sig;
-    if (!has) return; const el = this._byId([...this.selected][0]); if (!el) return;
-    if (this._opRange) this._opRange.value = String(Math.round((el.opacity == null ? 1 : el.opacity) * 100));
-    for (const v in this._swBtns) this._swBtns[v].classList.toggle('active', +v === (el.strokeWidth || 2));
-    const fs = (!el.backgroundColor || el.backgroundColor === 'transparent') ? 'none' : (el.fillStyle || 'solid');
-    for (const v in this._fillBtns) this._fillBtns[v].classList.toggle('active', v === fs);
+    if (!has) return;
+
+    // Collect selected elements + compute type buckets
+    const els = []; for (const id of this.selected) { const e = this._byId(id); if (e) els.push(e); }
+    if (!els.length) return;
+    const ROUGH_S = ['rectangle','ellipse','diamond','triangle','roundrect','parallelogram','cylinder','hexagon','cloud'];
+    let hasShape = false, hasText = false, hasArrow = false, hasFD = false, hasEdgeable = false;
+    for (const e of els) {
+      if (e.type === 'text') hasText = true;
+      else if (e.type === 'arrow' || e.type === 'line') hasArrow = true;
+      else if (e.type === 'freedraw') hasFD = true;
+      else if (ROUGH_S.indexOf(e.type) >= 0) { hasShape = true; if (e.type === 'rectangle' || e.type === 'roundrect') hasEdgeable = true; }
+    }
+    const hasStroke = hasShape || hasFD || hasArrow;
+
+    // helper: uniform value across all els (or null if mixed)
+    const uni = (key) => { const v0 = els[0][key]; for (let i = 1; i < els.length; i++) if (els[i][key] !== v0) return null; return v0; };
+
+    // Stroke width
+    const sw = uni('strokeWidth'); for (const v in this._swBtns) this._swBtns[v].classList.toggle('active', sw !== null && +v === (sw == null ? 2 : sw));
+    // Opacity
+    const uniOp = uni('opacity'); if (this._opRange) this._opRange.value = String(Math.round((uniOp == null ? 1 : uniOp) * 100));
+
+    // Stroke style row (shapes + freedraw + arrows)
+    if (this._strokeStyleRow) this._strokeStyleRow.classList.toggle('pxc-pp-hidden', !hasStroke);
+    if (hasStroke) { const ls = uni('lineStyle') || 'solid'; for (const v in this._lsBtns) this._lsBtns[v].classList.toggle('active', v === ls); }
+
+    // Sloppiness row (shapes only)
+    if (this._sloppinessRow) this._sloppinessRow.classList.toggle('pxc-pp-hidden', !hasShape);
+    if (hasShape) { const rg = uni('roughness'); for (const v in this._roughBtns) this._roughBtns[v].classList.toggle('active', rg !== null && +v === (rg == null ? 1 : rg)); }
+
+    // Fill row (shapes only — freedraw has no fill; text/arrow don't use it)
+    if (this._fillRow) this._fillRow.classList.toggle('pxc-pp-hidden', !hasShape);
+    if (hasShape) { const fv = uni('fillStyle'), bg = uni('backgroundColor'); const fs = (!bg || bg === 'transparent') ? 'none' : (fv || 'solid'); for (const v in this._fillBtns) this._fillBtns[v].classList.toggle('active', v === fs); }
+
+    // Edges row (rect/roundrect)
+    if (this._edgesRow) this._edgesRow.classList.toggle('pxc-pp-hidden', !hasEdgeable);
+    if (hasEdgeable) { const et = uni('type'); for (const v in this._edgeBtns) this._edgeBtns[v].classList.toggle('active', et !== null && ((v === 'round' && et === 'roundrect') || (v === 'sharp' && et === 'rectangle'))); }
+
+    // Separator before fill: hide if nothing below it to show — always show, but hide via sibling visibility
+    // Text rows
+    if (this._fontSizeRow) this._fontSizeRow.classList.toggle('pxc-pp-hidden', !hasText);
+    if (this._fontFamilyRow) this._fontFamilyRow.classList.toggle('pxc-pp-hidden', !hasText);
+    if (this._textAlignRow) this._textAlignRow.classList.toggle('pxc-pp-hidden', !hasText);
+    if (hasText) {
+      const fsz = uni('fontSize'); for (const v in this._fsBtns) this._fsBtns[v].classList.toggle('active', fsz !== null && +v === (fsz == null ? 24 : fsz));
+      if (this._ffSel) { const ff = uni('fontFamily'); this._ffSel.value = ff || PLEXUS_DEFAULT_FONT; }
+      if (this._taBtns) { const ta = uni('textAlign') || 'left'; for (const v in this._taBtns) this._taBtns[v].classList.toggle('active', v === ta); }
+    }
+    // Hide the second hsep when neither shape (fill/edges) nor text rows are shown
+    const anyLower = hasShape || hasEdgeable || hasText;
+    if (this._propEl) { const hseps = this._propEl.querySelectorAll('.pxc-pp-hsep'); if (hseps[1]) hseps[1].classList.toggle('pxc-pp-hidden', !anyLower); }
   }
   // Phase 8 (gap #10): in-canvas text search — find/centre text elements; Cmd/Ctrl+F or the command.
   _searchScene(q) { q = (q || '').trim().toLowerCase(); if (!q) return []; return this.scene.elements.filter((el) => !el.isDeleted && el.type === 'text' && String(el.text || '').toLowerCase().includes(q)).map((el) => el.id); }
@@ -13251,14 +13385,19 @@ const BASE_CSS = `
 .pxc-host .pxc-root .pxc-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-flipnote { width: auto; gap: 4px; padding: 0 9px; font-size: 12px; font-weight: 600; }
 .pxc-host .pxc-root .pxc-flipnote:hover { background: var(--sidebar-bg-hover); }
-.pxc-host .pxc-root .pxc-props { position: absolute; left: 50%; transform: translateX(-50%); top: 54px; z-index: 5; display: none; align-items: center; gap: 6px; padding: 4px 9px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 12px; }
+.pxc-host .pxc-root .pxc-props { position: absolute; left: 50%; transform: translateX(-50%); top: 54px; z-index: 5; display: none; flex-direction: column; gap: 3px; padding: 6px 9px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 12px; min-width: 180px; max-width: 240px; max-height: 320px; overflow-y: auto; }
 .pxc-host .pxc-root .pxc-props.show { display: flex; }
+.pxc-host .pxc-root .pxc-pp-row { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; }
+.pxc-host .pxc-root .pxc-pp-hidden { display: none !important; }
+.pxc-host .pxc-root .pxc-pp-lbl { min-width: 38px; flex-shrink: 0; }
+.pxc-host .pxc-root .pxc-pp-hsep { width: 100%; height: 1px; background: var(--cards-border-color); margin: 2px 0; }
 .pxc-host .pxc-root .pxc-prop-label { color: var(--color-text-600); font-size: 11px; }
 .pxc-host .pxc-root .pxc-prop-sep { width: 1px; height: 18px; background: var(--cards-border-color); }
 .pxc-host .pxc-root .pxc-prop-btn { min-width: 26px; height: 24px; padding: 0 6px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: transparent; color: var(--color-text-400); cursor: pointer; font-size: 11px; }
 .pxc-host .pxc-root .pxc-prop-btn:hover { background: var(--sidebar-bg-hover); }
 .pxc-host .pxc-root .pxc-prop-btn.active { background: var(--button-primary-bg-color, #7c5cff); color: #fff; border-color: transparent; }
 .pxc-host .pxc-root .pxc-prop-range { width: 80px; accent-color: var(--button-primary-bg-color, #7c5cff); }
+.pxc-host .pxc-root .pxc-pp-select { flex: 1; min-width: 0; padding: 2px 5px; border: 1px solid var(--cards-border-color); border-radius: 6px; background: var(--input-bg-color, var(--color-bg-900)); color: var(--color-text-400); font-size: 11px; cursor: pointer; max-width: 120px; }
 .pxc-host .pxc-root .pxc-search { position: absolute; right: 12px; top: 12px; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; background: var(--cards-bg); border: 1px solid var(--cards-border-color); border-radius: 9px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
 .pxc-host .pxc-root .pxc-search-input { width: 150px; border: 0; outline: none; background: transparent; color: var(--color-text-400); font-size: 13px; }
 .pxc-host .pxc-root .pxc-search-count { font-size: 11px; color: var(--color-text-600); min-width: 28px; text-align: right; }
@@ -13479,8 +13618,9 @@ const BASE_CSS = `
 .pxc-host .pxc-root.pxc-dark .pxc-toolbar, .pxc-host .pxc-root.pxc-dark .pxc-props, .pxc-host .pxc-root.pxc-dark .pxc-search { background: #1c1f26; border-color: #2e323b; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
 .pxc-host .pxc-root.pxc-dark .pxc-tool, .pxc-host .pxc-root.pxc-dark .pxc-prop-btn, .pxc-host .pxc-root.pxc-dark .pxc-search-input, .pxc-host .pxc-root.pxc-dark .pxc-flipnote { color: #e6e7ea; }
 .pxc-host .pxc-root.pxc-dark .pxc-tool:hover, .pxc-host .pxc-root.pxc-dark .pxc-prop-btn:hover, .pxc-host .pxc-root.pxc-dark .pxc-flipnote:hover { background: #2a2e38; }
-.pxc-host .pxc-root.pxc-dark .pxc-sep, .pxc-host .pxc-root.pxc-dark .pxc-prop-sep { background: #2e323b; }
+.pxc-host .pxc-root.pxc-dark .pxc-sep, .pxc-host .pxc-root.pxc-dark .pxc-prop-sep, .pxc-host .pxc-root.pxc-dark .pxc-pp-hsep { background: #2e323b; }
 .pxc-host .pxc-root.pxc-dark .pxc-prop-label, .pxc-host .pxc-root.pxc-dark .pxc-search-count, .pxc-host .pxc-root.pxc-dark .pxc-hint { color: #9aa0a6; }
+.pxc-host .pxc-root.pxc-dark .pxc-pp-select { background: #1c1f26; color: #e6e7ea; border-color: #2e323b; }
 .pxc-host .pxc-empty { min-height: calc(100vh - 140px); display: flex; align-items: center; justify-content: center; text-align: center; opacity: .65; font-size: 14px; line-height: 1.6; }
 .pxc-host .pxc-empty small { opacity: .7; }
 .pxc-host .pxc-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; padding: 16px; align-content: start; min-height: calc(100vh - 140px); }
