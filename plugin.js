@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.215.0';
+const PLEXUS_VERSION = '1.216.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -3008,7 +3008,10 @@ class CanvasView {
     const themeObs = new MutationObserver(() => { const prev = this._darkCache; this._darkCacheT = 0; if (this._themeDark() !== prev) { this._cacheValid = false; this.dirty = true; this._dragLayerValid = false; } }); // only rebuild on an ACTUAL light↔dark flip, not every documentElement mutation (and un-freeze the drag static layer)
     try { themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] }); } catch (_e) {}
     this._localDisposers.push(() => themeObs.disconnect());
-    this._wirePointer(); this.loadOrInit();
+    this._wirePointer(); const _ldp = this.loadOrInit();
+    // Sources discoverability: after the scene loads, if the host note has PDF/image attachments and NONE are on the
+    // canvas yet (fresh flip-to-drawing), auto-open the Sources panel so the user sees their PDF is one drag away.
+    try { Promise.resolve(_ldp).then(async () => { if (this.destroyed || this._srcPanelEl) return; const els = (this.scene && this.scene.elements) || []; if (els.some((el) => el && el.type === 'image' && el.pdf && !el.isDeleted)) return; const pb = (this.scene && this.scene.appState && this.scene.appState.pdfBlobs) || {}; if (Object.keys(pb).length) return; const items = await this._collectNoteSources(); if (this.destroyed || this._srcPanelEl || !items.length) return; try { await this._showSourcesPanel(); } catch (_e) {} }).catch(() => {}); } catch (_e) {}
     try { this._pdfHlRefreshT = null; this._pdfHlSubIds = []; (async () => { let hlColGuid = null; try { const _c = await this.plugin._pdfHlCollection(); if (_c && _c.getGuid) hlColGuid = _c.getGuid(); } catch (_e) {} if (this.destroyed) return; const onHlChange = async (e) => { if (this.destroyed) return; try { const g = e && e.recordGuid; if (!g) return; let fp = '', dr = []; const rec = e.getRecord ? e.getRecord() : null; if (rec) { try { fp = this._propText(rec, 'PDF Fingerprint'); } catch (_e) {} try { dr = pxcRelValues(rec.prop('Drawing')); } catch (_e) {} } if (this.destroyed) return; const canvasFps = new Set(); for (const el of ((this.scene && this.scene.elements) || [])) { if (el && el.type === 'image' && el.pdf && !el.isDeleted && el.pdf.fingerprint) canvasFps.add(el.pdf.fingerprint); } const relevant = (fp && canvasFps.has(fp)) || (this.recordGuid && dr.includes(this.recordGuid)) || (!rec && canvasFps.size > 0); if (!relevant) return; if (this._pdfHlRefreshT) clearTimeout(this._pdfHlRefreshT); this._pdfHlRefreshT = setTimeout(async () => { this._pdfHlRefreshT = null; if (this.destroyed) return; try { await this._loadPdfRegionHighlights(); } catch (_e) {} if (this.destroyed) return; if (!this._pdfBlocksFromCluster) { try { await this._loadPdfParsedBlocks(); } catch (_e) {} } if (this.destroyed) return; if (this._pdfOutlineEl) { try { await this._showPdfOutline(); } catch (_e) {} } if (this.destroyed) return; if (this._srcPanelEl) { try { await this._showSourcesPanel(); } catch (_e) {} } if (!this.destroyed) this.dirty = true; }, 400); } catch (_e) {} }; const evOpts = hlColGuid ? { collection: hlColGuid } : { collection: '*' }; const ids = []; for (const ev of ['record.created', 'record.updated']) { try { const id = this.plugin.events.on(ev, onHlChange, evOpts); if (id != null) ids.push(id); } catch (_e) {} } this._pdfHlSubIds = ids; })().catch(() => {}); } catch (_e) {} // Wave B: live-sync PDF Highlight records → refresh overlays + panels per-view
   }
   _buildToolbar() {
@@ -4485,6 +4488,7 @@ class CanvasView {
       mkSep();
       mkItem('New record card here', '', () => { const w = worldPt || this.camera.screenToWorld(sx, sy); this._quickCapture(w.x, w.y); }); // full create flow (title prompt + real record) at the click point — never a guid-less card
       mkItem('Insert icon...', '', () => this.plugin._openIconGlyphLibrary());
+      mkItem('Sources — note PDFs & images', '', () => { this._showSourcesPanel().catch(() => {}); });
       mkSep();
       mkItem('Toggle grid', "Ctrl+'", () => this._toggleGrid());
       mkItem('Toggle snap', '', () => this._toggleSnap());
@@ -5249,7 +5253,8 @@ class CanvasView {
     let cmRightDown = null; // {x,y} screen coords of right-button down
     host.addEventListener('pointerdown', (e) => { if (e.button === 2) cmRightDown = { x: e.clientX, y: e.clientY }; });
     const onContextMenu = (e) => {
-      e.preventDefault(); // always suppress the browser default
+      if (!(e.target === host || (host.contains && host.contains(e.target)))) return; // not the canvas — let Thymer's own menu run
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); // window CAPTURE phase (refx pattern): Thymer's app menu (Undo/Redo/Back/Forward) must never see canvas right-clicks — a host bubble listener + preventDefault only killed the BROWSER menu, Thymer's own listener still fired on top of ours
       const stp = this.plugin._settings || {};
       // if right-drag pan is on and the pointer moved >4px treat as a pan, not a menu
       if (stp.panRightMouse && cmRightDown && Math.hypot(e.clientX - cmRightDown.x, e.clientY - cmRightDown.y) > 4) { cmRightDown = null; return; }
@@ -5263,8 +5268,8 @@ class CanvasView {
     host.addEventListener('pointerdown', onDown); host.addEventListener('pointermove', onMove); host.addEventListener('pointerup', onUp);
     const onPtrCancel = () => { if (this._panMode) { this._panMode = false; this.dirty = true; } if (this._elDrag) { this._elDrag = false; this._dragLayerValid = false; this._cacheValid = false; this.dirty = true; } if (this._editPt) { this._editPt = null; this.dirty = true; } if (this._dropLinkTarget) { this._dropLinkTarget = null; this.dirty = true; } if (this._pendingGroupLink) { this._pendingGroupLink = null; this.dirty = true; } if (this._pendingRegionDraw) { this._pendingRegionDraw = null; this.dirty = true; } if (this._lasso) { this._lasso = null; this.dirty = true; } if (this._cropRect) { this._cropRect = null; this.dirty = true; } if (this._cropInPlaceTarget) { this._cropInPlaceTarget = null; } if (this._pdfFigureArm) { this._pdfFigureArm = false; } if (this._pdfHlArm) { this._pdfHlArm = null; } if (this._aiExtractArm) { this._aiExtractArm = false; } if (this._cmtPinDown) { this._cmtPinDown = null; this.dirty = true; } if (this._pinDown) { this._pinDown = null; this.dirty = true; } if (this._cmtRegionDown) { this._cmtRegionDown = null; this.dirty = true; } if (this._nudge) { this._nudge = null; this.wrap.style.cursor = ''; this.dirty = true; } this._drawGesture = false; }; // pan/drag interrupted (no pointerup) → drop compositor-pan mode + the static-layer freeze + a mid-drag connection-point edit (B) + any pending group-lasso (round-5 B) + an in-flight crop marquee/one-shot in-place target (B1 — the cancel path never reaches the crop pointer-up that would clear it, so a cancelled in-place crop must NOT leak into the next region-reference) + a C3 comment-pin drag (else a cancelled pin-press WEDGES onMove — every move short-circuits), crisp re-raster
     host.addEventListener('pointercancel', onPtrCancel); host.addEventListener('lostpointercapture', onPtrCancel);
-    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); host.addEventListener('contextmenu', onContextMenu);
-    this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); host.removeEventListener('contextmenu', onContextMenu); });
+    host.addEventListener('wheel', onWheel, { passive: false }); host.addEventListener('keydown', onKey); host.addEventListener('dblclick', onDblClick); window.addEventListener('contextmenu', onContextMenu, true);
+    this._localDisposers.push(() => { clearLP(); host.removeEventListener('pointerdown', onDown); host.removeEventListener('pointermove', onMove); host.removeEventListener('pointerup', onUp); host.removeEventListener('pointercancel', onPtrCancel); host.removeEventListener('lostpointercapture', onPtrCancel); host.removeEventListener('wheel', onWheel); host.removeEventListener('keydown', onKey); host.removeEventListener('dblclick', onDblClick); window.removeEventListener('contextmenu', onContextMenu, true); });
     // images: drag-drop onto the canvas, or paste while the canvas is focused
     const onDragOver = (e) => { if (e.dataTransfer && [...(e.dataTransfer.items || [])].some((it) => it.kind === 'file')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
     const onDrop = (e) => { const files = e.dataTransfer && e.dataTransfer.files; if (!files || !files.length) return; e.preventDefault(); const w = this._worldAt(e); let i = 0; for (const f of files) { const isSvg = (f.type === 'image/svg+xml') || /\.svg$/i.test(f.name || ''); if (isSvg) { const r = new FileReader(); r.onload = () => this._addSvgAsImage(String(r.result || ''), w.x + i * 24, w.y + i * 24); r.readAsText(f); i++; } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) { this._addPdf(f, w.x + i * 24, w.y + i * 24); i++; } else if (f.type && f.type.startsWith('image/')) { this._addImageFromFile(f, w.x + i * 24, w.y + i * 24); i++; } } };
@@ -7041,32 +7046,37 @@ class CanvasView {
     if (this._srcGhostEl) { try { this._srcGhostEl.remove(); } catch (_e) {} this._srcGhostEl = null; }
     if (this._srcPanelEl) { try { this._srcPanelEl.remove(); } catch (_e) {} this._srcPanelEl = null; }
   }
-  async _showSourcesPanel() {
-    this._closeSourcesPanel();
-    // Resolve host note GUID (same logic as _flipToNote: hostGuid is the source note, back off to _sourceNoteOf if same as backing)
-    let noteGuid = this.hostGuid;
+  // Scan the HOST note's body for PDF/image attachments. contentType is often EMPTY on uploaded files
+  // (e.g. a bare "code.pdf" file line item) — the filename extension is the reliable signal, so accept either.
+  async _collectNoteSources() {
+    let noteGuid = this.hostGuid; // same resolution as _flipToNote: hostGuid is the source note, back off to _sourceNoteOf if same as backing
     if (!noteGuid || noteGuid === this.recordGuid) {
       try { const src = await this.plugin._sourceNoteOf(this.recordGuid); if (src && src !== this.recordGuid) noteGuid = src; } catch (_e) {}
     }
-    // Collect PDF/image blobs from the note's body line items
     const noteItems = []; // {blob, name, isPdf, ct}
-    if (noteGuid) {
-      try {
-        const rec = await this.plugin.data.getRecord(noteGuid);
-        if (rec) {
-          let lis = []; try { lis = rec.getLineItems ? await rec.getLineItems() : []; } catch (_e) {}
-          for (const li of lis) {
-            if (this.destroyed) return;
-            let blob = null; try { blob = await li.getBlob(); } catch (_e) {}
-            if (!blob) continue;
-            const ct = blob.contentType || '';
-            if (ct !== 'application/pdf' && !ct.startsWith('image/')) continue;
-            const name = blob.name || blob.fileName || (li.getName && li.getName()) || 'attachment';
-            noteItems.push({ blob, name, isPdf: ct === 'application/pdf', ct });
-          }
+    if (!noteGuid) return noteItems;
+    try {
+      const rec = await this.plugin.data.getRecord(noteGuid);
+      if (rec) {
+        let lis = []; try { lis = rec.getLineItems ? await rec.getLineItems() : []; } catch (_e) {}
+        for (const li of lis) {
+          if (this.destroyed) return noteItems;
+          let blob = null; try { blob = await li.getBlob(); } catch (_e) {}
+          if (!blob) continue;
+          const ct = blob.contentType || '';
+          const name = blob.name || blob.fileName || (li.getName && li.getName()) || 'attachment';
+          const isPdf = ct === 'application/pdf' || /\.pdf$/i.test(name);
+          const isImg = !isPdf && (/^image\//.test(ct) || /\.(png|jpe?g|gif|webp|heic|heif|bmp|avif)$/i.test(name));
+          if (!isPdf && !isImg) continue;
+          noteItems.push({ blob, name, isPdf, ct });
         }
-      } catch (_e) {}
-    }
+      }
+    } catch (_e) {}
+    return noteItems;
+  }
+  async _showSourcesPanel() {
+    this._closeSourcesPanel();
+    const noteItems = await this._collectNoteSources(); // {blob, name, isPdf, ct}
     if (this.destroyed) return;
     // Canvas PDFs (appState.pdfBlobs keyed by docId)
     const pdfBlobs = (this.scene && this.scene.appState && this.scene.appState.pdfBlobs) || {};
