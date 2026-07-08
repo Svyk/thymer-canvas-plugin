@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.216.0';
+const PLEXUS_VERSION = '1.217.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -4471,6 +4471,7 @@ class CanvasView {
     // --- CARD-SPECIFIC TOP SECTION ---
     if (singleCard) {
       mkItem('Open record', '', () => this._openCard(singleCard));
+      mkItem('💬 Add comment', '', () => this._editCardBody(singleCard)); // append a comment to the record body (works on any record card, incl. PDF highlights) — the note side shows it too
       mkItem('Schedule / re-date', '', () => this._scheduleCard());
       mkItem('Backlinks', '', () => this._showBacklinks());
       mkItem('Set property on selection', '', () => this._bulkBrush(), !anyCard);
