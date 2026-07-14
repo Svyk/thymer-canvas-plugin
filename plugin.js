@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.217.0';
+const PLEXUS_VERSION = '1.217.1';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -12047,12 +12047,16 @@ class Plugin extends AppPlugin {
     // Deleting the citing image/chip in a note removes the cross-reference → drop the canvas ↗ badge too.
     const onLineDeleted = (e) => { try { const g = e && e.lineItemGuid; if (!g) return; const x = this._loadXref(); if (!x[g]) return; const drawing = x[g].drawing; delete x[g]; this._saveXref(x); for (const v of this._views) if (v.recordGuid === drawing) { try { v._buildXrefIndex(); v.dirty = true; } catch (_e) {} } } catch (_e) {} };
     try { this.events.on('lineitem.deleted', onLineDeleted); } catch (_e) {}
-    let raf = 0;
-    const tick = () => {
+    // Keep ordinary Thymer pages truly idle. This plugin is global, but its renderer is needed
+    // only while a Canvas view exists. The previous unconditional RAF forced the compositor to
+    // produce frames forever, even with `_views.size === 0`.
+    this._renderRaf = 0;
+    this._renderTick = () => {
+      this._renderRaf = 0;
       for (const v of this._views) { if (!v.host || !v.host.isConnected) { v.destroy(); this._views.delete(v); continue; } if (v.dirty) { try { v.render(); } catch (e) { console.error('[Plexus] render', e); } v.dirty = false; } }
-      raf = requestAnimationFrame(tick);
+      if (this._views.size) this._renderRaf = requestAnimationFrame(this._renderTick);
     };
-    raf = requestAnimationFrame(tick); reg.add(() => cancelAnimationFrame(raf));
+    reg.add(() => { if (this._renderRaf) cancelAnimationFrame(this._renderRaf); this._renderRaf = 0; this._renderTick = null; });
     const onScroll = () => { if (window.scrollX !== 0) window.scrollTo({ left: 0, top: window.scrollY, behavior: 'instant' }); };
     window.addEventListener('scroll', onScroll, { passive: true }); reg.add(() => window.removeEventListener('scroll', onScroll));
     // Note → canvas: intercept a click on a cited "↗ source/region of drawing" ref → open the drawing + flash.
@@ -12110,6 +12114,7 @@ class Plugin extends AppPlugin {
     try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */
   }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
+  _ensureRenderLoop() { if (!this._renderRaf && this._views && this._views.size && this._renderTick) this._renderRaf = requestAnimationFrame(this._renderTick); }
   _activeView() { const p = this.ui.getActivePanel(); const v = [...this._views].find((x) => x.panel === p); return v || [...this._views].pop() || this._domView() || null; }
   // DEBUG/VERIFY: find the LIVE rendered view via its DOM handle (wrap.__pxcView) — survives a hot-reload leak where this
   // plugin instance's _views is empty because the rendered view belongs to a previous instance. Prefer the active panel's.
@@ -12844,7 +12849,7 @@ class Plugin extends AppPlugin {
     let recordGuid = null, blank = false;
     while (this._pendingQueue.length) { const e = this._pendingQueue.shift(); if (Date.now() - e.at < 4000) { recordGuid = e.guid; blank = !!e.blank; break; } }
     if (!recordGuid) { panel.setTitle('Plexus'); const host = panel.getElement(); host.innerHTML = ''; host.classList.add('pxc-host'); const r = document.createElement('div'); r.className = 'pxc-root'; r.innerHTML = '<div class="pxc-empty">Plexus Canvas<br><small>run “Plexus: New Drawing”, or “Plexus: Flip to drawing” on a note</small></div>'; host.appendChild(r); return; }
-    const view = new CanvasView(this, panel, recordGuid, { blank }); this._views.add(view); view.mount();
+    const view = new CanvasView(this, panel, recordGuid, { blank }); this._views.add(view); view.mount(); this._ensureRenderLoop();
   }
   // Phase 9 E13: gallery — a grid of all drawings' banner thumbnails, click to open.
   async _openGallery() {
