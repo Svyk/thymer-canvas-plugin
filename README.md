@@ -46,7 +46,7 @@ In-canvas hotkeys: `V/R/O/D/A/P/T/E/C/F/L` tools · `Tab`/`Enter` mind-map · ar
 ## Design principles
 
 - **Built from scratch** — no heavy runtime deps in the hot path; the canvas + Brain engines are 100% native.
-- **Speed-first** — designed for a huge graph: the render loop **viewport-culls** (draws only visible elements), uses a dirty-flag, and **lazy-loads** content libraries (KaTeX/Mermaid/pdf.js/polybool) from CDN on-use, off the render loop.
+- **Speed-first** — designed for a huge graph: the render loop **viewport-culls** (draws only visible elements), uses a dirty-flag, and **lazy-loads** content libraries (KaTeX/Mermaid/pdf.js/polybool) from CDN on-use, off the render loop. Semantic edges share Smart Connections' bounded `thymer-semantic-v1` service; Canvas does not load a second embedding model.
 - **Secure AI** — API keys are encrypted at rest (PBKDF2 → AES-GCM, passphrase-locked), wiped from memory on `pagehide`; calls go direct client → provider.
 
 ## Deploy notes (for development)

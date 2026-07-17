@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.217.1';
+const PLEXUS_VERSION = '1.218.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1779,6 +1779,34 @@ function pxcClusterByThreshold(vecs, threshold) {
   const groups = new Map();
   for (let i = 0; i < n; i++) { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
   return Array.from(groups.values());
+}
+// Shared BGE similarities have a higher unrelated-pair floor than the retired MiniLM path.
+// These thresholds were intentionally reset for the shared model instead of copying 0.45/0.50.
+const PXC_BGE_RECORD_EDGE = 0.60;
+const PXC_BGE_PASSAGE_EDGE = 0.62;
+const PXC_BGE_MIXED_EDGE = 0.58;
+const PXC_SEMANTIC_RECORD_CAP = 16;
+const PXC_SEMANTIC_PASSAGE_CAP = 16;
+
+function pxcClustersFromEdges(elements, edges) {
+  const n = elements.length, parent = []; for (let i = 0; i < n; i++) parent[i] = i;
+  const byId = new Map(elements.map((el, index) => [el.id, index]));
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  for (const edge of (edges || [])) {
+    const a = byId.get(edge && edge.a), b = byId.get(edge && edge.b);
+    if (a == null || b == null || a === b) continue;
+    parent[find(a)] = find(b);
+  }
+  const groups = new Map();
+  for (let i = 0; i < n; i++) { const root = find(i); if (!groups.has(root)) groups.set(root, []); groups.get(root).push(i); }
+  return [...groups.values()];
+}
+
+function pxcLexicalSimilarity(a, b) {
+  const tokens = (value) => new Set(String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []);
+  const left = tokens(a), right = tokens(b); if (!left.size || !right.size) return 0;
+  let shared = 0; for (const token of left) if (right.has(token)) shared++;
+  return shared / Math.max(1, left.size + right.size - shared);
 }
 function drawText(ctx, el) {
   if (el.midBinding && (el.text || (el.runs && el.runs.length))) { // CONNECTION LABEL: a subtle pill behind the text so it reads over the connector line
@@ -9132,36 +9160,112 @@ class CanvasView {
     try { const top = await rec.getLineItems(); await walk(root, top, 1); } catch (_e) {}
     this.selected = new Set(created.map((e) => e.id)); this.dirty = true; this.scheduleSave(); return created.length;
   }
-  // Phase 10 E9: semantic ghost-edges — embed each text/card, draw faint links between similar ones.
+  // Semantic ghost-edges. Smart Connections owns the only model/index: record cards use
+  // similarTo(record), while arbitrary canvas text uses bounded embedPassages().
   async _semanticTextOf(el) {
     if (el.type === 'text') return el.text || '';
     if (el.type === 'query') return el.query || '';
     if (el.type === 'record' || el.type === 'board') { try { const r = await this.plugin.data.getRecord(el.recordGuid); return (r && r.getName && r.getName()) || ''; } catch (_e) { return ''; } }
     return '';
   }
+  async _semanticFallbackEdges(els) {
+    const bounded = els.slice(0, PXC_SEMANTIC_RECORD_CAP + PXC_SEMANTIC_PASSAGE_CAP);
+    const texts = [];
+    for (const el of bounded) texts.push(await this._semanticTextOf(el));
+    const edges = [];
+    for (let i = 0; i < bounded.length; i++) for (let j = i + 1; j < bounded.length; j++) {
+      const sim = pxcLexicalSimilarity(texts[i], texts[j]);
+      if (sim >= 0.28) edges.push({ a: bounded[i].id, b: bounded[j].id, sim, semanticSource: 'native-lexical-fallback' });
+    }
+    return edges;
+  }
+  async _sharedSemanticEdges(els) {
+    const api = this.plugin._semanticService();
+    if (!api || (typeof api.ready === 'function' && !api.ready())) return this._semanticFallbackEdges(els);
+    const records = els.filter((el) => (el.type === 'record' || el.type === 'board') && el.recordGuid).slice(0, PXC_SEMANTIC_RECORD_CAP);
+    const passages = els.filter((el) => el.type === 'text' || el.type === 'query').slice(0, PXC_SEMANTIC_PASSAGE_CAP);
+    const recordEls = new Map();
+    for (const el of records) { if (!recordEls.has(el.recordGuid)) recordEls.set(el.recordGuid, []); recordEls.get(el.recordGuid).push(el); }
+    const recordGuids = [...recordEls.keys()];
+    const edges = [], edgeKeys = new Set();
+    const add = (a, b, sim, semanticSource) => {
+      if (!a || !b || a.id === b.id || !Number.isFinite(sim)) return;
+      const key = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
+      if (edgeKeys.has(key)) return;
+      edgeKeys.add(key); edges.push({ a: a.id, b: b.id, sim, semanticSource });
+    };
+
+    // Record cards stay in record/passsage space and benefit from Smart's authored-edge reranker.
+    for (const sourceGuid of recordGuids) {
+      let result = null;
+      try {
+        result = await this.plugin._semanticSimilarTo(sourceGuid, {
+          limit: PXC_SEMANTIC_RECORD_CAP,
+          candidateRecordGuids: recordGuids,
+          unitKinds: ['record'],
+        });
+      } catch (_e) { continue; }
+      for (const hit of ((result && result.hits) || [])) {
+        const target = recordEls.get(hit.recordGuid); if (!target) continue;
+        const sim = Number(hit.cosine != null ? hit.cosine : hit.score);
+        if (sim < PXC_BGE_RECORD_EDGE) continue;
+        for (const a of (recordEls.get(sourceGuid) || [])) for (const b of target) add(a, b, sim, 'similarTo');
+      }
+    }
+
+    const passageInput = [];
+    for (const el of passages) {
+      const text = await this._semanticTextOf(el);
+      if (text) passageInput.push({ id: el.id, text: String(text).slice(0, 4000), el });
+    }
+    if (passageInput.length) {
+      let result = null;
+      try {
+        result = await this.plugin._semanticEmbedPassages(passageInput.map(({ id, text }) => ({ id, text })), {
+          limit: PXC_SEMANTIC_RECORD_CAP,
+          candidateRecordGuids: recordGuids,
+          unitKinds: ['record'],
+        });
+      } catch (_e) {}
+      const similarities = (result && result.similarities) || [];
+      for (let i = 0; i < passageInput.length; i++) for (let j = i + 1; j < passageInput.length; j++) {
+        const sim = Number(similarities[i] && similarities[i][j]);
+        if (sim >= PXC_BGE_PASSAGE_EDGE) add(passageInput[i].el, passageInput[j].el, sim, 'embedPassages');
+      }
+      const passageResults = (result && result.passages) || [];
+      for (const passage of passageResults) {
+        const source = passageInput.find((item) => item.id === passage.id); if (!source) continue;
+        for (const hit of (passage.hits || [])) {
+          const targets = recordEls.get(hit.recordGuid); if (!targets) continue;
+          const sim = Number(hit.cosine != null ? hit.cosine : hit.score);
+          if (sim >= PXC_BGE_MIXED_EDGE) for (const target of targets) add(source.el, target, sim, 'embedPassages→record');
+        }
+      }
+    }
+    return edges;
+  }
   async _computeSemantic() {
     const els = this.scene.elements.filter((e) => !e.isDeleted && (e.type === 'text' || e.type === 'record' || e.type === 'board' || e.type === 'query'));
     if (els.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: add 2+ cards / text elements first.', dismissible: true }); } catch (_e) {} return 0; }
-    try { this.plugin.ui.addToaster({ title: 'Plexus: embedding locally… (first run downloads a small model)', dismissible: true }); } catch (_e) {}
-    const vecs = [];
-    for (const el of els) { let v = null; try { v = await this.plugin._embed(await this._semanticTextOf(el)); } catch (_e) {} vecs.push(v); }
-    const cos = (a, b) => { if (!a || !b) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }; // vectors are normalised -> dot = cosine
-    const edges = [];
-    for (let i = 0; i < els.length; i++) for (let j = i + 1; j < els.length; j++) { const s = cos(vecs[i], vecs[j]); if (s > 0.45) edges.push({ a: els[i].id, b: els[j].id, sim: s }); }
+    try { this.plugin.ui.addToaster({ title: 'Plexus: finding connections with the shared semantic service…', dismissible: true }); } catch (_e) {}
+    let edges = [];
+    try { edges = await this._sharedSemanticEdges(els); } catch (_e) { edges = await this._semanticFallbackEdges(els); }
     this._ghostEdges = edges; this._showGhosts = true; this._tracedPath = null; this._spotlightId = null; this.dirty = true; // a rebuild changes topology → drop any stale connection trace / spotlight (their geometry assumed the old graph)
     try { this.plugin.ui.addToaster({ title: edges.length + ' semantic ghost-edge(s) drawn.', dismissible: true }); } catch (_e) {}
     return edges.length;
   }
   _toggleGhosts() { if (this._ghostEdges && this._ghostEdges.length) { this._showGhosts = !this._showGhosts; this.dirty = true; } else this._computeSemantic(); }
-  // AI AUTO-CLUSTER: embed each card/text on-device (nothing leaves the device), single-linkage cluster by meaning, then
+  // AI AUTO-CLUSTER: consume the same bounded shared-service edges, then
   // physically move each cluster into a tidy AI-named frame. Turns a brain-dump into themed groups in one command.
   async _aiAutoCluster() {
     const els = this.scene.elements.filter((e) => !e.isDeleted && (e.type === 'text' || e.type === 'record' || e.type === 'board' || e.type === 'query'));
     if (els.length < 3) { try { this.plugin.ui.addToaster({ title: 'Plexus: add 3+ cards / text elements first.', dismissible: true }); } catch (_e) {} return; }
-    try { this.plugin.ui.addToaster({ title: 'Plexus: embedding locally… (first run downloads a small model)', dismissible: true }); } catch (_e) {}
-    const texts = [], vecs = [];
-    for (const el of els) { const t = await this._semanticTextOf(el); texts.push(t || ''); let v = null; try { v = await this.plugin._embed(t || ''); } catch (_e) {} vecs.push(v); }
-    const clusters = pxcClusterByThreshold(vecs, 0.5);
+    try { this.plugin.ui.addToaster({ title: 'Plexus: clustering with the shared semantic service…', dismissible: true }); } catch (_e) {}
+    const texts = [];
+    for (const el of els) texts.push((await this._semanticTextOf(el)) || '');
+    let semanticEdges = [];
+    try { semanticEdges = await this._sharedSemanticEdges(els); } catch (_e) { semanticEdges = await this._semanticFallbackEdges(els); }
+    const clusters = pxcClustersFromEdges(els, semanticEdges);
     if (clusters.length < 2) { try { this.plugin.ui.addToaster({ title: 'Plexus: content too similar to cluster (one group).', dismissible: true }); } catch (_e) {} return; }
     if (clusters.every((cl) => cl.length === 1)) { try { this.plugin.ui.addToaster({ title: 'Plexus: no meaningful clusters — items too distinct (or embedding unavailable).', dismissible: true }); } catch (_e) {} return; }
     let names = clusters.map((_, i) => 'Cluster ' + (i + 1));
@@ -12188,17 +12292,20 @@ class Plugin extends AppPlugin {
     for (const k of cache.keys()) { const e = cache.get(k); if (e && e.url) { try { URL.revokeObjectURL(e.url); } catch (_e) {} } cache.delete(k); if (--over <= 0) break; } // front of the Map = LRU; revoke objectURLs so externalized-asset blobs don't leak
   }
   _purgeImageCache() { if (this._imgCache) { for (const e of this._imgCache.values()) { if (e && e.url) { try { URL.revokeObjectURL(e.url); } catch (_e) {} } } this._imgCache.clear(); } else this._imgCache = new Map(); for (const v of this._views) { v.dirty = true; v._dragLayerValid = false; } }
-  // Phase 10 E9: lazy local embedder (transformers.js from CDN, runs in-browser — nothing leaves the device).
-  _getEmbedder() {
-    if (this._embedderP) return this._embedderP;
-    this._embedderP = (async () => {
-      const t = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
-      try { t.env.allowLocalModels = false; } catch (_e) {}
-      return await t.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    })();
-    return this._embedderP;
+  _semanticService() {
+    const api = typeof window !== 'undefined' ? window.__thymerSemanticV1 : null;
+    return api && api.contract === 'thymer-semantic-v1' && api.version === 1 ? api : null;
   }
-  async _embed(text) { const pipe = await this._getEmbedder(); const out = await pipe(String(text || '').slice(0, 400), { pooling: 'mean', normalize: true }); return Array.from(out.data); }
+  async _semanticSimilarTo(recordGuid, options) {
+    const api = this._semanticService();
+    if (!api || typeof api.similarTo !== 'function' || (typeof api.ready === 'function' && !api.ready())) throw new Error('shared semantic service unavailable');
+    return api.similarTo(recordGuid, options || {});
+  }
+  async _semanticEmbedPassages(passages, options) {
+    const api = this._semanticService();
+    if (!api || typeof api.embedPassages !== 'function' || (typeof api.ready === 'function' && !api.ready())) throw new Error('shared semantic service unavailable');
+    return api.embedPassages(passages, options || {});
+  }
   // Phase 10 E14: re-date in place — set a record's `Scheduled` datetime via the canonical DateTime build.
   async _setSchedule(guid, iso) {
     try {
@@ -13362,15 +13469,12 @@ class Plugin extends AppPlugin {
         let wrongRejected = false; try { await pxDecryptSecret(blob, 'wrong'); } catch (_e) { wrongRejected = true; }
         return { hasCiphertext: !!blob.ct, isEncrypted: blob.ct !== 'sk-test-123', roundTrip: ok, wrongPassRejected: wrongRejected, plaintextKeyGone: !localStorage.getItem('plexus_llm_key'), ok: ok && wrongRejected };
       },
-      // Phase 10 E9 (view-independent): verify the local embedder loads + ranks similar text higher.
+      // Shared semantic-service status; Canvas never owns a model/vector index.
       embedTest: async () => {
         try {
-          const a = await this._embed('cat dog pet animal companion');
-          const b = await this._embed('puppy kitten pets furry friend');
-          const c = await this._embed('quarterly budget finance revenue spreadsheet');
-          const cos = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += x[i] * y[i]; return s; };
-          const petSim = cos(a, b), petFinSim = cos(a, c);
-          return { dim: a.length, modelLoaded: !!this._embedderP, petSim: +petSim.toFixed(3), petFinSim: +petFinSim.toFixed(3), ok: petSim > petFinSim };
+          const api = this._semanticService();
+          const snapshot = api && api.snapshot ? api.snapshot() : null;
+          return { contract: api && api.contract, ready: !!(api && api.ready && api.ready()), snapshot, ok: !!api };
         } catch (e) { return { error: String(e) }; }
       },
       // Phase 10 E6 (view-independent): the LLM-JSON -> elements parser (the live LLM call needs the user's key).
@@ -13935,7 +14039,7 @@ class Plugin extends AppPlugin {
         const n = await v._computeSemantic(); const edges = v._ghostEdges || [];
         const pair = (x, y) => edges.find((e) => (e.a === x.id && e.b === y.id) || (e.a === y.id && e.b === x.id));
         const pet = pair(a, b); const petFin = pair(a, c) || pair(b, c);
-        return { ghostCount: n, modelLoaded: !!v.plugin._embedderP, petLinked: !!pet, petSim: pet ? +pet.sim.toFixed(3) : null, petFinSim: petFin ? +petFin.sim.toFixed(3) : 0, ok: !!pet && (!petFin || pet.sim > petFin.sim) };
+        return { ghostCount: n, serviceReady: !!v.plugin._semanticService(), petLinked: !!pet, petSim: pet ? +pet.sim.toFixed(3) : null, petFinSim: petFin ? +petFin.sim.toFixed(3) : 0, ok: !!pet && (!petFin || pet.sim > petFin.sim) };
       },
       // transform: select first element, resize via the 'se' handle math, then rotate 30°, verify geometry.
       transform: () => {
