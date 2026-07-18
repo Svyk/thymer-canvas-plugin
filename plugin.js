@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.218.0';
+const PLEXUS_VERSION = '1.219.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -500,6 +500,8 @@ const PLEXUS_SETTINGS_DEFAULTS = {
   laserColor: '#ef4444', laserDecay: 1400, laserWidth: 4,
   // S11 AI
   aiProvider: 'openai', aiModel: '',
+  // S15 Reference pickers: [[…/((… aliases for @/@@ in canvas text and card-body editors (Part-2 RefX parity).
+  refPickers: true,
   // S9/S14 Advanced
   pdfScale: 2, cullMargin: 80, allowImageCache: true, imageCacheMax: 120,
   // SCALE Phase 1: insert-time transcode + externalized blob assets (see SCALE-ARCHITECTURE.md).
@@ -683,8 +685,16 @@ const PXC_HLCOLOR_HEX = { yellow: '#eab308', green: '#22c55e', blue: '#3b82f6', 
 // A2: detect an in-progress `@` (record) / `@@` (line) reference at the caret in a text element being edited.
 // Requires the `@` to sit at start-of-text or after whitespace (so "email@x" does NOT trigger). Returns
 // {mode:'record'|'line', query, triggerStart} (triggerStart = index of the first '@') or null.
-function pxcParseRefTrigger(text, caret) {
+function pxcParseRefTrigger(text, caret, allowBrackets) {
   const upto = String(text == null ? '' : text).slice(0, Math.max(0, caret | 0));
+  // [[…  and ((… are RefX-style aliases for @…/@@… (Part-2: ref pickers). Checked first (longer trigger).
+  if (allowBrackets !== false) {
+    const mb = upto.match(/(?:^|[^([])((\[\[|\(\()([^\]\)]{0,40}))$/);
+    if (mb) {
+      const trigger = mb[2], query = mb[3] || '';
+      return { mode: trigger === '((' ? 'line' : 'record', query, triggerStart: caret - trigger.length - query.length };
+    }
+  }
   const m = upto.match(/(?:^|\s)(@@?)([^\s@]{0,40})$/);
   if (!m) return null;
   return { mode: m[1] === '@@' ? 'line' : 'record', query: m[2], triggerStart: caret - m[1].length - m[2].length };
@@ -5503,7 +5513,8 @@ class CanvasView {
     document.head.appendChild(s);
   }
   _refDetect(ta, el) {
-    const trig = pxcParseRefTrigger(ta.value, ta.selectionStart);
+    const allowBrackets = !(this.plugin._settings && this.plugin._settings.refPickers === false); // kill-switch: settings.refPickers=false disables [[/(( aliases
+    const trig = pxcParseRefTrigger(ta.value, ta.selectionStart, allowBrackets);
     if (!trig) { this._closeRefPicker(); return; }
     const rp = this._refPick; rp.open = true; rp.mode = trig.mode; rp.query = trig.query; rp.triggerStart = trig.triggerStart;
     if (rp.timer) clearTimeout(rp.timer);
@@ -8372,12 +8383,13 @@ class CanvasView {
       else { for (const li of (res && res.lines || []).slice(0, 8)) { let rg = null; try { const pr = li.getRecord && li.getRecord(); rg = pr && pr.guid; } catch (_e) {} rws.push({ kind: 'line', lineGuid: li.guid, guid: rg, label: lineTextOf(li) || '(line)' }); } }
       pick.rows = rws; pick.idx = 0; renderPick(row);
     };
+    const _allowBrackets = !(this.plugin._settings && this.plugin._settings.refPickers === false); // kill-switch
     const detectRef = (row) => {
       let sel; try { sel = window.getSelection(); } catch (_e) { return; }
       if (!sel || !sel.rangeCount) { closePick(); return; }
       const rng = sel.getRangeAt(0), node = rng.endContainer;
       if (node.nodeType !== 3 || !row._txt.contains(node)) { closePick(); return; }
-      const before = (node.nodeValue || '').slice(0, rng.endOffset), trig = pxcParseRefTrigger(before, before.length);
+      const before = (node.nodeValue || '').slice(0, rng.endOffset), trig = pxcParseRefTrigger(before, before.length, _allowBrackets);
       if (!trig) { closePick(); return; }
       pick = pick || { seq: 0, idx: 0, rows: [] }; pick.mode = trig.mode; pick.range = { node, start: trig.triggerStart, end: rng.endOffset };
       if (!trig.query) { pick.rows = []; renderPick(row); } else runSearch(trig.query, trig.mode, row);
@@ -9149,9 +9161,11 @@ class CanvasView {
     const root = makeText(ox, oy, { fontSize: 20, stroke: '#7c5cff' }); root.text = (rec.getName && rec.getName()) || 'Outline'; measureText(root);
     this.scene.elements.push(root); created.push(root); st.row = 1;
     const connect = (a, b) => { const arr = makeLinear(0, 0, 'arrow', { stroke: '#9aa0a6', strokeWidth: 1.5 }); arr.elbowed = true; arr.endArrowhead = null; arr.points = [[a.x, a.y + a.height], [b.x, b.y + b.height / 2]]; linearBBox(arr); this.scene.elements.push(arr); created.push(arr); };
+    const seenLines = new Set(); // CYCLE-GUARD: journal line trees can be cyclic after native-backlinks release
     const walk = async (parentEl, items, depth) => {
       for (const li of (items || [])) {
         if (st.row > 60) return; // cap to keep the scene sane
+        const lg = li && li.guid; if (lg) { if (seenLines.has(lg)) continue; seenLines.add(lg); }
         const txt = lineTextOf(li); let node = parentEl;
         if (txt) { node = makeText(ox + depth * 44, oy + st.row * 54, { fontSize: 15, stroke: '#1e1e1e' }); node.text = txt; measureText(node); this.scene.elements.push(node); created.push(node); st.row++; connect(parentEl, node); }
         try { const ch = await li.getChildren(); if (ch && ch.length) await walk(node, ch, txt ? depth + 1 : depth); } catch (_e) {}

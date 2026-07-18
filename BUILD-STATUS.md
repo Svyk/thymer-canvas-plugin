@@ -1,5 +1,22 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.219.0 — Platform-change hardening + [[/(( ref pickers (2026-07-18)
+
+**Part 1 — native-backlinks platform-change audit:**
+- `_outlineToCanvas` `walk`: added `seenLines` Set keyed on `li.guid`; guards `getChildren()` recursion against cyclic line trees introduced by the native-backlinks release. The row cap (60) was insufficient — cycles can exhaust the stack before the cap fires.
+- `pxcOutlineRows` (`absDepth`/`inSubtree`): already had `seen` Sets with cycle guards; no change needed.
+- All `getLineItems()` call sites: return flat pre-order arrays (not recursive); no cycle risk.
+- `getBackReferences()`: already used at 5 call sites with `try/catch` + null guards; no change.
+- `getRecord(S-<journal>-guid)` now resolves: audit confirmed no branches relied on null-return for Journal guids. `_isDrawingRecord` correctly uses the `Plexus Drawings` collection membership test (not null-check), so Journal records are correctly treated as non-drawings. `_recFor` shows title + lines for Journal records — correct new behavior.
+- `@date = "iso"` bare search: not used in canvas (only `@task`, `@task @overdue` etc.); no change needed.
+
+**Part 2 — `[[`/`((` reference pickers:**
+- Canvas uses its own `<textarea>` (not a native Thymer line editor), so RefX's `[[`/`((` triggers do not fire natively in canvas text or card-body editors.
+- Extended `pxcParseRefTrigger(text, caret, allowBrackets)` to recognize `[[…` (record/page picker → same as `@`) and `((…` (line picker → same as `@@`) as trigger prefixes. Checked before the `@/@@ ` path (longer trigger wins). Both routes use the existing `_runRefSearch`/record-card picker path unchanged.
+- Kill-switch: `settings.refPickers = false` (localStorage `plexus_settings`) disables `[[`/`((` — `@`/`@@` remain unaffected. Default `true`.
+- Wired into both editing surfaces: `_refDetect` (canvas text textarea) and `detectRef` inside `_editCardBody` (card-body contentEditable rows).
+- No RefX hook needed — the canvas already has full search/picker infrastructure via `searchByQuery`.
+
 ## ✅ v1.204.0 — Tight TABLE boxes via clustering (Phase 3) (2026-06-28)
 Extended the text-layer clustering geometry from text/list to **table/equation** blocks (gate `kind !== 'figure'`). A
 born-digital table is one LLM `table` block (CSV/markdown); the containment-union of its cell clusters is the tight table box
