@@ -1,5 +1,12 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.220.0 — Cross-plugin PDF jumps + trash-aware highlight sync (2026-07-24)
+
+- Published `window.__plexusCanvas.pdf.openFingerprints()` and async `.jumpTo({fingerprint,page,frac,hid,guid})`. The seam scans only live, non-destroyed Canvas views, resolves the same fingerprint→docId mapping used by PDF-highlight loading, and reuses `_flashAnchor` for page/region camera flight. Missing PDFs and teardown races return `false`; the seam is cleared with `window.__plexusCanvas` on unload.
+- Added **Open in PDF panel** actions to parsed-block popups, region-highlight menus, and PDF-outline highlight rows. They call the optional `window.__pdfhl.jumpTo` sibling seam and defensively fall back to the existing Canvas camera jump with a toaster until the highlighter side ships.
+- `record.updated` events with `trashed` or an unavailable record now force the existing 400 ms PDF-overlay refresh, while preserving the `_pdfBlocksFromCluster` guard. Trashed record-backed highlights therefore disappear without a reload.
+- Normalized new `Anchor Data` writes to schema `v:2`: figures use `kind:'figure'`, regions `kind:'region'`, and parsed blocks `kind:'block'`. Readers remain tolerant of legacy records with no `v` and infer missing region/block kinds only from their existing `rh*` / `parse:*` Highlight Id conventions. The wire frac remains `{rx,ry,rw,rh}`.
+
 ## ✅ v1.219.0 — Platform-change hardening + [[/(( ref pickers (2026-07-18)
 
 **Part 1 — native-backlinks platform-change audit:**
