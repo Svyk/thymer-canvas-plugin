@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.220.1';
+const PLEXUS_VERSION = '1.221.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1592,6 +1592,21 @@ function pxcSynthesisLayout(syn, opts) {
 // CONNECTED MARGINS (Azlen "parallel pages, visibly connected") — PURE geometry. ─────────────────────────────────────
 // pxcMarginBandFrac: the vertical band for the k-th of n text highlights on a page (no per-glyph frac) — disjoint, ordered, in [0,1].
 function pxcMarginBandFrac(k, n) { const N = Math.max(1, n || 1); return (Math.min(k, N - 1) + 0.5) / N * 0.86 + 0.07; }
+// Prefer any persisted real frac, regardless of legacy/current Type or Anchor Data version. Exact text/v1 records still
+// reserve their former synthetic-band slot so neighboring frac-less records keep the same index and denominator as before.
+function pxcMarginAnchorPlan(highlights, pageNums) {
+  const hasPage = (p) => !!(p && pageNums && typeof pageNums.has === 'function' && pageNums.has(p));
+  const hadBandSlot = (h) => !!(h && (!h.frac || h.type !== 'area'));
+  const bandCount = new Map();
+  for (const h of (highlights || [])) if (hadBandSlot(h) && hasPage(h.page)) bandCount.set(h.page, (bandCount.get(h.page) || 0) + 1);
+  const bandIdx = new Map();
+  return (highlights || []).map((h) => {
+    if (!h || !hasPage(h.page)) return { kind: 'none', frac: null };
+    const k = bandIdx.get(h.page) || 0; if (hadBandSlot(h)) bandIdx.set(h.page, k + 1);
+    if (h.frac) return { kind: 'area', frac: h.frac };
+    return { kind: 'band', frac: { rx: 0.06, ry: pxcMarginBandFrac(k, bandCount.get(h.page) || 1), rw: 0.88, rh: 0.05 } };
+  });
+}
 // pxcMarginStack: anchor-aligned 1-D collision sweep. idealYs = desired card-top Y per card (index = anchor order). Returns a
 // resolved Y per card (same index order): sort by ideal, walk top→down, push any overlapping card to prevBottom+GAP, clamp >= minY.
 // Preserves anchor order, guarantees no [y,y+CH] overlap, minimizes downward displacement (greedy single pass).
@@ -6633,10 +6648,11 @@ class CanvasView {
     try { this.plugin.ui.addToaster({ title, dismissible: true }); } catch (_e) {}
     return shownHere && !this.destroyed;
   }
-  // C-1: jump to a highlight — to its on-canvas figure if it's still there (Scene Element Id), else fly to its page.
+  // C-1: jump to a highlight — to its on-canvas figure if it's still there (Scene Element Id), else its exact persisted
+  // page region when available (text and area alike), else the legacy whole-page fallback.
   _jumpToPdfHighlight(h) {
     if (h && h.sid) { const el = (this.scene.elements || []).find((e) => e && e.id === h.sid && !e.isDeleted); if (el) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return true; } }
-    const docId = this._activePdfDocId(); if (docId && h && h.page && this._pdfPagesOf(docId).some((p) => p.pdf && p.pdf.page === h.page)) { this._jumpToPdfPage(docId, h.page); return true; }
+    const docId = this._activePdfDocId(); if (docId && h && h.page) { const pageEl = this._pdfPagesOf(docId).find((p) => p.pdf && p.pdf.page === h.page); if (pageEl) { if (h.frac) { try { this._flashAnchor({ el: pageEl.id, inImage: true, frac: h.frac }); } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} this._jumpToPdfPage(docId, h.page); } } else this._jumpToPdfPage(docId, h.page); return true; } }
     return false;
   }
   // PLEXUS #20: "Explode PDF highlights onto the canvas" — query this PDF's highlights (cross-surface, by fingerprint), group
@@ -6696,7 +6712,7 @@ class CanvasView {
     const items = [], seenGuid = new Set(), seenSid = new Set();
     for (const e of (this.scene.elements || [])) { if (e && e.type === 'image' && e.pdfFigure && e.pdfFigure.docId === docId && !e.isDeleted) { items.push({ guid: e.pdfFigureGuid || null, sid: e.id, kind: 'figure', page: (e.pdfFigure.page || 0), code: '', color: '', title: 'fig p' + (e.pdfFigure.page || '?'), elId: e.id }); seenSid.add(e.id); } } // extracted figures (dedup highlights by sid)
     for (const r of (this._pdfHlRegions || [])) { if (r.deleted || r.docId !== docId) continue; if (r.guid && seenGuid.has(r.guid)) continue; if (r.guid) seenGuid.add(r.guid); items.push({ guid: r.guid || null, sid: null, kind: 'region', page: (r.page || 0), code: '', color: (r.color || ''), title: 'p' + (r.page || '?') + ' region', frac: r.frac, regDoc: docId }); } // regions BEFORE highlights so a region wins the guid-dedup over its area-mirror record → keeps its precise frac jump (review LOW)
-    if (fp) { const hls = await this._loadPdfHighlights(fp); if (this.destroyed) return; for (const h of hls) { if (h.sid && seenSid.has(h.sid)) continue; if (h.guid && seenGuid.has(h.guid)) continue; if (h.guid) seenGuid.add(h.guid); items.push({ guid: h.guid, sid: h.sid || null, kind: (h.type === 'area' ? 'area' : 'text'), page: (h.page || 0), code: (h.code || ''), color: (h.color || ''), title: h.title || 'highlight', elId: null }); } }
+    if (fp) { const hls = await this._loadPdfHighlights(fp); if (this.destroyed) return; for (const h of hls) { if (h.sid && seenSid.has(h.sid)) continue; if (h.guid && seenGuid.has(h.guid)) continue; if (h.guid) seenGuid.add(h.guid); items.push({ guid: h.guid, sid: h.sid || null, kind: (h.type === 'area' ? 'area' : 'text'), page: (h.page || 0), code: (h.code || ''), color: (h.color || ''), title: h.title || 'highlight', elId: null, frac: h.frac || null, regDoc: docId }); } }
     if (this.destroyed) return;
     if (!items.length) { try { this.plugin.ui.addToaster({ title: 'Plexus: nothing extracted from this PDF yet — snip a figure or highlight first.', dismissible: true }); } catch (_e) {} return; }
     const CAP = 200, capped = items.length > CAP, use = capped ? items.slice(0, CAP) : items;
@@ -6727,8 +6743,8 @@ class CanvasView {
   _lightboxJump(it) {
     if (!it) return;
     if (it.kind === 'figure' && it.elId) { const el = this._byId(it.elId); if (el && !el.isDeleted) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return; } }
-    if (it.kind === 'region' && it.frac && it.regDoc) { const pageEl = this._pdfPagesOf(it.regDoc).find((p) => p.pdf && p.pdf.page === it.page); if (pageEl) { const rw = this._imgRegionWorld(pageEl, it.frac); if (rw && isFinite(rw.x)) { try { this._flashAnchor({ region: { x: rw.x, y: rw.y, w: rw.w, h: rw.h } }); } catch (_e) {} return; } } }
-    this._jumpToPdfHighlight({ sid: it.sid, page: it.page });
+    if (it.frac && it.regDoc) { const pageEl = this._pdfPagesOf(it.regDoc).find((p) => p.pdf && p.pdf.page === it.page); if (pageEl) { const rw = this._imgRegionWorld(pageEl, it.frac); if (rw && isFinite(rw.x)) { try { this._flashAnchor({ el: pageEl.id, inImage: true, frac: it.frac }); } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} } return; } } }
+    this._jumpToPdfHighlight({ sid: it.sid, page: it.page, frac: it.frac });
   }
   // Shared (#20/#21): lay out `groups` ([{section, items:[hl]}]) as a section-columned mind-map of LIVE record-cards + a centre
   // node + PDF→section edges. Additive + undoable + grouped (one hlexp groupId); a re-run lands BESIDE any existing explosion.
@@ -6832,11 +6848,11 @@ class CanvasView {
   }
   // CONNECTED MARGINS (#26 — Azlen "parallel pages, visibly connected"): the PDF stays in place on the left; every highlight
   // becomes an ANCHOR-ALIGNED record-card in a parallel margin column on the right; a translucent TAPERED RIBBON connects each
-  // card to its TRUE on-page anchor (area → its frac box; text → a page band). The ribbons are a NON-ELEMENT render layer
+  // card to its TRUE on-page anchor (any stored frac → its exact box; frac-less legacy highlight → a page band). The ribbons are a NON-ELEMENT render layer
   // (mirrors the ghost-edge layer) so they NEVER touch the save schema/undo/hit-test and re-route LIVE when a card moves; the
   // cards + frame ARE real undoable elements. Re-run refreshes in place (prior margin elements are marked deleted = one undo).
   _readHlAnchor(r) { const raw = this._propText(r, 'Anchor Data'); if (!raw) return null; let o = null; try { o = JSON.parse(raw); } catch (_e) { return null; } return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null; }
-  // Resolve a ribbon's anchor descriptor to a LIVE world rect each draw (area/band → _imgRegionWorld on the page image). null
+  // Resolve a ribbon's anchor descriptor to a LIVE world rect each draw (real-frac/band → _imgRegionWorld on the page image). null
   // when the page element is gone (orphan) → the ribbon is skipped, the card stays. Recomputed per frame so it tracks pan/zoom.
   _marginAnchorRect(anchor) {
     if (!anchor || anchor.kind === 'none') return null;
@@ -6887,7 +6903,6 @@ class CanvasView {
       if (!r || !r.guid) continue;
       const h = this._readHlRecord(r); if (!h) continue;
       if (h.sid && seen.has(h.sid)) continue; if (h.sid) seen.add(h.sid);
-      h.anchor = this._readHlAnchor(r);
       h.isActive = fp ? (h.fingerprint === fp) : false;
       if (!fp && !h.isActive) { let dr = []; try { dr = pxcRelValues(r.prop('Drawing')); } catch (_e) {} if (dr.includes(this.recordGuid)) h.isActive = true; }
       if (across) { try { h.sourceNote = pxcRelValues(r.prop('Source Note')); } catch (_e) { h.sourceNote = []; } try { h.replyTo = pxcRelValues(r.prop('Reply To')); } catch (_e) { h.replyTo = []; } }
@@ -6903,12 +6918,10 @@ class CanvasView {
     let pageLeft = Infinity, pageRight = -Infinity, pageTop = Infinity, pageBottom = -Infinity;
     for (const p of (extentPages.length ? extentPages : pages)) { pageLeft = Math.min(pageLeft, p.x, p.x + p.width); pageRight = Math.max(pageRight, p.x, p.x + p.width); pageTop = Math.min(pageTop, p.y, p.y + p.height); pageBottom = Math.max(pageBottom, p.y, p.y + p.height); }
     const CH = readerPage ? 150 : 70; // F2: Reader cards start tall enough to show the Highlight Text + first comments as an editable transclusion (F1 auto-grow extends them; dbl-click the body to add a comment)
-    const textCount = new Map(); for (const h of use) { const isArea = h.type === 'area' && h.anchor && h.anchor.frac; if (!isArea && h.page && pageByNum.has(h.page)) textCount.set(h.page, (textCount.get(h.page) || 0) + 1); } // review LOW: count ONLY on-canvas pages so the band denominator matches textIdx (off-canvas highlights mustn't compress the bands)
-    const textIdx = new Map(), descriptors = [];
-    for (const h of use) {
-      let desc = null, rect = null; const pageEl = h.page ? pageByNum.get(h.page) : null;
-      if (h.type === 'area' && h.anchor && h.anchor.frac && pageEl) { desc = { kind: 'area', elId: pageEl.id, frac: h.anchor.frac }; rect = this._imgRegionWorld(pageEl, h.anchor.frac); }
-      else if (pageEl) { const k = (textIdx.get(h.page) || 0); textIdx.set(h.page, k + 1); const frac = { rx: 0.06, ry: pxcMarginBandFrac(k, textCount.get(h.page) || 1), rw: 0.88, rh: 0.05 }; desc = { kind: 'band', elId: pageEl.id, frac }; rect = this._imgRegionWorld(pageEl, frac); }
+    const anchorPlan = pxcMarginAnchorPlan(use, pageByNum), descriptors = [];
+    for (let i = 0; i < use.length; i++) {
+      const h = use[i], planned = anchorPlan[i]; let desc = null, rect = null; const pageEl = h.page ? pageByNum.get(h.page) : null;
+      if (planned.kind === 'area' || planned.kind === 'band') { desc = { kind: planned.kind, elId: pageEl.id, frac: planned.frac }; rect = this._imgRegionWorld(pageEl, planned.frac); }
       else desc = { kind: 'none' }; // page not on canvas → orphan (no ribbon)
       const hue = PXC_CODE_COLOR[h.code] || PXC_HLCOLOR_HEX[h.color] || '#7c5cff';
       descriptors.push({ guid: h.guid, anchor: desc, hue, rect, page: h.page || 0, ay: rect ? rect.y + rect.h / 2 : pageBottom + 1 });

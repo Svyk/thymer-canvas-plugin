@@ -1,5 +1,11 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.221.0 — Real text-highlight geometry in Canvas PDF views (2026-07-24)
+
+- Connected Margins now prefers any persisted `Anchor Data.frac` regardless of highlight `Type`, `kind`, or schema version, routing text highlights through the same rotation-aware image-region geometry as area highlights.
+- Frac-less legacy highlights retain synthetic page bands. Newly exact text/v1 records reserve their former virtual band slots, preserving the existing index and denominator—and therefore the exact position—of every remaining fallback band.
+- PDF-outline Canvas jumps and evidence-lightbox cards now retain and use stored text/area fracs for precise source flight, with the existing whole-page fallback when geometry is absent.
+
 ## ✅ v1.220.1 — Cross-plugin PDF seam identity fixes (2026-07-24)
 
 - Fixed the substantive seam defects from the v1.220.0 review: **M1** scopes `hid`/`guid` resolution to the fingerprint-resolved PDF document, **M2** gives new region highlights collision-resistant wall-clock-plus-session IDs, and **M3** returns `false` instead of jumping to page 1 when an explicitly requested page is absent.

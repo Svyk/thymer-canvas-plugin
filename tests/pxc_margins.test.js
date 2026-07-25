@@ -1,9 +1,22 @@
 // #26 Connected Margins (Azlen "parallel pages, visibly connected"). Pure-logic tests of the geometry: pxcMarginBandFrac
-// (text-highlight page bands), pxcMarginStack (anchor-aligned collision sweep), pxcMarginLayout (primary column),
+// + pxcMarginAnchorPlan (real-frac preference and legacy page bands), pxcMarginStack (anchor-aligned collision sweep), pxcMarginLayout (primary column),
 // pxcRibbonQuads (tapered band samples), pxcPointInRibbon (hover hit-test). Verbatim replicas of the plugin fns.
-let fail = 0; const ok = (c, m) => { if (!c) { console.error('FAIL:', m); fail++; } };
+let fail = 0, assertions = 0; const ok = (c, m) => { assertions++; if (!c) { console.error('FAIL:', m); fail++; } };
 
 function pxcMarginBandFrac(k, n) { const N = Math.max(1, n || 1); return (Math.min(k, N - 1) + 0.5) / N * 0.86 + 0.07; }
+function pxcMarginAnchorPlan(highlights, pageNums) {
+  const hasPage = (p) => !!(p && pageNums && typeof pageNums.has === 'function' && pageNums.has(p));
+  const hadBandSlot = (h) => !!(h && (!h.frac || h.type !== 'area'));
+  const bandCount = new Map();
+  for (const h of (highlights || [])) if (hadBandSlot(h) && hasPage(h.page)) bandCount.set(h.page, (bandCount.get(h.page) || 0) + 1);
+  const bandIdx = new Map();
+  return (highlights || []).map((h) => {
+    if (!h || !hasPage(h.page)) return { kind: 'none', frac: null };
+    const k = bandIdx.get(h.page) || 0; if (hadBandSlot(h)) bandIdx.set(h.page, k + 1);
+    if (h.frac) return { kind: 'area', frac: h.frac };
+    return { kind: 'band', frac: { rx: 0.06, ry: pxcMarginBandFrac(k, bandCount.get(h.page) || 1), rw: 0.88, rh: 0.05 } };
+  });
+}
 function pxcMarginStack(idealYs, CH, GAP, minY) {
   const order = idealYs.map((y, i) => ({ i, y: Math.max(minY, y) })).sort((a, b) => (a.y - b.y) || (a.i - b.i));
   let prevBottom = -Infinity;
@@ -76,6 +89,23 @@ const approx = (a, b, e) => Math.abs(a - b) <= (e || 1e-6);
   ok(pxcMarginBandFrac(0, 1) > 0 && pxcMarginBandFrac(0, 1) < 1, 'single band is mid-ish, in range');
   ok(pxcMarginBandFrac(9, 3) === pxcMarginBandFrac(2, 3), 'k clamps to n-1'); }
 
+// ── pxcMarginAnchorPlan ──
+{ const textFrac = { rx: 0.2, ry: 0.31, rw: 0.4, rh: 0.04 }, v1Frac = { rx: 0.1, ry: 0.7, rw: 0.5, rh: 0.05 }, areaFrac = { rx: 0.4, ry: 0.4, rw: 0.2, rh: 0.2 };
+  const plan = pxcMarginAnchorPlan([
+    { page: 1, type: 'text', frac: null },
+    { page: 1, type: 'text', frac: textFrac },
+    { page: 1, frac: v1Frac }, // v1-compatible: no Type/kind/version
+    { page: 1, type: 'area', frac: null },
+    { page: 1, type: 'area', frac: areaFrac },
+    { page: 2, type: 'text', frac: null }, // page not on canvas
+  ], new Set([1]));
+  ok(plan[1].kind === 'area' && plan[1].frac === textFrac, 'text highlight with frac uses the exact area path');
+  ok(plan[2].kind === 'area' && plan[2].frac === v1Frac, 'legacy record with frac needs no Type/kind/version');
+  ok(plan[4].kind === 'area' && plan[4].frac === areaFrac, 'area highlight keeps the same exact path');
+  ok(plan[0].kind === 'band' && approx(plan[0].frac.ry, pxcMarginBandFrac(0, 4)), 'first frac-less highlight keeps its former band 0 of 4');
+  ok(plan[3].kind === 'band' && approx(plan[3].frac.ry, pxcMarginBandFrac(3, 4)), 'exact text/v1 records preserve legacy band indices and denominator');
+  ok(plan[5].kind === 'none', 'off-canvas highlight remains an orphan and does not affect bands'); }
+
 // ── pxcMarginStack ──
 { // three cards, ideals 0/10/200, CH=70 GAP=14 → first stays 0, second pushed to 84, third stays 200
   const ys = pxcMarginStack([0, 10, 200], 70, 14, -1000);
@@ -141,4 +171,4 @@ const approx = (a, b, e) => Math.abs(a - b) <= (e || 1e-6);
   ok(pxcMarginExpand([{ aGuid: 'a', bGuid: 'b' }], {}).columns.length === 0, 'edge missing bDoc → ignored'); }
 
 if (fail) { console.error('\npxc_margins FAILED:', fail); process.exit(1); }
-console.log('pxc_margins ok (' + (4 + 4 + 2 + 5 + 3 + 4 + 2 + 2 + 2) + ' assertions)');
+console.log('pxc_margins ok (' + assertions + ' assertions)');
