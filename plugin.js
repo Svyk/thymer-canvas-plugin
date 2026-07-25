@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.221.0';
+const PLEXUS_VERSION = '1.222.0';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -1590,6 +1590,15 @@ function pxcSynthesisLayout(syn, opts) {
   return { synthesis, themes, cards, width: x1 + cardW, height: totalH };
 }
 // CONNECTED MARGINS (Azlen "parallel pages, visibly connected") — PURE geometry. ─────────────────────────────────────
+// Shared PDF-highlight READ normalizer: Canvas wire fracs are {rx,ry,rw,rh}, while legacy highlighter records used
+// {x,y,w,h}. Choose the wire convention when both are present; invalid/zero-area geometry becomes an explicit null fallback.
+function pxcNormFrac(frac) {
+  if (!frac || typeof frac !== 'object' || Array.isArray(frac)) return null;
+  const wire = Object.prototype.hasOwnProperty.call(frac, 'rx');
+  const v = wire ? [frac.rx, frac.ry, frac.rw, frac.rh] : [frac.x, frac.y, frac.w, frac.h];
+  if (!v.every(Number.isFinite) || !(v[2] > 0) || !(v[3] > 0)) return null;
+  return { rx: v[0], ry: v[1], rw: v[2], rh: v[3] };
+}
 // pxcMarginBandFrac: the vertical band for the k-th of n text highlights on a page (no per-glyph frac) — disjoint, ordered, in [0,1].
 function pxcMarginBandFrac(k, n) { const N = Math.max(1, n || 1); return (Math.min(k, N - 1) + 0.5) / N * 0.86 + 0.07; }
 // Prefer any persisted real frac, regardless of legacy/current Type or Anchor Data version. Exact text/v1 records still
@@ -6851,7 +6860,7 @@ class CanvasView {
   // card to its TRUE on-page anchor (any stored frac → its exact box; frac-less legacy highlight → a page band). The ribbons are a NON-ELEMENT render layer
   // (mirrors the ghost-edge layer) so they NEVER touch the save schema/undo/hit-test and re-route LIVE when a card moves; the
   // cards + frame ARE real undoable elements. Re-run refreshes in place (prior margin elements are marked deleted = one undo).
-  _readHlAnchor(r) { const raw = this._propText(r, 'Anchor Data'); if (!raw) return null; let o = null; try { o = JSON.parse(raw); } catch (_e) { return null; } return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null; }
+  _readHlAnchor(r) { const raw = this._propText(r, 'Anchor Data'); if (!raw) return null; let o = null; try { o = JSON.parse(raw); } catch (_e) { return null; } if (!o || typeof o !== 'object' || Array.isArray(o)) return null; if (Object.prototype.hasOwnProperty.call(o, 'frac')) o.frac = pxcNormFrac(o.frac); return o; }
   // Resolve a ribbon's anchor descriptor to a LIVE world rect each draw (real-frac/band → _imgRegionWorld on the page image). null
   // when the page element is gone (orphan) → the ribbon is skipped, the card stays. Recomputed per frame so it tracks pan/zoom.
   _marginAnchorRect(anchor) {

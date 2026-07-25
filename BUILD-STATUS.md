@@ -1,5 +1,11 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.222.0 — Legacy PDF frac read compatibility (2026-07-24)
+
+- Added one read-boundary normalizer for shared `PDF Highlights` `Anchor Data.frac`: Canvas-native `{rx,ry,rw,rh}` and historical highlighter `{x,y,w,h}` records now both resolve to the Canvas wire shape, with wire keys taking precedence when both conventions are present.
+- Invalid, non-finite, and zero/negative-extent fracs become `null`, preserving existing whole-page/band fallbacks instead of sending `NaN` geometry into highlight overlays, connected margins, lightboxes, or source jumps.
+- Canvas writers remain unchanged and continue emitting `{rx,ry,rw,rh}`.
+
 ## ✅ v1.221.0 — Real text-highlight geometry in Canvas PDF views (2026-07-24)
 
 - Connected Margins now prefers any persisted `Anchor Data.frac` regardless of highlight `Type`, `kind`, or schema version, routing text highlights through the same rotation-aware image-region geometry as area highlights.
