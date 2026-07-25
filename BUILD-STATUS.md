@@ -1,5 +1,11 @@
 # Plexus Canvas — build status (resumable)
 
+## ✅ v1.220.1 — Cross-plugin PDF seam identity fixes (2026-07-24)
+
+- Fixed the substantive seam defects from the v1.220.0 review: **M1** scopes `hid`/`guid` resolution to the fingerprint-resolved PDF document, **M2** gives new region highlights collision-resistant wall-clock-plus-session IDs, and **M3** returns `false` instead of jumping to page 1 when an explicitly requested page is absent.
+- Scoped trashed-record refreshes to a resolved `PDF Highlights` collection, hid sibling-only PDF actions until `window.__pdfhl.jumpTo` exists at render time, and made fallback toasters distinguish sibling decline, successful Canvas fallback, and no available source.
+- Removed the dead legacy `rh*` kind inference. The forensic `window.__PXC_LAST_ERROR` value is now available through `window.__plexusCanvas.test.lastError()` and cleared during teardown.
+
 ## ✅ v1.220.0 — Cross-plugin PDF jumps + trash-aware highlight sync (2026-07-24)
 
 - Published `window.__plexusCanvas.pdf.openFingerprints()` and async `.jumpTo({fingerprint,page,frac,hid,guid})`. The seam scans only live, non-destroyed Canvas views, resolves the same fingerprint→docId mapping used by PDF-highlight loading, and reuses `_flashAnchor` for page/region camera flight. Missing PDFs and teardown races return `false`; the seam is cleared with `window.__plexusCanvas` on unload.

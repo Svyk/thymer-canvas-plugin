@@ -10,7 +10,7 @@
  * Rules: 45 · 53 · 21/27 · 1 · 6 · 18/48 · 2 · 28 · icons validated.
  */
 
-const PLEXUS_VERSION = '1.220.0';
+const PLEXUS_VERSION = '1.220.1';
 
 /* PBC-INLINE-START — generated from pdf-block-cluster.js; do not edit between markers, run scripts/inline-pbc.py */
 var PBC = (function(){
@@ -810,6 +810,7 @@ async function pxDecryptSecret(blob, passphrase) {
 // chrome-devtools verification path (and this build loop) drives those hooks. Flip to FALSE for any public/shared release
 // to strip the entire debug surface — no other change needed; this one flag controls it.
 const TEST_HOOKS = true;
+let PXC_REGION_HID_SEQ = 0; // module-session monotonic suffix; Date.now supplies reload-stable uniqueness
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -3050,7 +3051,7 @@ class CanvasView {
     // Sources discoverability: after the scene loads, if the host note has PDF/image attachments and NONE are on the
     // canvas yet (fresh flip-to-drawing), auto-open the Sources panel so the user sees their PDF is one drag away.
     try { Promise.resolve(_ldp).then(async () => { if (this.destroyed || this._srcPanelEl) return; const els = (this.scene && this.scene.elements) || []; if (els.some((el) => el && el.type === 'image' && el.pdf && !el.isDeleted)) return; const pb = (this.scene && this.scene.appState && this.scene.appState.pdfBlobs) || {}; if (Object.keys(pb).length) return; const items = await this._collectNoteSources(); if (this.destroyed || this._srcPanelEl || !items.length) return; try { await this._showSourcesPanel(); } catch (_e) {} }).catch(() => {}); } catch (_e) {}
-    try { this._pdfHlRefreshT = null; this._pdfHlSubIds = []; (async () => { let hlColGuid = null; try { const _c = await this.plugin._pdfHlCollection(); if (_c && _c.getGuid) hlColGuid = _c.getGuid(); } catch (_e) {} if (this.destroyed) return; const onHlChange = async (e) => { if (this.destroyed) return; try { const g = e && e.recordGuid; if (!g) return; let fp = '', dr = [], rec = null; try { rec = e.getRecord ? e.getRecord() : null; } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} } if (rec) { try { fp = this._propText(rec, 'PDF Fingerprint'); } catch (_e) {} try { dr = pxcRelValues(rec.prop('Drawing')); } catch (_e) {} } if (this.destroyed) return; const canvasFps = new Set(); for (const el of ((this.scene && this.scene.elements) || [])) { if (el && el.type === 'image' && el.pdf && !el.isDeleted && el.pdf.fingerprint) canvasFps.add(el.pdf.fingerprint); } const removed = !rec || !!(e && e.trashed); const relevant = (fp && canvasFps.has(fp)) || (this.recordGuid && dr.includes(this.recordGuid)) || (removed && canvasFps.size > 0); if (!relevant) return; if (this._pdfHlRefreshT) clearTimeout(this._pdfHlRefreshT); this._pdfHlRefreshT = setTimeout(async () => { this._pdfHlRefreshT = null; if (this.destroyed) return; try { await this._loadPdfRegionHighlights(); } catch (_e) {} if (this.destroyed) return; if (!this._pdfBlocksFromCluster) { try { await this._loadPdfParsedBlocks(); } catch (_e) {} } if (this.destroyed) return; if (this._pdfOutlineEl) { try { await this._showPdfOutline(); } catch (_e) {} } if (this.destroyed) return; if (this._srcPanelEl) { try { await this._showSourcesPanel(); } catch (_e) {} } if (!this.destroyed) this.dirty = true; }, 400); } catch (_e) {} }; const evOpts = hlColGuid ? { collection: hlColGuid } : { collection: '*' }; const ids = []; for (const ev of ['record.created', 'record.updated']) { try { const id = this.plugin.events.on(ev, onHlChange, evOpts); if (id != null) ids.push(id); } catch (_e) {} } this._pdfHlSubIds = ids; })().catch(() => {}); } catch (_e) {} // Wave B: live-sync PDF Highlight records → refresh overlays + panels per-view; trashed/missing records force one debounced rebuild
+    try { this._pdfHlRefreshT = null; this._pdfHlSubIds = []; (async () => { let hlColGuid = null; try { const _c = await this.plugin._pdfHlCollection(); if (_c && _c.getGuid) hlColGuid = _c.getGuid(); } catch (_e) {} if (this.destroyed) return; const onHlChange = async (e) => { if (this.destroyed) return; try { const g = e && e.recordGuid; if (!g) return; let fp = '', dr = [], rec = null; try { rec = e.getRecord ? e.getRecord() : null; } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} } if (rec) { try { fp = this._propText(rec, 'PDF Fingerprint'); } catch (_e) {} try { dr = pxcRelValues(rec.prop('Drawing')); } catch (_e) {} } if (this.destroyed) return; const canvasFps = new Set(); for (const el of ((this.scene && this.scene.elements) || [])) { if (el && el.type === 'image' && el.pdf && !el.isDeleted && el.pdf.fingerprint) canvasFps.add(el.pdf.fingerprint); } const removed = !rec || !!(e && e.trashed); const relevant = (fp && canvasFps.has(fp)) || (this.recordGuid && dr.includes(this.recordGuid)) || (removed && !!hlColGuid && canvasFps.size > 0); if (!relevant) return; if (this._pdfHlRefreshT) clearTimeout(this._pdfHlRefreshT); this._pdfHlRefreshT = setTimeout(async () => { this._pdfHlRefreshT = null; if (this.destroyed) return; try { await this._loadPdfRegionHighlights(); } catch (_e) {} if (this.destroyed) return; if (!this._pdfBlocksFromCluster) { try { await this._loadPdfParsedBlocks(); } catch (_e) {} } if (this.destroyed) return; if (this._pdfOutlineEl) { try { await this._showPdfOutline(); } catch (_e) {} } if (this.destroyed) return; if (this._srcPanelEl) { try { await this._showSourcesPanel(); } catch (_e) {} } if (!this.destroyed) this.dirty = true; }, 400); } catch (_e) {} }; const evOpts = hlColGuid ? { collection: hlColGuid } : { collection: '*' }; const ids = []; for (const ev of ['record.created', 'record.updated']) { try { const id = this.plugin.events.on(ev, onHlChange, evOpts); if (id != null) ids.push(id); } catch (_e) {} } this._pdfHlSubIds = ids; })().catch(() => {}); } catch (_e) {} // Wave B: live-sync PDF Highlight records → refresh overlays + panels per-view; trashed/missing records force one debounced rebuild only when the collection-scoped subscription is available
   }
   _buildToolbar() {
     const cfg = this._toolbarCfg || (this._toolbarCfg = loadToolbarConfig());
@@ -6566,7 +6567,7 @@ class CanvasView {
         if (h.orphaned) { const o = document.createElement('span'); o.className = 'pxc-pdf-toc-cnt'; o.textContent = '⚠'; o.title = 'detached — the text could not be re-found in the PDF (re-highlight to re-anchor)'; o.style.color = '#f59e0b'; row.appendChild(o); } // #16: orphan badge
         if (h.note) { const n = document.createElement('span'); n.className = 'pxc-pdf-toc-cnt'; n.textContent = '💬'; n.title = 'has a note'; row.appendChild(n); } // P0: note indicator
         if (h.page != null) { const pg = document.createElement('span'); pg.className = 'pxc-pdf-toc-pg'; pg.textContent = 'p' + h.page; row.appendChild(pg); }
-        const openPdf = document.createElement('button'); openPdf.className = 'pxc-pdf-toc-open'; openPdf.textContent = '↗ PDF'; openPdf.title = 'Open in PDF panel'; openPdf.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); void this._openInPdfPanel({ fingerprint: h.fingerprint, page: h.page, frac: h.frac, hid: h.hid, guid: h.guid }, () => this._jumpToPdfHighlight(h)); }); row.appendChild(openPdf);
+        if (typeof window !== 'undefined' && window.__pdfhl && typeof window.__pdfhl.jumpTo === 'function') { const openPdf = document.createElement('button'); openPdf.className = 'pxc-pdf-toc-open'; openPdf.textContent = '↗ PDF'; openPdf.title = 'Open in PDF panel'; openPdf.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); void this._openInPdfPanel({ fingerprint: h.fingerprint, page: h.page, frac: h.frac, hid: h.hid, guid: h.guid }, () => this._jumpToPdfHighlight(h)); }); row.appendChild(openPdf); }
         row.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); this._jumpToPdfHighlight(h); });
         ul.appendChild(row);
         if (h.note) { const nr = document.createElement('div'); nr.className = 'pxc-pdf-toc-note'; nr.textContent = h.note; ul.appendChild(nr); } // P0: the note preview, indented under the highlight
@@ -6617,19 +6618,26 @@ class CanvasView {
   async _openInPdfPanel(target, fallback) {
     if (this.destroyed) return false;
     const pdfhl = (typeof window !== 'undefined') && window.__pdfhl;
+    let siblingStatus = 'missing';
     if (pdfhl && typeof pdfhl.jumpTo === 'function') {
+      siblingStatus = 'declined';
       try { if (await pdfhl.jumpTo(target || {})) return !this.destroyed; }
-      catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} }
+      catch (err) { siblingStatus = 'error'; try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} }
     }
     if (this.destroyed) return false;
-    try { if (fallback) fallback(); } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} }
-    try { this.plugin.ui.addToaster({ title: 'Plexus: the PDF panel is unavailable — showing the source on this canvas.', dismissible: true }); } catch (_e) {}
-    return false;
+    let shownHere = false;
+    try { shownHere = !!(fallback && fallback()); } catch (err) { try { window.__PXC_LAST_ERROR = String(err && err.stack || err); } catch (_e) {} }
+    let title = '';
+    if (shownHere) title = siblingStatus === 'declined' ? 'Plexus: that PDF is not open in the PDF panel — showing the source on this canvas.' : 'Plexus: the PDF panel is unavailable — showing the source on this canvas.';
+    else title = siblingStatus === 'declined' ? 'Plexus: that PDF is not open in the PDF panel, and the source is not on this canvas.' : 'Plexus: the source could not be shown in the PDF panel or on this canvas.';
+    try { this.plugin.ui.addToaster({ title, dismissible: true }); } catch (_e) {}
+    return shownHere && !this.destroyed;
   }
   // C-1: jump to a highlight — to its on-canvas figure if it's still there (Scene Element Id), else fly to its page.
   _jumpToPdfHighlight(h) {
-    if (h && h.sid) { const el = (this.scene.elements || []).find((e) => e && e.id === h.sid && !e.isDeleted); if (el) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return; } }
-    const docId = this._activePdfDocId(); if (docId && h && h.page) this._jumpToPdfPage(docId, h.page);
+    if (h && h.sid) { const el = (this.scene.elements || []).find((e) => e && e.id === h.sid && !e.isDeleted); if (el) { this._fitToBounds({ x: Math.min(el.x, el.x + el.width), y: Math.min(el.y, el.y + el.height), w: Math.abs(el.width) || 1, h: Math.abs(el.height) || 1 }, 40); return true; } }
+    const docId = this._activePdfDocId(); if (docId && h && h.page && this._pdfPagesOf(docId).some((p) => p.pdf && p.pdf.page === h.page)) { this._jumpToPdfPage(docId, h.page); return true; }
+    return false;
   }
   // PLEXUS #20: "Explode PDF highlights onto the canvas" — query this PDF's highlights (cross-surface, by fingerprint), group
   // by C26 outline Section, and lay them out as a section-columned mind-map: a central PDF node, a titled frame per section,
@@ -10744,7 +10752,7 @@ class CanvasView {
     let frac = null; try { frac = this._imgRegionFrac(pageEl, rect); } catch (_e) {}
     if (!frac) { try { this.plugin.ui.addToaster({ title: 'Plexus: drag the box over the PDF page.', dismissible: true }); } catch (_e) {} return; }
     const pdf = pageEl.pdf, col = color || this._pdfHlColor || 'yellow';
-    const region = { guid: null, hid: 'rh' + Math.floor(this._now()).toString(36), docId: pdf.docId || null, fingerprint: pdf.fingerprint || null, page: pdf.page || null, frac, color: col };
+    const region = { guid: null, hid: 'rh' + Date.now().toString(36) + '-' + (++PXC_REGION_HID_SEQ).toString(36), docId: pdf.docId || null, fingerprint: pdf.fingerprint || null, page: pdf.page || null, frac, color: col };
     if (!this._pdfHlRegions) this._pdfHlRegions = [];
     this._pdfHlRegions.push(region); this.dirty = true; // optimistic: show it immediately, before the record write returns
     const collection = await this.plugin._pdfHlCollection(); if (this.destroyed) return;
@@ -10796,7 +10804,9 @@ class CanvasView {
     return null;
   }
   _regionHlMenu(region, sx, sy) {
-    const rows = [{ txt: '↗ Open in PDF panel', fn: () => { this._closeRegionChoice(); void this._openInPdfPanel({ fingerprint: region.fingerprint, page: region.page, frac: region.frac, hid: region.hid, guid: region.guid }, () => this._gotoRegionHighlight(region)); } }, { txt: '🗑 Remove highlight', fn: () => { this._closeRegionChoice(); this._deleteRegionHighlight(region); } }];
+    const rows = [];
+    if (typeof window !== 'undefined' && window.__pdfhl && typeof window.__pdfhl.jumpTo === 'function') rows.push({ txt: '↗ Open in PDF panel', fn: () => { this._closeRegionChoice(); void this._openInPdfPanel({ fingerprint: region.fingerprint, page: region.page, frac: region.frac, hid: region.hid, guid: region.guid }, () => this._gotoRegionHighlight(region)); } });
+    rows.push({ txt: '🗑 Remove highlight', fn: () => { this._closeRegionChoice(); this._deleteRegionHighlight(region); } });
     for (const key of ['yellow', 'green', 'blue', 'pink', 'orange']) rows.push({ txt: '● ' + key, on: region.color === key, fn: () => { this._closeRegionChoice(); this._recolorRegionHighlight(region, key); } });
     this._showNestingChoice('Highlight', rows, sx, sy);
   }
@@ -10829,8 +10839,8 @@ class CanvasView {
     for (const rec of recs) {
       if (!rec || !rec.guid) continue;
       const ad = this._readHlAnchor(rec); if (!ad || !ad.frac) continue;
-      const hid = this._propText(rec, 'Highlight Id'); const anchorKind = ad.kind || (hid && hid.indexOf('rh') === 0 ? 'region' : '');
-      if (anchorKind !== 'region') continue; // v1 records had no schema version and may have omitted kind; infer only the legacy rh* region shape
+      const hid = this._propText(rec, 'Highlight Id');
+      if (ad.kind !== 'region') continue;
       const fp = this._propText(rec, 'PDF Fingerprint'); const docId = fpToDoc.get(fp); if (!docId) continue;
       let page = null; try { const p = rec.prop('Page'); page = p && p.number ? p.number() : null; } catch (_e) {}
       let color = ''; try { const p = rec.prop('Color'); color = (p && p.choiceLabel && p.choiceLabel()) || ''; } catch (_e) {}
@@ -10985,7 +10995,7 @@ class CanvasView {
     const copyBtn = document.createElement('button'); copyBtn.className = 'pxc-rc-btn'; copyBtn.textContent = 'Copy'; copyBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); try { navigator.clipboard.writeText(block.text || ''); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block text copied.', dismissible: true }); } catch (_e2) {} }); footer.appendChild(copyBtn);
     // JUMP-TO-PDF: fly the camera to this block's page region + pulse it (reuses _flashAnchor).
     const gotoBtn = document.createElement('button'); gotoBtn.className = 'pxc-rc-btn'; gotoBtn.textContent = '⤢ Go to page'; gotoBtn.title = 'Frame + flash this block on its PDF page'; gotoBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); try { this._gotoParsedBlock(block); } catch (_e) {} }); footer.appendChild(gotoBtn);
-    const openPdfBtn = document.createElement('button'); openPdfBtn.className = 'pxc-rc-btn'; openPdfBtn.textContent = '↗ Open in PDF panel'; openPdfBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); void this._openInPdfPanel({ fingerprint: block.fingerprint, page: block.page, frac: block.frac, hid: block.hid || block.guid, guid: block.guid }, () => this._gotoParsedBlock(block)); }); footer.appendChild(openPdfBtn);
+    if (typeof window !== 'undefined' && window.__pdfhl && typeof window.__pdfhl.jumpTo === 'function') { const openPdfBtn = document.createElement('button'); openPdfBtn.className = 'pxc-rc-btn'; openPdfBtn.textContent = '↗ Open in PDF panel'; openPdfBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); this._closeParsedBlockPopup(); void this._openInPdfPanel({ fingerprint: block.fingerprint, page: block.page, frac: block.frac, hid: block.hid || block.guid, guid: block.guid }, () => this._gotoParsedBlock(block)); }); footer.appendChild(openPdfBtn); }
     // SEND TO BOARD (Heptabase dissect): drop this single block as a real text card beside its PDF page.
     const sendBtn = document.createElement('button'); sendBtn.className = 'pxc-rc-btn'; sendBtn.textContent = '→ Card'; sendBtn.title = 'Drop this block as a card on the board';
     sendBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); let pageEl = null; try { pageEl = this._pdfPageElMap().get(block.docId + ':' + block.page); } catch (_e) {} try { this._dropExtractCard(pageEl || null, block.kind || 'text', block.text || '', 8000); } catch (_e) {} this._closeParsedBlockPopup(); try { this.plugin.ui.addToaster({ title: 'Block sent to the board.', dismissible: true }); } catch (_e2) {} });
@@ -12256,7 +12266,7 @@ class Plugin extends AppPlugin {
         note.appendChild(msg); note.appendChild(btn); note.appendChild(hint); host.appendChild(note);
       } catch (_e) {}
     } // HOT-RELOAD GUARD (v1.114): one-click reload instead of a text-only note — the dead-canvas state recovers in a single click
-    try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; /* S9: free decoded bitmaps */
+    try { this._reg.dispose(); } catch (_e) {} try { window.removeEventListener('pagehide', this._onPageHide); } catch (_e) {} this._secrets = null; this._imgCache = null; try { window.__PXC_LAST_ERROR = null; } catch (_e) {} /* S9: free decoded bitmaps · clear forensic error state */
   }
   onUnload() { this._teardown(); window.__plexusCanvas = undefined; }
   _ensureRenderLoop() { if (!this._renderRaf && this._views && this._views.size && this._renderTick) this._renderRaf = requestAnimationFrame(this._renderTick); }
@@ -12288,13 +12298,16 @@ class Plugin extends AppPlugin {
         const fpToDoc = new Map();
         for (const el of ((view.scene && view.scene.elements) || [])) if (el && el.type === 'image' && el.pdf && !el.isDeleted && el.pdf.fingerprint && el.pdf.docId && !fpToDoc.has(el.pdf.fingerprint)) fpToDoc.set(el.pdf.fingerprint, el.pdf.docId);
         const docId = fpToDoc.get(fingerprint); if (!docId || view.destroyed) continue;
+        const pageWasRequested = req.page != null;
         let page = req.page, frac = req.frac || null;
         if ((!page || !frac) && (req.hid || req.guid)) {
           const all = [...(view._pdfHlRegions || []), ...(view._pdfParsedBlocks || [])];
-          const hit = all.find((x) => x && ((req.hid && x.hid === req.hid) || (req.guid && x.guid === req.guid)));
+          const hit = all.find((x) => x && x.docId === docId && ((req.hid && x.hid === req.hid) || (req.guid && x.guid === req.guid)));
           if (hit) { if (!page) page = hit.page; if (!frac) frac = hit.frac || null; }
         }
-        const pages = view._pdfPagesOf(docId); const pageEl = pages.find((p) => p.pdf && p.pdf.page === page) || pages[0];
+        const pages = view._pdfPagesOf(docId); const matchedPage = pages.find((p) => p.pdf && p.pdf.page === page);
+        if (pageWasRequested && !matchedPage) continue;
+        const pageEl = matchedPage || pages[0];
         if (!pageEl || view.destroyed) continue;
         view._flashAnchor(frac ? { el: pageEl.id, inImage: true, frac } : { el: pageEl.id });
         return !view.destroyed;
@@ -13457,6 +13470,7 @@ class Plugin extends AppPlugin {
   _installTestHooks() {
     window.__plexusCanvas.test = {
       newDrawing: () => this._newDrawing(),
+      lastError: () => { try { return window.__PXC_LAST_ERROR || null; } catch (_e) { return null; } },
       // DIAGNOSTIC (round-4): read the active drawing's state — element-type histogram, the selected element(s), and every
       // connection's endpoints — so a maintainer can inspect the live scene without reaching the encapsulated CanvasView.
       dump: () => {
